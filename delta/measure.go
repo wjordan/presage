@@ -53,6 +53,7 @@ func Predict(old, new []byte) (*Prediction, error) {
 // extent of a whole descriptor (N is then the descriptor's size).
 type TypeSite struct {
 	Off  int
+	Old  int // the field's offset in the old binary's type section
 	N    int
 	Role byte
 }
@@ -79,7 +80,7 @@ func (p *Prediction) TypeSites() []TypeSite {
 		if q < 0 || q+int64(n) > int64(ns.Size) {
 			return
 		}
-		out = append(out, TypeSite{Off: int(ns.Off + uint64(q)), N: n, Role: role})
+		out = append(out, TypeSite{Off: int(ns.Off + uint64(q)), Old: int(off), N: n, Role: role})
 	}
 	w.roots()
 	for len(w.queue) > 0 {
