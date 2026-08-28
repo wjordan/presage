@@ -240,6 +240,157 @@ Two lessons the prototype carries into the design:
   encoder/decoder divergence is detected, and a wrong prediction costs
   bytes, never a wrong output.
 
+#### 3.2.1 Segment map for resized functions
+
+The `predict .text` row above copies a matched old body *positionally* — byte
+k of the old body lands at byte k of the new one — and relocates the whole
+body as if it had moved by one constant. That is right for a function that
+only moved, and wrong from the first inserted byte onwards for a function
+that was edited: every later instruction is copied to the wrong offset *and*
+relocated with the wrong PC, so the residual pays for it twice. Attribution
+measured the size of that on the 3.13.2→3.14.0 minor pair: 721 resized
+matched functions — 0.62 % of the function count, 3.5 % of `.text` — hold
+47 % of the `.text` residual at 76 % density, and 58.4 % of the `.text`
+residual outside a relocated field sits where the prediction is not even on
+an instruction boundary (`go-residual-attribution.md` §3, §8).
+
+The fix is to stop assuming one shift per function. A resized matched
+function carries a **segment map** in the layout — a short list of
+`(old offset, new offset, length)` pieces — and the decoder lays the body down
+piece by piece at its true new position, relocating each piece at its own PC.
+
+**Encoder.** For every matched pair whose layout sizes differ: canonicalise
+both bodies (one decode pass, every PC-relative field zeroed *in place*
+through `x86.pcrelField` — the same walk `ContentHash` uses, so masking means
+one thing everywhere and offsets stay offsets into the raw body; it also
+covers the VEX/EVEX rip forms probe A's own canonicaliser missed, so the
+shipped alignment can only beat the measured one). Then hash a 12-byte window
+at every instruction boundary of the old body (≤ 8 candidate positions per
+hash), look up each new boundary's window, keep the longest chain of anchors
+monotone in both bodies (patience/LIS; bodies average 2 KB), grow each anchor
+byte-wise both ways, merge neighbours that share a shift across up to 16
+mismatching bytes, and snap each surviving piece's start forward and its end
+back to an instruction boundary of the old body, so that a piece decodes as
+instructions when the decoder restarts there.
+
+Pricing, in the pair's own yardstick (≈ 0.6 B per correction run + 0.24 B per
+wrong byte compressed, `go-residual-attribution.md` §1): a piece entry cost
+1.65 B compressed in the columns below and a piece can split a correction run
+at each end, so it must fix (1.65 + 2 × 0.606) / 0.244 ≈ 12 bytes to pay for
+itself. **Drop any piece shorter than 12 B** — which is the anchor window, so
+the rule only bites after clipping and merging. Drop, too, every piece whose
+shift is zero: the decoder's fill already produces exactly those bytes, so
+they are free by omission (244,060 of the 1,018,575 covered bytes in the minor
+pair's resized bodies are at shift 0, the first piece — old 0 → new 0 —
+normally among them). A function with no surviving piece carries no map.
+
+**Wire format.** The layout (`delta/layout.go`) gains one field after the
+function op stream — a sparse list, five contiguous varint columns, for the
+same reason the correction splits `ctrl` from `lit`: the five have statistics
+an order of magnitude apart and each compresses against itself.
+
+```
+segmap := uvarint nmapped                 functions carrying a map
+          uvarint idxGap × nmapped        new function index, delta-coded
+          uvarint nseg   × nmapped        pieces in that function, ≥ 1
+          uvarint gap    × Σnseg          newOff − end of the previous piece
+          uvarint len    × Σnseg          piece length
+          varint  shift  × Σnseg          (oldOff−newOff) − the previous piece's,
+                                          per function, starting from 0
+```
+
+Measured on probe A's lists, before shift-0 pieces are dropped: 720 functions
+/ 13,709 pieces = 23,176 B under `xz -9e`, 23,869 B under the codec's own
+compressor — ~1.6 % of the minor patch; 25 functions / 434 pieces = 1,252 B /
+1,198 B on the patch pair. The decoder bounds-checks everything: indices
+strictly increasing and below `NFunc`, the function matched, pieces strictly
+monotone and non-overlapping in *both* bodies, `newOff+len` within the new
+size and `oldOff+len` within the old one; anything else is `errCorrupt`. The
+layout is a new shape, so the transform number becomes 2 and §3.6 does the
+rest — a decoder that implements only transform 1 is served a transform-1
+patch, or falls back to the blob.
+
+**Decoder.** A mapped function's *covering list* is its transmitted pieces
+plus an implicit shift-0 piece over every new byte they do not cover.
+`predictText` INT3-fills the new body and then calls today's `x86.Relocate`
+once per piece, with `code = oldBody[oldOff:oldOff+len]`,
+`out = newBody[newOff:newOff+len]`, `srcPC = f.Entry+oldOff` and
+`dstPC = g.Entry+newOff`. `Relocate` copies before it relocates, so assembly
+and relocation stay one pass over the body with no second buffer, and a
+function without a map is a single implicit piece — exactly the call made
+today. Gaps therefore hold the positional copy rather than zeroes: that is
+what makes a shift-0 piece free to omit, and the positional copy is already
+right for 438,457 of the 1,512,992 bytes in the minor pair's resized bodies,
+mostly the head before the first edit. The choice does not move the ceiling —
+probe A charges every uncovered byte to the scheme in full either way. An
+implicit piece after the first starts at an arbitrary offset and its decode
+can be out of phase; the bytes it covers are inserted code with no old
+counterpart, which the correction pays for regardless.
+
+**Addressing.** `mapper.mapAddrBase` (`delta/reloc.go`) makes the same
+positional assumption on the *target* side: an old address inside a matched
+function becomes `g.Entry + (t − f.Entry)`. A branch into a resized function,
+and a back-edge inside one (`rcTextSelf`), must go through that function's
+map. `newMapper` keeps the decoded maps by new function index, and for an old
+offset `o = t − f.Entry` the lookup is, in order:
+
+1. a transmitted piece with `oldOff ≤ o < oldOff+len` → `newOff + (o−oldOff)`;
+2. else, if `o` is below the new size and no transmitted piece covers *new*
+   offset `o` → `o`, the implicit piece;
+3. else → `o` plus the preceding piece's shift, clamped into the new body.
+
+Transmitted pieces take precedence, which is what makes this the inverse of
+the covering list; case 3 is an old byte that was deleted or displaced, where
+every answer is a guess and only determinism matters, and the clamp keeps the
+result inside the function. Two binary searches over a list of tens of
+entries, for the 0.6 % of functions that have one. Everything else that asks
+the mapper — data pointers into the middle of a function, jump tables in
+`.rodata`, `go:func.*` wrapinfo, the descriptors' `textOff` — gets the finer
+map for free, which is the point of having one mapper. `deriveOverrides` runs
+*after* the maps are built and with them installed in its own mapper, so the
+override table does not spend two varints re-fixing a target the map already
+places.
+
+**Determinism.** The aligner runs on the encoder only; the decoder reads a
+list. A bad alignment costs bytes, never correctness (§3.1), and the
+prediction hash in the patch body still turns a divergence into a named
+failure (§3.7). Alignment is per function and order-independent, so the
+fan-out constant does not change the patch, and candidate lists are kept in
+position order rather than map order. `x86.ContentHash` and `x86.Equal` are
+untouched: they price whole bodies for `matchFuncs`, they run before any
+alignment, and `Equal` requires equal lengths so it never meets a resized
+pair. The map changes how a matched body is laid down, never which functions
+are matched.
+
+**Scope.** Name- or normalised-name-matched pairs whose layout sizes differ,
+and nothing else. Non-goals:
+
+- *Same-length matched functions.* 8,501,811 of their 8,616,525 alignable
+  bytes are already at offset 0; the fitted net is +9,100 B on the minor pair
+  and +201 B on the patch pair, and reaching it means canonicalising all
+  110 K functions — the whole of `.text` rather than 3.5 % of it. Growth that
+  fits inside a function's 32-byte padding lands in this bucket and is left
+  there.
+- *Unmatched functions* (no old body to segment) and *non-`.text` sections*
+  (the data maps already shift piecewise, at 16-byte granularity).
+- The `deferreturn` word of a `_func` record is a within-function PC offset
+  the same map could re-base. That is a pclntab change, not this one.
+
+**Expected effect.** Net **+70,013 B measured / +86,463 B fitted** on the
+minor pair (4.8–5.9 %) and **+2,087 / +5,611** on the patch release
+(2.2–6.0 %), both after paying for the segment list; the two synthetic pairs
+are one resized function each and would gain tens of bytes. The ceiling is a
+marginal measurement rather than an estimate — the bucket's wrong bytes are
+reverted to the prediction and the whole patch re-encoded and re-compressed,
+with the segment list and the fitted price of what alignment would still
+leave wrong subtracted from the difference (`go-residual-attribution.md` §8).
+It was measured against patches of 1,467,993 B and 93,965 B, since reduced to
+1,454,272 B and 82,288 B. Two things bound it: 494,417 of the 1,512,992 bytes
+in the minor pair's resized bodies (32.7 %) have no old counterpart at any
+offset — that is the actual code change — and fragmentation, which takes the
+wrong bytes from 1,152,688 to 632,149 but the correction runs from 10,451 to
+39,239, eating 23,779 B of the gain at 0.6 B a run.
+
 ### 3.3 Why no suffix array
 
 Once the layout table is applied the prediction has **exactly** the new
