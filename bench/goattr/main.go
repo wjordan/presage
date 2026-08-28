@@ -18,6 +18,12 @@
 //	4  .text by instruction and operand class, outside fields
 //	5  .go.type by descriptor field
 //	6  is the new code elsewhere in the old image (minor pair only)
+//	7  the sub-function alignment ceiling for resized functions
+//	8  .gopclntab by subtable and by _func field
+//	9  .go.type new descriptors by kind, and whether they are derivable
+//
+// Levels 7-9 are the ceiling probes for the three candidate layers; 7 prices
+// itself with the yardstick level 1 fits, so run it with 1.
 package main
 
 import (
@@ -44,7 +50,7 @@ var (
 	label    = flag.String("label", "", "name for this pair in the report")
 	cacheDir = flag.String("cache", "", "directory for the cached prediction")
 	jobs     = flag.Int("jobs", 4, "concurrent marginal-cost measurements")
-	levels   = flag.String("levels", "123456", "which ladders to print")
+	levels   = flag.String("levels", "123456789", "which ladders to print")
 	dictWin  = flag.Int("dict-window", 0, "cap the level-6 dictionary at this many bytes (0 = whole .text)")
 )
 
@@ -84,6 +90,15 @@ func main() {
 	}
 	if has('6') {
 		c.dictionary(*dictWin)
+	}
+	if has('7') {
+		c.alignment()
+	}
+	if has('8') {
+		c.pclnRegions()
+	}
+	if has('9') {
+		c.typeKinds()
 	}
 }
 

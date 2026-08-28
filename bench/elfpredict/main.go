@@ -769,6 +769,10 @@ var onlyRungs, onlyProbes map[string]bool
 
 var dictProbeWindow int
 
+// dumpDir receives each rung's whole-image prediction under the "dump"
+// probe, for external per-region analysis.
+var dumpDir string
+
 func wantRung(name string) bool { return onlyRungs == nil || onlyRungs[name] }
 
 // wantLateRungs reports whether anything downstream of the plain retargeting
@@ -1020,6 +1024,7 @@ func run() error {
 	}
 
 	var combined *combinedReport
+	dumpDir = *outDir
 	if *equivalencePatch != "" {
 		var art planArtifacts
 		combined, art, err = runCombined(*equivalencePatch, oldImage, newImage, mappedPlan, mappedPlanBytes, mappedRelocPred, *outDir, *reference)
@@ -1150,6 +1155,11 @@ func main() {
 func runProbes(name string, planBytes, pred, target []byte, oldImage, newImage *image, structureBytes []byte, structure predictionPlan) {
 	nt := newImage.Text
 	predText, targetText := pred[nt.Off:nt.Off+nt.Size], target[nt.Off:nt.Off+nt.Size]
+	if onlyProbes["dump"] {
+		if err := writeFile(dumpDir, "whole-image-"+name+".prediction", pred); err != nil {
+			fmt.Fprintf(os.Stderr, "probe dump FAILED: %v\n", err)
+		}
+	}
 	if onlyProbes["chunks"] && name == "structurally-retargeted" {
 		sp, _, err := predict(oldImage.textBytes(), structureBytes, true)
 		if err != nil {
