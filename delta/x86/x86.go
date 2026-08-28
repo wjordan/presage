@@ -9,10 +9,107 @@ package x86
 
 import (
 	"encoding/binary"
+	"errors"
 	"hash/fnv"
 
 	"golang.org/x/arch/x86/x86asm"
 )
+
+var errDecodePanic = errors.New("x86 decoder rejected input")
+
+// decode contains failures in the third-party decoder. A structural boundary
+// can legally leave an instruction-looking byte sequence truncated; that is
+// correction data, not a reason for patch generation or application to panic.
+func decode(code []byte) (inst x86asm.Inst, err error) {
+	defer func() {
+		if recover() != nil {
+			inst = x86asm.Inst{}
+			err = errDecodePanic
+		}
+	}()
+	return x86asm.Decode(code, 64)
+}
+
+// pcrelField returns where inst's PC-relative displacement sits inside code,
+// whose first byte is the instruction's. n is 0 when there is none. Offsets
+// follow x86asm's convention: relative to the instruction, with the target at
+// pc + off-of-instruction + inst.Len + disp, so RIP is read after any trailing
+// immediate.
+//
+// x86asm fills in PCRelOff/PCRel for the legacy encodings only. A VEX- or
+// EVEX-encoded rip-relative memory operand comes back with PCRel zero and the
+// operand's Base register empty, so a gate that keys off PCRel never sees it
+// -- and in Chrome those are 14,392 sites, every one a .rodata constant-pool
+// load. The second half below walks the encoding as far as the modrm byte and
+// reads the rip form (mod=00 rm=101) straight out of it.
+func pcrelField(inst x86asm.Inst, code []byte) (off, n int) {
+	if inst.Len <= 0 || inst.Len > len(code) {
+		return 0, 0
+	}
+	if inst.PCRel > 0 {
+		if inst.PCRelOff < 0 || inst.PCRelOff+inst.PCRel > inst.Len {
+			return 0, 0
+		}
+		return inst.PCRelOff, inst.PCRel
+	}
+	i := 0
+	for i < inst.Len && isLegacyPrefix(code[i]) {
+		i++
+	}
+	if i >= inst.Len {
+		return 0, 0
+	}
+	// In 64-bit mode these three opcodes are always the vector prefixes; the
+	// legacy instructions that used them do not exist. Each is followed by a
+	// fixed number of payload bytes, then the opcode, then the modrm -- every
+	// VEX and EVEX form has one.
+	var modrm int
+	switch code[i] {
+	case 0xC5: // VEX2:  c5 payload op modrm
+		modrm = i + 3
+	case 0xC4: // VEX3:  c4 payload payload op modrm
+		modrm = i + 4
+	case 0x62: // EVEX:  62 payload payload payload op modrm
+		modrm = i + 5
+	default:
+		return 0, 0
+	}
+	if modrm >= inst.Len {
+		return 0, 0
+	}
+	// mod=00 rm=101 is rip+disp32. rm is not 4, so no SIB byte intervenes and
+	// the displacement starts at the following byte.
+	if code[modrm]>>6 != 0 || code[modrm]&7 != 5 {
+		return 0, 0
+	}
+	if off = modrm + 1; off+4 > inst.Len {
+		return 0, 0
+	}
+	return off, 4
+}
+
+// isLegacyPrefix reports whether b is one of the prefix bytes that may precede
+// an opcode. REX is deliberately absent: it never precedes a vector prefix.
+func isLegacyPrefix(b byte) bool {
+	switch b {
+	case 0xF0, 0xF2, 0xF3, 0x2E, 0x36, 0x3E, 0x26, 0x64, 0x65, 0x66, 0x67:
+		return true
+	}
+	return false
+}
+
+// disp reads a signed little-endian field of n bytes.
+func disp(fld []byte) int64 {
+	switch len(fld) {
+	case 1:
+		return int64(int8(fld[0]))
+	case 2:
+		return int64(int16(binary.LittleEndian.Uint16(fld)))
+	case 4:
+		return int64(int32(binary.LittleEndian.Uint32(fld)))
+	}
+	return 0
+}
 
 // Target is what the caller knows about an old address.
 type Target struct {
@@ -51,6 +148,43 @@ type Ref struct {
 	N   int // field width in bytes
 }
 
+// Reference is a decoded PC-relative operand and its absolute target.
+type Reference struct {
+	Start  int
+	Off    int
+	N      int
+	Next   int
+	Target uint64
+}
+
+// References returns the PC-relative operands in code. As with Relocate,
+// undecodable bytes are skipped rather than making structural probing fail.
+func References(code []byte, pc uint64) []Reference {
+	var refs []Reference
+	WalkReferences(code, pc, func(ref Reference) { refs = append(refs, ref) })
+	return refs
+}
+
+// WalkReferences visits PC-relative operands without retaining a potentially
+// large reference table.
+func WalkReferences(code []byte, pc uint64, visit func(Reference)) {
+	for i := 0; i < len(code); {
+		inst, err := decode(code[i:])
+		if err != nil || inst.Len == 0 {
+			i++
+			continue
+		}
+		if off, n := pcrelField(inst, code[i:]); n == 1 || n == 2 || n == 4 {
+			d := disp(code[i+off : i+off+n])
+			visit(Reference{
+				Start: i, Off: i + off, N: n, Next: i + inst.Len,
+				Target: uint64(int64(pc) + int64(i) + int64(inst.Len) + d),
+			})
+		}
+		i += inst.Len
+	}
+}
+
 // Relocate copies code (which lives at srcPC in the old binary) into out
 // (which lives at dstPC in the new one) and re-targets every PC-relative
 // operand through lookup. out is filled to its full length: short code is
@@ -64,64 +198,56 @@ func Relocate(code, out []byte, srcPC, dstPC uint64, lookup func(target uint64) 
 	n := copy(out, code)
 	code = code[:n]
 	for i := 0; i < len(code); {
-		inst, err := x86asm.Decode(code[i:], 64)
+		inst, err := decode(code[i:])
 		if err != nil || inst.Len == 0 {
 			st.Fails++
 			i++
 			continue
 		}
 		st.Insns++
-		if inst.PCRel > 0 && i+inst.PCRelOff+inst.PCRel <= len(code) {
-			relocOne(code, out, i, inst, srcPC, dstPC, lookup, st)
+		if off, n := pcrelField(inst, code[i:]); n > 0 {
+			relocOne(code, out, i, off, n, inst.Len, srcPC, dstPC, lookup, st)
 			if refs != nil {
-				*refs = append(*refs, Ref{i + inst.PCRelOff, inst.PCRel})
+				*refs = append(*refs, Ref{i + off, n})
 			}
 		}
 		i += inst.Len
 	}
 }
 
-func relocOne(code, out []byte, i int, inst x86asm.Inst, srcPC, dstPC uint64, lookup func(uint64) Target, st *Stats) {
-	fld := code[i+inst.PCRelOff : i+inst.PCRelOff+inst.PCRel]
-	var disp int64
-	switch inst.PCRel {
-	case 1:
-		disp = int64(int8(fld[0]))
-	case 2:
-		disp = int64(int16(binary.LittleEndian.Uint16(fld)))
-	case 4:
-		disp = int64(int32(binary.LittleEndian.Uint32(fld)))
-	default:
+func relocOne(code, out []byte, i, off, n, length int, srcPC, dstPC uint64, lookup func(uint64) Target, st *Stats) {
+	if n != 1 && n != 2 && n != 4 {
 		return
 	}
+	d := disp(code[i+off : i+off+n])
 	st.Refs++
-	next := int64(inst.Len)
-	target := uint64(int64(srcPC) + int64(i) + next + disp)
+	next := int64(length)
+	target := uint64(int64(srcPC) + int64(i) + next + d)
 	t := lookup(target)
 	if !t.Known {
 		st.Unknown++
 		return
 	}
 	nd := int64(t.Addr) - (int64(dstPC) + int64(i) + next)
-	switch inst.PCRel {
+	switch n {
 	case 1:
 		if nd < -128 || nd > 127 {
 			st.NoFit++
 			return
 		}
-		out[i+inst.PCRelOff] = byte(int8(nd))
+		out[i+off] = byte(int8(nd))
 	case 2:
 		if nd < -32768 || nd > 32767 {
 			st.NoFit++
 			return
 		}
-		binary.LittleEndian.PutUint16(out[i+inst.PCRelOff:], uint16(int16(nd)))
+		binary.LittleEndian.PutUint16(out[i+off:], uint16(int16(nd)))
 	case 4:
 		if nd < -1<<31 || nd >= 1<<31 {
 			st.NoFit++
 			return
 		}
-		binary.LittleEndian.PutUint32(out[i+inst.PCRelOff:], uint32(int32(nd)))
+		binary.LittleEndian.PutUint32(out[i+off:], uint32(int32(nd)))
 	}
 }
 
@@ -136,16 +262,16 @@ func ContentHash(code []byte) uint64 {
 	h.Write(buf[:])
 	var zero [8]byte
 	for i := 0; i < len(code); {
-		inst, err := x86asm.Decode(code[i:], 64)
+		inst, err := decode(code[i:])
 		if err != nil || inst.Len == 0 {
 			h.Write(code[i : i+1])
 			i++
 			continue
 		}
-		if inst.PCRel > 0 && i+inst.PCRelOff+inst.PCRel <= len(code) {
-			h.Write(code[i : i+inst.PCRelOff])
-			h.Write(zero[:inst.PCRel])
-			h.Write(code[i+inst.PCRelOff+inst.PCRel : i+inst.Len])
+		if off, n := pcrelField(inst, code[i:]); n > 0 {
+			h.Write(code[i : i+off])
+			h.Write(zero[:n])
+			h.Write(code[i+off+n : i+inst.Len])
 		} else {
 			h.Write(code[i:min(i+inst.Len, len(code))])
 		}
@@ -162,7 +288,7 @@ func Equal(a, b []byte) bool {
 		return false
 	}
 	for k := 0; k < len(a); {
-		inst, err := x86asm.Decode(a[k:], 64)
+		inst, err := decode(a[k:])
 		if err != nil || inst.Len == 0 {
 			if a[k] != b[k] {
 				return false
@@ -171,8 +297,8 @@ func Equal(a, b []byte) bool {
 			continue
 		}
 		end := min(k+inst.Len, len(a))
-		if inst.PCRel > 0 && k+inst.PCRelOff+inst.PCRel <= len(a) {
-			lo, hi := k+inst.PCRelOff, k+inst.PCRelOff+inst.PCRel
+		if off, n := pcrelField(inst, a[k:]); n > 0 {
+			lo, hi := k+off, k+off+n
 			if string(a[k:lo]) != string(b[k:lo]) || string(a[hi:end]) != string(b[hi:end]) {
 				return false
 			}
