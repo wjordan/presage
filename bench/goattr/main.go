@@ -24,6 +24,8 @@
 //	0  level 10: .go.type method tables and changed-descriptor fields
 //	a  level 11: replaying the linker's pctab allocation for the _func
 //	   pc-table slots the codec has to invent
+//	b  level 12: aligning a descriptor's method table by name instead of
+//	   copying it positionally
 //
 // Levels 7-9 are the ceiling probes for the three candidate layers; 7 prices
 // itself with the yardstick level 1 fits, so run it with 1.
@@ -108,6 +110,9 @@ func main() {
 	}
 	if has('a') {
 		c.pctabReplay()
+	}
+	if has('b') {
+		c.typeAlign()
 	}
 }
 

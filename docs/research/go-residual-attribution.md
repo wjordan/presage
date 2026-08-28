@@ -744,7 +744,163 @@ patch pair, against the +15,511 and +301 those slots are worth: **+14,391 net
 field, not a prediction, so it belongs with `RecShapes` rather than in `synth`,
 and it is the only version of this idea the measurements support.
 
-## 12. Verdict
+## 12. Probe E — aligning a descriptor's method table by name
+
+Method (level `b`, `bench/goattr/typealign.go`). Level 10b says the method
+tables are misaligned rather than mispredicted: `delta/typedesc.go`'s walker
+copies a matched descriptor's uncommon-type method array *positionally*, entry
+k of the old array to entry k of the new one, so one method the release
+inserted moves every later entry — the `.text` failure the segment map of
+DESIGN §3.2.1 just fixed, in another table. On the minor pair 3,303 of the
+3,800 wrong method `Name` fields sit at a shifted index of the new table, and
+of the 651 descriptors holding a wrong method field, 74 have entries inserted
+and 100 have entries deleted.
+
+This probe prices the per-descriptor fix. An entry is 16 bytes —
+`{Name nameOff, Mtyp typeOff, Ifn textOff, Tfn textOff}`, `sizeMethod` in
+`delta/typedesc.go` — and the array is sorted by name (`cmd/link` writes it in
+reflect's order: exported first, then unexported, each sorted), so aligning old
+against new is an LCS over the two name lists resolved through each image's own
+name table.
+
+The realistic side needs no re-implementation of the mapper. The walker already
+writes each old entry's four *retargeted* fields at that entry's own placed
+position, so what an aligned copy would put at new index j is exactly
+`pred[place(old entry i)]`, read back. The check that this is the same thing:
+on a descriptor that needs no edit the alignment is the identity, and 90,122 of
+its 90,525 entries on the minor pair (99.6%; 96,288 of 96,705 on the patch
+pair) have the walker's write site *exactly* at the new entry's position. The
+403 that do not are the torn descriptors of level 10g.
+
+**Baselines.** Measured at `6d4ef98`, pinned in a worktree because `delta/` was
+being edited during the run — an unpinned run drifted by 900 B between two
+invocations. Patch pair **78,703 B**, minor pair **1,371,442 B**; the
+correction alone is 49,339 and 908,530 compressed. Both are far below the
+numbers §6 records, and `.go.type` has shrunk with them: the patch pair's
+section residual is now 11,421 wrong bytes for 12,951 marginal, of which the
+method tables hold 2,046 B (1,443 changed-descriptor, 603 new) for 2,054. §6's
+"a field-fix layer is closed on a minor release and open on a patch release"
+no longer holds — at these baselines the patch pair has almost nothing left
+there. The minor pair still holds 21,089 changed-descriptor method-table bytes
+for 7,618 marginal, and that is what this probe is aimed at.
+
+**The census.**
+
+| | minor | patch |
+|---|---:|---:|
+| placed old descriptors carrying a method table | 15,367 | 15,352 |
+| — no new descriptor at the placed offset | 6 | 0 |
+| — a *different* type named at the placed offset | 414 | 298 |
+| — no method table on the new side | 9 | 19 |
+| **paired** | **14,938** | **15,035** |
+| — need no edit (the name lists are identical) | 14,782 | 14,961 |
+| — entries inserted only | 72 | 15 |
+| — entries deleted only | 55 | 9 |
+| — both | 29 | 50 |
+| aligned entries inside the edited descriptors | 5,785 | 340 |
+| — of those, at a shifted index | 3,496 | 235 |
+| inserted entries, left to the correction | 424 | 444 |
+| deleted entries | 379 | 389 |
+
+Edits are small and the tables they land in are not. Inserted entries per
+edited descriptor, minor pair: 55 descriptors insert none, 38 insert one, 22
+insert two, and the tail runs to 17; deleted, 72 none, 58 one, tail to 18. The
+same 156 descriptors carry 5,785 aligned entries between them, because the
+edits land in big tables: `*ec2.Client` goes from 1,540 methods to 1,547, and
+the seven insertions misalign everything after the first of them.
+
+**The same-index case is *not* already right**, but only just: 425 of the 14,782
+un-edited descriptors hold a wrong byte in their method array, 2,406 B in all
+on the minor pair (212 descriptors, 1,117 B on the patch pair). That is
+retargeting error, not alignment, and it is priced separately below.
+
+**On an aligned entry, does the walker's retargeted old value equal the new
+value?**
+
+| field | minor correct | share | patch correct | share |
+|---|---:|---:|---:|---:|
+| `Name` (nameOff) | 5,698 / 5,784 | 98.5% | 323 / 340 | 95.0% |
+| `Mtyp` (typeOff) | 5,656 / 5,784 | 97.8% | 281 / 340 | 82.6% |
+| `Ifn` (textOff) | 5,342 / 5,784 | 92.4% | 81 / 340 | 23.8% |
+| `Tfn` (textOff) | 5,342 / 5,784 | 92.4% | 81 / 340 | 23.8% |
+| all four | 5,240 / 5,785 | 90.6% | 76 / 340 | 22.4% |
+
+**Priced.**
+
+| minor | wrong B | marginal | raw |
+|---|---:|---:|---:|
+| (a) oracle: every aligned entry of an edited descriptor | 19,333 | **8,693** | 14,901 |
+| (b) realistic: only the fields the existing maps retarget right | 18,882 | **7,233** | 14,223 |
+| aligned entries of *every* paired descriptor (oracle) | 21,739 | 10,676 | 18,096 |
+| inserted entries, left to the correction | 1,956 | 443 | 969 |
+| alignment list, 156 descriptors | 1,636 raw | 736 xz / 674 cz | |
+| **net (a)** | | **+7,957** (0.58%) | |
+| **net (b)** | | **+6,497** (0.47%) | |
+
+| patch | wrong B | marginal | raw |
+|---|---:|---:|---:|
+| (a) oracle: every aligned entry of an edited descriptor | 343 | 184 | 266 |
+| (b) realistic | 278 | 188 | 186 |
+| aligned entries of every paired descriptor (oracle) | 1,460 | 1,205 | 1,813 |
+| inserted entries, left to the correction | 267 | 165 | 299 |
+| alignment list, 74 descriptors | 692 raw | 448 xz / 381 cz | |
+| **net (a)** | | **−264** | |
+| **net (b)** | | **−260** | |
+
+The alignment list is the segment map's encoding applied to entries instead of
+bytes: per edited descriptor an id delta over the old-offset-sorted descriptor
+list, the new `Mcount` minus the old, a segment count, and per segment a gap, a
+length and a shift delta, each in its own contiguous varint column. Minor
+columns, xz: ids 240, mcount delta 164, segment count 144, gaps 184, lengths
+288, shifts 212 — 736 when concatenated and compressed as one stream.
+
+By correction run, the way 3c and 7c price a fix rather than a byte-granular
+revert: of the minor pair's realistic 7,233, **6,441 comes from the 2,061 runs
+whose every wrong byte the scheme fixes** and 1,344 from the class's bytes
+inside 114 mixed runs; the two do not add to the whole-set figure because the
+sets are superadditive at the run boundaries. The whole-set marginal is the
+honest one here — unlike a field-fix layer, this scheme really does correct
+exactly the bytes measured.
+
+Four readings.
+
+**The alignment is real and it is worth about half a percent.** Realistic
++6,497 on a 1,371,442-byte minor patch is 0.47%; the oracle, which would need a
+perfect retargeter as well, is 0.58%. That captures 95% of the marginal the
+changed-descriptor method-table class holds (7,233 of 7,618): there is nothing
+material left behind in that class once the alignment is fixed.
+
+**The retargeting is already good enough that the oracle is not worth chasing.**
+The existing maps get all four fields of 90.6% of aligned entries right on the
+minor pair, so (b) is 83% of (a). Adding the un-edited descriptors — the
+retargeting errors of the same-index case — is worth 1,983 more (10,676 against
+8,693), which is a bound on any better mapper, not a proposal.
+
+**On the patch release the layer is negative, for the opposite reason to §10.**
+The 74 edited descriptors there carry 340 aligned entries against 444 inserted
+and 389 deleted: those tables were *rewritten*, not edited, so there is almost
+nothing to realign, and the maps get `Ifn`/`Tfn` right on only 23.8% of what
+there is. 448 B of list to buy 188 B of correction. Same shape as candidate C
+and a fifth of its minor-pair payoff.
+
+**The probe assumes the placement it is pricing.** Every position it makes
+correct is a true position in the new file, taken from the new descriptor's own
+`Moff`. A real layer would also have to get the array's origin right, and an
+edited descriptor is exactly the one whose *size* changed — 16 bytes per
+inserted method — which moves every later descriptor in the section and is the
+`dataMap`'s problem, not the walker's. The 414 descriptors where the placed
+offset already names a different type (2.7% of those carrying a method table)
+are that problem showing through. Whatever the alignment list costs, it is not
+the whole cost.
+
+**Verdict: do not build.** +0.47% on the minor pair, −0.33% on the patch pair,
+and it entangles the descriptor walker with the data map to collect it. It is
+the smallest of the five candidates measured here and the only one whose
+reachable payoff is smaller than the layout work it would need. If the
+`.go.type` walker is revisited for another reason, the alignment is a cheap
+thing to add at that point; on its own it does not pay.
+
+## 13. Verdict
 
 | candidate | minor pair | patch pair | build? |
 |---|---:|---:|---|
@@ -758,6 +914,7 @@ and it is the only version of this idea the measurements support.
 | a field-fix layer for `.go.type` | closed: 27,592 B of 766,010, 11,837 marginal | open: 8,914 B of 45,170, 8,226 marginal | not probed |
 | closed: replaying `pctab` to predict invented `_func` slots | every rule tried is negative; ceiling +29,634 | best rule +155; ceiling +383 | no |
 | D. transmit the `pctab` fresh/dedup mask instead (§11) | +14,391 (1.0%) | +258 (0.3%) | maybe, as a layout field |
+| closed: per-descriptor method-table alignment (§12) | +6,497 realistic, +7,957 oracle (0.47–0.58%) | −260 | no |
 
 Three of the four remaining sources are worth building and one is a bug. Their
 sum on the minor pair, if each is independent, is 150,816 to 167,266 of the
@@ -773,7 +930,7 @@ go build -o goattr ./bench/goattr
 ./goattr -old OLD -new NEW -label NAME -cache DIR -levels 123456789 -jobs 6
 ```
 
-Levels 7–9 are the probes of §8–§10 and level `a` is §11; level 7 prices itself with the yardstick
+Levels 7–9 are the probes of §8–§10, level `a` is §11 and level `b` is §12; level 7 prices itself with the yardstick
 level 1 fits, so run it together with 1. The prediction is memoised on the two
 input files *and* on the contents of `delta/`, because a prediction memoised
 on its inputs alone is the spike's silent-fiction failure mode: a stale entry
