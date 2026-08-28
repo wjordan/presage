@@ -90,16 +90,18 @@ func TestIntegrationHandoffLosesNoConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeScript(t, u.inst.OldPath(), "exit 9")
+	// Let the clients get going before the handoff, so the run really does
+	// cross one. How long that takes is the machine's business -- on a busy
+	// box a request round trip is scheduler-bound while the exec is not --
+	// so wait for the traffic rather than assume it.
+	waitFor(t, func() bool { return served.Load() >= 200 })
 	if err := u.restart(h); err != nil {
 		t.Fatalf("handoff: %v", err)
 	}
 
 	// The handoff returns once this process has drained; from here on every
 	// request is answered by the new build on the same socket.
-	deadline := time.Now().Add(5 * time.Second)
-	for after.Load() < 100 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
+	waitFor(t, func() bool { return after.Load() >= 100 })
 	stopClients()
 
 	if n := after.Load(); n < 100 {
@@ -120,6 +122,15 @@ func TestIntegrationHandoffLosesNoConnections(t *testing.T) {
 		t.Errorf("the binary at %s hashes to %v (%v), want %v -- something reverted it", path, got, err, h)
 	}
 	t.Logf("%d requests across the handoff, %d answered by the new build", served.Load(), after.Load())
+}
+
+// waitFor blocks until ok or five seconds pass; the caller reports what is
+// missing, so a timeout here is never the error message.
+func waitFor(t *testing.T, ok func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !ok() && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func build(t *testing.T, out string) {
