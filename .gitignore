@@ -5,6 +5,7 @@ bench/gotransform/gotransform
 bench/gotransform/gotransform-*
 bench/testsrv/testsrv
 bench/goprobe/goprobe
+bench/goattr/goattr
 *.test
 
 # demo build output
