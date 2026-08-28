@@ -23,8 +23,14 @@ const (
 	// stripped, non-PIE linux/amd64 binaries built by the supported Go
 	// release (gobin.SupportedGo).
 	TransformGoAMD64 = 1
+	// TransformGoSegmap is the same codec with a sub-function segment map in
+	// the layout, so that a matched function whose size changed is laid down
+	// and relocated piece by piece (docs/DESIGN.md 3.2.1). The layout is a
+	// new shape, so a decoder that implements only transform 1 is served a
+	// transform-1 patch or falls back to the blob (3.6).
+	TransformGoSegmap = 2
 
-	maxTransform = TransformGoAMD64
+	maxTransform = TransformGoSegmap
 )
 
 // FrameSize is the uncompressed size of one patch frame. Frames are

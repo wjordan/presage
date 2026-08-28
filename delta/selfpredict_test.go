@@ -31,7 +31,7 @@ func TestSelfPrediction(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Encode: %v", err)
 			}
-			if st.Transform != TransformGoAMD64 {
+			if st.Transform < TransformGoAMD64 {
 				t.Fatalf("transform %d, want the Go-aware codec", st.Transform)
 			}
 			if st.PredictErr != 0 {
@@ -71,6 +71,37 @@ func TestCorpusRoundTrip(t *testing.T) {
 			})
 		}
 	}
+}
+
+// TestTransform1Compat holds the previous transform open. A publisher whose
+// fleet still runs a transform-1 decoder asks for one (docs/DESIGN.md 3.6),
+// and the patch it gets must carry no segment map and must still apply.
+func TestTransform1Compat(t *testing.T) {
+	var old, new []byte
+	for _, p := range corpus(t) {
+		b := readFile(t, p)
+		if _, err := gobin.Parse(b); err != nil {
+			continue
+		}
+		if old == nil {
+			old = b
+		} else {
+			new = b
+			break
+		}
+	}
+	if new == nil {
+		t.Skip("needs two binaries the Go-aware codec takes")
+	}
+	var st Stats
+	patch, err := Encode(old, new, Options{MaxTransform: TransformGoAMD64, Stats: &st})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if st.Transform != TransformGoAMD64 {
+		t.Fatalf("transform %d, want %d", st.Transform, TransformGoAMD64)
+	}
+	mustRoundTrip(t, old, new, patch)
 }
 
 func mustRoundTrip(t *testing.T, old, new, patch []byte) {

@@ -23,8 +23,10 @@ type goPred struct {
 	xst            x86.Stats
 }
 
-// predictGoAMD64 runs the transform up to and including the prediction.
-func predictGoAMD64(old, new []byte) (*goPred, error) {
+// predictGoAMD64 runs the transform up to and including the prediction. tf
+// is the transform being written: transform 1 has no segment map, and the
+// encoder must then predict without one, since that is what its decoder does.
+func predictGoAMD64(old, new []byte, tf byte) (*goPred, error) {
 	g := &goPred{}
 	var err error
 	if g.ob, err = gobin.Parse(old); err != nil {
@@ -37,18 +39,24 @@ func predictGoAMD64(old, new []byte) (*goPred, error) {
 	g.m = matchFuncs(ob, nb)
 
 	dmaps, shifts := buildMaps(ob, nb, g.m)
-	ov := deriveOverrides(ob, nb, g.m, dmaps, shifts)
-	g.layRaw = buildLayout(ob, nb, g.m, dmaps, shifts, ov).encode(ob)
+	var segs []segMap
+	if tf >= TransformGoSegmap {
+		segs = buildSegMaps(ob, nb, g.m)
+	}
+	// deriveOverrides runs with the maps installed, so the override table
+	// does not spend two varints re-fixing a target a map already places.
+	ov := deriveOverrides(ob, nb, g.m, dmaps, shifts, segs)
+	g.layRaw = buildLayout(ob, nb, g.m, dmaps, shifts, ov, segs).encode(ob, tf)
 
 	// From here the encoder runs the decoder's code on the decoder's inputs:
 	// the layout as it will be decoded, and a skeleton built from it. That
 	// is what guarantees the prediction the correction is measured against
 	// is the prediction the decoder will produce.
-	g.skel, g.m2, err = skeletonFrom(ob, g.layRaw)
+	g.skel, g.m2, err = skeletonFrom(ob, g.layRaw, tf)
 	if err != nil {
 		return nil, err
 	}
-	g.lay, _ = decodeLayout(g.layRaw, ob)
+	g.lay, _ = decodeLayout(g.layRaw, ob, tf)
 
 	g.s1aNew = stage1aBlobs(nb)
 	g.s1a = plainDiff(stage1aBlobs(ob), g.s1aNew)
@@ -85,8 +93,8 @@ func predictGoAMD64(old, new []byte) (*goPred, error) {
 // four streams are compressed as one frame: a frame per stream would cost a
 // 32-byte hash and a table entry each and buys nothing -- compressed
 // separately they come to within 0.1 % of the same total.
-func encodeGoAMD64(old, new []byte, o Options, st *Stats) ([]byte, error) {
-	g, err := predictGoAMD64(old, new)
+func encodeGoAMD64(old, new []byte, tf byte, o Options, st *Stats) ([]byte, error) {
+	g, err := predictGoAMD64(old, new, tf)
 	if err != nil {
 		return nil, err
 	}
@@ -96,6 +104,15 @@ func encodeGoAMD64(old, new []byte, o Options, st *Stats) ([]byte, error) {
 	st.PredictErr = diffBytes(g.pred, new)
 	st.Notes = append(st.Notes, fmt.Sprintf("%d insns, %d undecodable bytes, %d unrelocatable refs",
 		g.xst.Insns, g.xst.Fails, g.xst.Unknown+g.xst.NoFit))
+	if len(g.lay.Segs) > 0 {
+		pieces, w := 0, &wbuf{}
+		for _, sm := range g.lay.Segs {
+			pieces += len(sm.Segs)
+		}
+		encodeSegMaps(w, g.lay.Segs)
+		st.Notes = append(st.Notes, fmt.Sprintf("%d segment maps, %d pieces, %d B of layout",
+			len(g.lay.Segs), pieces, len(w.b)))
+	}
 	s2, err := encodeCorrection(g.pred, new)
 	if err != nil {
 		return nil, err
@@ -135,11 +152,11 @@ func applyGoAMD64(old, body []byte, h *Header) ([]byte, error) {
 	}
 	s2 := r.b
 
-	skel, m, err := skeletonFrom(ob, layRaw)
+	skel, m, err := skeletonFrom(ob, layRaw, h.Transform)
 	if err != nil {
 		return nil, err
 	}
-	lay, err := decodeLayout(layRaw, ob)
+	lay, err := decodeLayout(layRaw, ob, h.Transform)
 	if err != nil {
 		return nil, err
 	}
@@ -175,8 +192,8 @@ func applyGoAMD64(old, body []byte, h *Header) ([]byte, error) {
 
 // skeletonFrom decodes a layout and builds the decoder's view of the new
 // binary from it. Both sides call it, on the same bytes.
-func skeletonFrom(old *gobin.Bin, layRaw []byte) (*gobin.Bin, *match, error) {
-	l, err := decodeLayout(layRaw, old)
+func skeletonFrom(old *gobin.Bin, layRaw []byte, tf byte) (*gobin.Bin, *match, error) {
+	l, err := decodeLayout(layRaw, old, tf)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -188,6 +205,7 @@ func newMapper(old, skel *gobin.Bin, m *match, l *layout) *mapper {
 		src: old, dst: skel, m: m,
 		srcToDst: m.OldToNew, dstToSrc: m.NewToOld,
 		dataMaps: l.DataMaps, shifts: l.Shifts, overrides: overrideMap(l.Overrides),
+		segs: segsByIdx(l.Segs),
 	}
 }
 

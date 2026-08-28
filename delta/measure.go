@@ -34,7 +34,7 @@ type Prediction struct {
 // prediction returned here is byte-identical to the one Encode's correction
 // is written against.
 func Predict(old, new []byte) (*Prediction, error) {
-	g, err := predictGoAMD64(old, new)
+	g, err := predictGoAMD64(old, new, maxTransform)
 	if err != nil {
 		return nil, err
 	}

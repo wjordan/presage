@@ -39,6 +39,7 @@ type mapper struct {
 	dataMaps  map[string]*dataMap
 	shifts    map[string]*shiftTable
 	overrides map[uint64]uint64
+	segs      map[int][]segPiece // resized functions' pieces, by new index
 	blobs     *blobPred
 }
 
@@ -65,10 +66,17 @@ func (mp *mapper) mapAddrBase(t uint64, self *gobin.Func) (uint64, refClass) {
 			return 0, rcTextUnmatch
 		}
 		g := dst.Funcs[j]
-		if f == self {
-			return g.Entry + (t - f.Entry), rcTextSelf
+		// A resized function's body is laid down piece by piece, so an offset
+		// into it goes through its segment map -- for a branch into it and
+		// for a back-edge inside it alike.
+		o := t - f.Entry
+		if segs := mp.segs[j]; len(segs) > 0 {
+			o = mapSegOff(segs, o, g.Size())
 		}
-		return g.Entry + (t - f.Entry), rcTextMatched
+		if f == self {
+			return g.Entry + o, rcTextSelf
+		}
+		return g.Entry + o, rcTextMatched
 	}
 	s := src.SectionOf(t)
 	if s == nil && t > 0 {
@@ -137,7 +145,12 @@ func predictText(mp *mapper, out []byte, st *x86.Stats) {
 				g := dst.Funcs[j]
 				f := src.Funcs[i]
 				lo := g.Entry - dst.Text.Addr
-				x86.Relocate(src.FuncBytes(f), out[lo:lo+g.Size()], f.Entry, g.Entry, mp.lookup(f), &stats[w], nil)
+				body, into := src.FuncBytes(f), out[lo:lo+g.Size()]
+				if segs := mp.segs[j]; len(segs) > 0 {
+					relocatePieces(body, into, f.Entry, g.Entry, segs, mp.lookup(f), &stats[w])
+					continue
+				}
+				x86.Relocate(body, into, f.Entry, g.Entry, mp.lookup(f), &stats[w], nil)
 			}
 		}(w)
 	}

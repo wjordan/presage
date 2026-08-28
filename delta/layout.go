@@ -31,6 +31,10 @@ type layout struct {
 	NFunc      int
 	Funcs      []byte // the op stream below
 
+	// the sub-function segment maps, by new function index (segmap.go);
+	// transform 2 and above only
+	Segs []segMap
+
 	NFiles  uint64
 	PclnLen uint64
 	// starts of funcnametab, cutab, filetab, pctab, functab, go:func.* and
@@ -159,7 +163,7 @@ func oldTabOffs(p *gobin.Pcln) [7]uint64 {
 	return [7]uint64{p.Funcnametab.Off, p.Cutab.Off, p.Filetab.Off, p.Pctab.Off, p.Functab.Off, p.Gofunc.Off, p.Findfunctab.Off}
 }
 
-func (l *layout) encode(old *gobin.Bin) []byte {
+func (l *layout) encode(old *gobin.Bin, tf byte) []byte {
 	w := &wbuf{}
 	w.raw([]byte(layoutMagic))
 	w.s(int64(l.NewLen) - int64(len(old.File)))
@@ -170,6 +174,9 @@ func (l *layout) encode(old *gobin.Bin) []byte {
 	w.s(int64(l.FirstEntry) - int64(old.Funcs[0].Entry))
 	w.u(uint64(l.NFunc))
 	w.bytes(l.Funcs)
+	if tf >= TransformGoSegmap {
+		encodeSegMaps(w, l.Segs)
+	}
 	w.s(int64(l.NFiles) - int64(old.Pcln.NFiles))
 	w.s(int64(l.PclnLen) - int64(len(old.Pcln.Data)))
 	ot := oldTabOffs(old.Pcln)
@@ -200,7 +207,7 @@ func (l *layout) encode(old *gobin.Bin) []byte {
 	return w.b
 }
 
-func decodeLayout(b []byte, old *gobin.Bin) (*layout, error) {
+func decodeLayout(b []byte, old *gobin.Bin, tf byte) (*layout, error) {
 	r := &rbuf{b: b}
 	if string(r.take(4)) != layoutMagic {
 		return nil, fmt.Errorf("%w: bad layout magic", errCorrupt)
@@ -214,6 +221,9 @@ func decodeLayout(b []byte, old *gobin.Bin) (*layout, error) {
 	l.FirstEntry = uint64(int64(old.Funcs[0].Entry) + r.s())
 	l.NFunc = int(r.un(maxFuncs, "function count"))
 	l.Funcs = r.bytes()
+	if tf >= TransformGoSegmap {
+		l.Segs = decodeSegMaps(r, l.NFunc)
+	}
 	l.NFiles = uint64(int64(old.Pcln.NFiles) + r.s())
 	l.PclnLen = uint64(int64(len(old.Pcln.Data)) + r.s())
 	ot := oldTabOffs(old.Pcln)
@@ -463,8 +473,8 @@ func decodeFuncLayout(old *gobin.Bin, l *layout) ([]*gobin.Func, *match, error) 
 }
 
 // buildLayout is the encoder side.
-func buildLayout(old, new *gobin.Bin, m *match, dmaps map[string]*dataMap, shifts map[string]*shiftTable, ov []addrOverride) *layout {
-	l := &layout{NewLen: uint64(len(new.File)), Shifts: shifts, DataMaps: dmaps, Overrides: ov}
+func buildLayout(old, new *gobin.Bin, m *match, dmaps map[string]*dataMap, shifts map[string]*shiftTable, ov []addrOverride, segs []segMap) *layout {
+	l := &layout{NewLen: uint64(len(new.File)), Shifts: shifts, DataMaps: dmaps, Overrides: ov, Segs: segs}
 	for _, s := range new.Order {
 		l.Sects = append(l.Sects, sectInfo{s.Name, s.Addr, s.Off, s.Size, s.NoBits})
 	}
@@ -526,6 +536,9 @@ func skeleton(old *gobin.Bin, l *layout) (*gobin.Bin, *match, error) {
 		return nil, nil, fmt.Errorf("%w: layout has no functions", errCorrupt)
 	}
 	b.Funcs = funcs
+	if err := checkSegMaps(l.Segs, old, funcs, m); err != nil {
+		return nil, nil, err
+	}
 	if last := funcs[len(funcs)-1]; last.End > b.Text.Addr+b.Text.Size || funcs[0].Entry < b.Text.Addr {
 		return nil, nil, fmt.Errorf("%w: the function layout does not fit .text", errCorrupt)
 	}

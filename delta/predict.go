@@ -302,9 +302,9 @@ func majorities(votes []vote) []majority {
 	return out
 }
 
-func deriveOverrides(old, new *gobin.Bin, m *match, dmaps map[string]*dataMap, shifts map[string]*shiftTable) []addrOverride {
+func deriveOverrides(old, new *gobin.Bin, m *match, dmaps map[string]*dataMap, shifts map[string]*shiftTable, segs []segMap) []addrOverride {
 	mp := &mapper{src: old, dst: new, srcToDst: m.OldToNew, dstToSrc: m.NewToOld,
-		m: m, dataMaps: dmaps, shifts: shifts}
+		m: m, dataMaps: dmaps, shifts: shifts, segs: segsByIdx(segs)}
 	var maj []majority
 	for range ovRounds {
 		maj = majorities(collectVotes(old, new, dmaps, mp))
