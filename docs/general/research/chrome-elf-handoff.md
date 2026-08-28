@@ -138,7 +138,12 @@ go run ./bench/elfpredict \
 `text-ladder`, `changed-units`, `oracles` — xz between 30 and 64 MB of
 correction each purely to reprint numbers already in
 [`chrome-elf-whole-image.md`](chrome-elf-whole-image.md) §9, and nothing
-downstream reads them. `-rungs all` restores every one of them (~16 min).
+downstream reads them. `-rungs all` restores every one of them and reproduces
+the full §8 scoreboard byte-identically, in **10m10s** — down from 16 min,
+because every xz call in the harness is single-threaded (`-T0` only splits
+above 192 MiB, and the largest stream here is 64 MB) and they now overlap
+under `-xz-jobs`. On the default single-rung run that overlap is worth 6 s of
+50; on `-rungs all`, 1,507 calls and 547 s of xz CPU finish in 610 s of wall.
 
 ### Where a run spends its time
 
