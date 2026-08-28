@@ -637,7 +637,114 @@ descriptors cost 962 compressed bytes and the plan costs 1,952: the plan's own
 floor exceeds what it replaces. A descriptor regenerator has to be optional,
 priced per pair, or not built.
 
-## 11. Verdict
+## 11. Probe D — replaying the linker's `pctab` allocation
+
+Probe B leaves the `_func` `pcsp`/`pcfile`/`pcln`/`pcdata[]` offsets as the
+largest single class in `.gopclntab`: for a function the release added there is
+no old record to re-target, so `delta/pcln.go`'s `synth` fills them from the
+modal record. This probe (level `a`) asks whether the decoder can instead
+*replay* the linker's allocation, since it already holds the final `pctab` from
+stage 1b.
+
+Measured at `bd4ff6a`, after the synthesised record of §9 landed, so the
+baselines here are newer than the header's: patch pair 82,288 B, minor pair
+1,454,272 B, and the ladder-1 yardstick is 0.893 per run + 0.238 per wrong byte
+(minor) and 2.424 + 0.344 (patch).
+
+**What the linker does.** `cmd/link/internal/ld.generatePctab` (go1.27.0) walks
+the functions in link order and, per function, calls `saveOffset` on `pcsp`,
+`pcfile`, `pcline`, then `pcdata[0..n)`, then `pcinline`. `saveOffset` assigns
+the running size and appends, skipping a symbol it has already placed; `size`
+starts at 1 so no real offset is zero, and a zero-length table is recorded as
+offset 0 and consumes nothing. The pc-value symbols carry
+`AttrContentAddressable | AttrPcdata` (`cmd/internal/obj/pcln.go`), so two
+functions with byte-identical tables share one offset. `writeFuncs` then stores
+`pcinline`'s offset into `pcdata[abi.PCDATA_InlTreeIndex]` — slot 2, which the
+compiler never emits itself — so in record-slot terms the emission order is
+`pcsp, pcfile, pcln, pcdata[0], pcdata[1], pcdata[3..n), pcdata[2]`.
+
+Two consequences, and the probe measures both. A table whose content is new
+lands exactly on the running high-water mark. A table whose content repeats
+lands wherever its twin already sits, arbitrarily far back.
+
+**The emission-order model is exact.** Of the slots the codec has to invent,
+every single one the linker allocated fresh lands *precisely* on the high-water
+mark implied by the model above — 9,572 of 9,572 on the minor pair, 142 of 142
+on the patch pair, none past it. The order, the slot-2 rule, the pad byte and
+the zero-length rule are all confirmed.
+
+**But most slots are not fresh.** On the minor pair, of 42,855 invented slots:
+
+| | slots | true = 0 | fresh | deduped | modal ok |
+|---|---:|---:|---:|---:|---:|
+| `pcsp` | 6,231 | 0 | 670 | 5,561 | 0.2% |
+| `pcfile` | 6,231 | 0 | 979 | 5,252 | 0.0% |
+| `pcln` | 6,231 | 0 | 5,783 | 448 | 0.0% |
+| `pcdata[0]` | 6,130 | 738 | 461 | 4,931 | 12.0% |
+| `pcdata[1]` | 6,126 | 641 | 686 | 4,799 | 10.5% |
+| `pcdata[2]` | 5,952 | 5,155 | 482 | 315 | 86.6% |
+| `pcdata[3]` | 5,810 | 6 | 400 | 5,404 | 0.2% |
+| `pcdata[4]` | 124 | 0 | 101 | 23 | 0.0% |
+| reshaped slots | 20 | 3 | 10 | 7 | 20.0% |
+| **total** | **42,855** | **6,543** | **9,572** | **26,740** | **15.3%** |
+
+Only `pcln` is mostly a fresh allocation (92.8%); everything else is a backward
+dedup 80–93% of the time, because what a release adds is mostly wrappers whose
+stack maps, file tables and safepoint tables are byte-identical to ones already
+in the image. Identifying a dedup target means identifying the table's
+*content*, which is the function the release added — nothing the decoder holds.
+
+**Every recovery rule loses patch bytes.** Priced end to end (the rule's values
+written into the prediction, the whole correction re-encoded and re-compressed
+with the shipped `EncodeCorrection` and `cz`):
+
+| rule | minor: slots ok / saved | patch: slots ok / saved |
+|---|---:|---:|
+| modal record (shipped) | 15.3% / 0 | 18.9% / 0 |
+| nearest same-`nameKey` function | 16.6% / **−402** | 32.6% / +40 |
+| previous function, same slot | 18.4% / **−2,880** | 20.3% / −40 |
+| high-water cursor, every slot | 16.1% / **−920** | 28.2% / +66 |
+| `nameKey`, cursor for `pcln` | 17.1% / **−667** | 38.4% / +153 |
+| span-gated block + fresh priors | 16.5% / **−200** | 34.9% / +155 |
+| lone span-matched table → `pcln` | 17.5% / **−106** | 19.2% / −43 |
+| oracle (ceiling) | 100% / +29,634 | 100% / +383 |
+| oracle, fresh slots only | 37.7% / +15,511 | 60.2% / +301 |
+| oracle, `pcln` only | 29.9% / +12,258 | 34.0% / +23 |
+| oracle, deduped slots only | 77.7% / +2,004 | 58.7% / +218 |
+
+The "previous function" row is the whole story in one line: it cuts wrong bytes
+from 99,726 to 91,622 and still costs 2,880 compressed bytes. At the minor
+pair's yardstick — 0.893 per run, 0.238 per wrong byte — fixing three bytes of a
+four-byte word saves 0.71 and splits one correction region into two for 0.89.
+**A near-miss is worse than the modal value.** Only exact fixes pay here, which
+is also why the oracles are strongly superadditive: fresh-only (+15,511) plus
+dedup-only (+2,004) is 17,515, well under the +29,634 of fixing both.
+
+The span gate deserves a note because it is the strongest constraint available
+and still is not enough. Every pc-value table of a function covers exactly that
+function's text, so a table's summed pc-delta identifies its function — and the
+decoder knows every new function's spacing from the layout. But `Func.End` is
+the *next* function's entry, so the spacing exceeds the span by the alignment
+padding (12–31 bytes over 31 distinct values on the minor pair); with a
+48-byte tolerance the gate no longer separates neighbouring functions of
+similar size, and the rule that uses it lands 16.5%.
+
+**Verdict: the hypothesis is confirmed as a fact about the linker and rejected
+as a predictor.** No delta change was made. The ceiling is small even when
+solved perfectly — 29,634 B on a 1,454,272-byte minor patch (2.0%), 383 B on an
+82,288-byte patch patch (0.5%) — and the reachable half of it, the fresh
+allocations, is 15,511 B (1.1%) and 301 B (0.4%).
+
+**What is left open.** Because a fresh slot lands exactly on the high-water
+mark, the entire remaining problem is a one-bit-per-slot classification. A
+transmitted fresh/dedup mask makes the replay exact on every fresh slot and
+costs 5,357 B raw / **1,120 B compressed** on the minor pair and 43 B on the
+patch pair, against the +15,511 and +301 those slots are worth: **+14,391 net
+(1.0% of the minor patch), +258 (0.3% of the patch patch)**. That is a layout
+field, not a prediction, so it belongs with `RecShapes` rather than in `synth`,
+and it is the only version of this idea the measurements support.
+
+## 12. Verdict
 
 | candidate | minor pair | patch pair | build? |
 |---|---:|---:|---|
@@ -649,6 +756,8 @@ priced per pair, or not built.
 | closed: better address maps / consensus shift | +19,283 max | +4,012 max | no |
 | closed: dictionary or renumbering for new code | 1.45× vs a 572× control | — | no |
 | a field-fix layer for `.go.type` | closed: 27,592 B of 766,010, 11,837 marginal | open: 8,914 B of 45,170, 8,226 marginal | not probed |
+| closed: replaying `pctab` to predict invented `_func` slots | every rule tried is negative; ceiling +29,634 | best rule +155; ceiling +383 | no |
+| D. transmit the `pctab` fresh/dedup mask instead (§11) | +14,391 (1.0%) | +258 (0.3%) | maybe, as a layout field |
 
 Three of the four remaining sources are worth building and one is a bug. Their
 sum on the minor pair, if each is independent, is 150,816 to 167,266 of the
@@ -664,7 +773,7 @@ go build -o goattr ./bench/goattr
 ./goattr -old OLD -new NEW -label NAME -cache DIR -levels 123456789 -jobs 6
 ```
 
-Levels 7–9 are the probes of §8–§10; level 7 prices itself with the yardstick
+Levels 7–9 are the probes of §8–§10 and level `a` is §11; level 7 prices itself with the yardstick
 level 1 fits, so run it together with 1. The prediction is memoised on the two
 input files *and* on the contents of `delta/`, because a prediction memoised
 on its inputs alone is the spike's silent-fiction failure mode: a stale entry
