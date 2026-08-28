@@ -185,3 +185,57 @@ func TestVEXDisplacementIsMasked(t *testing.T) {
 		t.Fatal("a different opcode compares equal")
 	}
 }
+
+// TestCanonical checks the mask the segment aligner runs on: the field
+// pcrelField finds, zeroed in place, and the instruction boundaries the walk
+// crossed, ending with the body length.
+func TestCanonical(t *testing.T) {
+	// two calls whose targets differ, then a ret
+	a := []byte{0xE8, 0x10, 0, 0, 0, 0xE8, 0x20, 0, 0, 0, 0xC3}
+	b := []byte{0xE8, 0x40, 0, 0, 0, 0xE8, 0x50, 0, 0, 0, 0xC3}
+	ca, bounds := Canonical(a)
+	cb, _ := Canonical(b)
+	if string(ca) != string(cb) {
+		t.Errorf("bodies differing only in their targets canonicalise to %x and %x", ca, cb)
+	}
+	if string(a) == string(ca) {
+		t.Error("the displacements were not masked")
+	}
+	if a[1] != 0x10 {
+		t.Error("Canonical wrote through to its input")
+	}
+	for i, want := range []int32{0, 5, 10, 11} {
+		if i >= len(bounds) || bounds[i] != want {
+			t.Fatalf("boundaries %v, want [0 5 10 11]", bounds)
+		}
+	}
+
+	for _, tc := range pcrelCases {
+		if tc.wantOff < 0 || tc.wantLen != len(tc.code) {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			canon, bounds := Canonical(tc.code)
+			if len(bounds) != 2 || bounds[0] != 0 || int(bounds[1]) != len(tc.code) {
+				t.Fatalf("boundaries %v for one %d-byte instruction", bounds, len(tc.code))
+			}
+			inst, err := decode(tc.code)
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			off, n := pcrelField(inst, tc.code)
+			if off != tc.wantOff {
+				t.Fatalf("the field is at %d, want %d", off, tc.wantOff)
+			}
+			if string(canon[:off]) != string(tc.code[:off]) ||
+				string(canon[off+n:]) != string(tc.code[off+n:]) {
+				t.Errorf("%x masked to %x: something outside the displacement changed", tc.code, canon)
+			}
+			for _, c := range canon[off : off+n] {
+				if c != 0 {
+					t.Fatalf("%x masked to %x: the displacement is not zero", tc.code, canon)
+				}
+			}
+		})
+	}
+}

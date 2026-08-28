@@ -309,3 +309,28 @@ func Equal(a, b []byte) bool {
 	}
 	return true
 }
+
+// Canonical returns a copy of code with every PC-relative displacement
+// zeroed, plus the offsets at which the walk found an instruction, ending
+// with len(code). Masking is pcrelField's -- the same walk ContentHash uses
+// -- so two copies of the same code differing only in where their targets
+// moved come out byte-identical, and an offset into the result is still an
+// offset into the raw body. Undecodable bytes are stepped over one at a time
+// and each counts as a boundary.
+func Canonical(code []byte) (canon []byte, bounds []int32) {
+	canon = append([]byte(nil), code...)
+	bounds = make([]int32, 0, len(code)/4+2)
+	for i := 0; i < len(canon); {
+		bounds = append(bounds, int32(i))
+		inst, err := decode(canon[i:])
+		if err != nil || inst.Len == 0 {
+			i++
+			continue
+		}
+		if off, n := pcrelField(inst, canon[i:]); n > 0 {
+			clear(canon[i+off : i+off+n])
+		}
+		i += inst.Len
+	}
+	return canon, append(bounds, int32(len(code)))
+}
