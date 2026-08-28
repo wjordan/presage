@@ -305,6 +305,34 @@ func buildDataMap(old, new []byte, block int, align []int64, tol int) *dataMap {
 			prev = d
 		}
 	}
+	// A shift change no second block agrees with is a false match. The block
+	// did not match at the incoming shift -- its content changed -- and then
+	// turned up somewhere else by accident, which is easy for a repetitive
+	// record such as a method-table entry. Following it copies the rest of
+	// the symbol megabytes away and leaves the right place empty, which is
+	// worse than admitting the block is unmatched, so revert any run of
+	// blocks carrying a shift only one of them matched at.
+	for i := 0; i < nb; {
+		j := i
+		for j < nb && m.Delta[j] == m.Delta[i] {
+			j++
+		}
+		if i > 0 && m.Delta[i] != m.Delta[i-1] {
+			agree := 0
+			for k := i; k < j; k++ {
+				if m.Matched[k] {
+					agree++
+				}
+			}
+			if agree < 2 {
+				for k := i; k < j; k++ {
+					m.Delta[k], m.Matched[k] = m.Delta[i-1], false
+				}
+			}
+		}
+		i = j
+	}
+
 	// backward pass: an ambiguous block takes the next resolved shift, then 0
 	nextDelta, haveNext := int64(0), false
 	for i := nb - 1; i >= 0; i-- {
