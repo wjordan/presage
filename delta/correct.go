@@ -100,6 +100,13 @@ func encodeCorrection(pred, want []byte) ([]byte, error) {
 	return w.b, nil
 }
 
+// EncodeCorrection writes the stream that turns pred into want. It is
+// exported so experimental predictors can use the production correction
+// format while their prediction formats are still being evaluated.
+func EncodeCorrection(pred, want []byte) ([]byte, error) {
+	return encodeCorrection(pred, want)
+}
+
 // applyCorrection rewrites buf, which holds the prediction, into the real
 // file. It allocates only the scratch copy of one region's source window.
 func applyCorrection(buf, stream []byte) error {
@@ -161,4 +168,9 @@ func applyCorrection(buf, stream []byte) error {
 		return fmt.Errorf("%w: %d literal bytes after the last region", errCorrupt, len(rd.Lit))
 	}
 	return nil
+}
+
+// ApplyCorrection rewrites buf, which holds a prediction, using stream.
+func ApplyCorrection(buf, stream []byte) error {
+	return applyCorrection(buf, stream)
 }

@@ -13,3 +13,6 @@ bench/goprobe/goprobe
 # editor / local agent settings
 .idea/
 .claude/settings.local.json
+
+# compiled benchmark harness
+bench/elfpredict/elfpredict
