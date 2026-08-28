@@ -25,13 +25,14 @@ func publish(ctx context.Context, log *slog.Logger, args []string) error {
 	fs := newFlags("publish", "[--force] [--cache DIR] <binary> <store>")
 	force := fs.Bool("force", false, "publish a binary that is not delta-friendly anyway")
 	cacheDir := fs.String("cache", "", "release cache directory (default $XDG_CACHE_HOME/go-binsync)")
-	if err := fs.Parse(args); err != nil {
+	pos, err := parse(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() != 2 {
+	if len(pos) != 2 {
 		return exitf(codeUsage, "publish needs a binary and a store URL")
 	}
-	binPath, storeURL := fs.Arg(0), fs.Arg(1)
+	binPath, storeURL := pos[0], pos[1]
 
 	bin, err := os.ReadFile(binPath)
 	if err != nil {

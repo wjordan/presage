@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"errors"
+	"flag"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -530,5 +533,77 @@ func TestHumanFormatting(t *testing.T) {
 		if got := hdur(c.d); got != c.want {
 			t.Errorf("hdur(%v) = %q, want %q", c.d, got, c.want)
 		}
+	}
+}
+
+// TestParseFlagOrder pins README.md 5's calling convention: a command's flags
+// may come before or after its operands, and "--" ends flag parsing.
+func TestParseFlagOrder(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		args []string
+		out  string
+		verb bool
+		pos  []string
+	}{
+		{"flags first", []string{"-o", "p", "-v", "a", "b"}, "p", true, []string{"a", "b"}},
+		{"flags last", []string{"a", "b", "-o", "p"}, "p", false, []string{"a", "b"}},
+		{"flags around", []string{"-v", "a", "b", "-o", "p"}, "p", true, []string{"a", "b"}},
+		{"flags between", []string{"a", "-o", "p", "b"}, "p", false, []string{"a", "b"}},
+		{"equals form", []string{"a", "b", "-o=p", "-v"}, "p", true, []string{"a", "b"}},
+		{"no flags", []string{"a", "b"}, "", false, []string{"a", "b"}},
+		{"dash is an operand", []string{"-o", "p", "-", "b"}, "p", false, []string{"-", "b"}},
+		{"terminator", []string{"-o", "p", "--", "-v", "b"}, "p", false, []string{"-v", "b"}},
+		{"terminator after operands", []string{"a", "-o", "p", "--", "-b"}, "p", false, []string{"a", "-b"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fs := flag.NewFlagSet("diff", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			out := fs.String("o", "", "")
+			verbose := fs.Bool("v", false, "")
+			pos, err := parse(fs, tc.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if *out != tc.out || *verbose != tc.verb {
+				t.Errorf("flags: got -o %q -v %v, want -o %q -v %v", *out, *verbose, tc.out, tc.verb)
+			}
+			if !slices.Equal(pos, tc.pos) {
+				t.Errorf("operands: got %q, want %q", pos, tc.pos)
+			}
+		})
+	}
+
+	// An unknown flag is still an error wherever it appears.
+	fs := flag.NewFlagSet("diff", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if _, err := parse(fs, []string{"a", "b", "-nope"}); err == nil {
+		t.Error("trailing unknown flag: got nil, want an error")
+	}
+}
+
+// TestDiffAndPatchDocumentedOrder runs the two commands exactly as README.md 5
+// and the usage text write them, with -o after the operands.
+func TestDiffAndPatchDocumentedOrder(t *testing.T) {
+	t.Parallel()
+	log := testLogger(t)
+	dir := t.TempDir()
+	v1 := fakeRelease(71, 8<<10)
+	v2 := edited(v1, 72)
+	p1 := write(t, filepath.Join(dir, "v1"), v1)
+	p2 := write(t, filepath.Join(dir, "v2"), v2)
+	patchPath := filepath.Join(dir, "p.bsz")
+	out := filepath.Join(dir, "rebuilt")
+
+	if err := run(t.Context(), log, []string{"diff", p1, p2, "-o", patchPath}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(t.Context(), log, []string{"patch", p1, patchPath, "-o", out}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(out); !bytes.Equal(got, v2) {
+		t.Fatal("patch did not reproduce the new release")
 	}
 }

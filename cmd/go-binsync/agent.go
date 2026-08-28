@@ -27,23 +27,24 @@ func agentCmd(ctx context.Context, log *slog.Logger, args []string) error {
 	healthy := fs.String("healthy", "", "URL that must answer 2xx, or a shell command that must exit 0, after --restart")
 	once := fs.Bool("once", false, "run one update cycle and exit")
 	poll := fs.Duration("poll", 0, "pointer poll interval (default 5s, 1s for file://)")
-	if err := fs.Parse(args); err != nil {
+	pos, err := parse(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() != 2 {
+	if len(pos) != 2 {
 		return exitf(codeUsage, "agent needs a store URL and a path")
 	}
 	if *restart == "" {
 		return exitf(codeUsage, "agent needs --restart CMD")
 	}
 
-	h := newHooks(log, fs.Arg(1), *restart, *healthy)
+	h := newHooks(log, pos[1], *restart, *healthy)
 	// Before the first poll: this agent may have died between installing a
 	// release and seeing it healthy (docs/DESIGN.md 6.5).
 	if err := h.recover(ctx); err != nil {
 		log.Error("go-binsync: start-up check", "err", err)
 	}
-	cfg := agent.Config{Store: fs.Arg(0), Path: h.path, Poll: *poll, Logger: log}
+	cfg := agent.Config{Store: pos[0], Path: h.path, Poll: *poll, Logger: log}
 	if !*once {
 		return agent.Loop(ctx, cfg, h.hooks())
 	}

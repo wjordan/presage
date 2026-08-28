@@ -18,17 +18,18 @@ func diff(log *slog.Logger, args []string) error {
 	out := fs.String("o", "", "write the patch here (required)")
 	verbose := fs.Bool("v", false, "report where the patch bytes went")
 	plain := fs.Bool("plain", false, "skip the Go-aware codec")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 2 || *out == "" {
-		return exitf(codeUsage, "diff needs two binaries and -o")
-	}
-	old, err := os.ReadFile(fs.Arg(0))
+	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
-	next, err := os.ReadFile(fs.Arg(1))
+	if len(pos) != 2 || *out == "" {
+		return exitf(codeUsage, "diff needs two binaries and -o")
+	}
+	old, err := os.ReadFile(pos[0])
+	if err != nil {
+		return err
+	}
+	next, err := os.ReadFile(pos[1])
 	if err != nil {
 		return err
 	}
@@ -59,17 +60,18 @@ func diff(log *slog.Logger, args []string) error {
 func patchCmd(log *slog.Logger, args []string) error {
 	fs := newFlags("patch", "<old> <patch> -o <new>")
 	out := fs.String("o", "", "write the result here (required)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 2 || *out == "" {
-		return exitf(codeUsage, "patch needs a binary, a patch and -o")
-	}
-	old, err := os.ReadFile(fs.Arg(0))
+	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
-	p, err := os.ReadFile(fs.Arg(1))
+	if len(pos) != 2 || *out == "" {
+		return exitf(codeUsage, "patch needs a binary, a patch and -o")
+	}
+	old, err := os.ReadFile(pos[0])
+	if err != nil {
+		return err
+	}
+	p, err := os.ReadFile(pos[1])
 	if err != nil {
 		return err
 	}

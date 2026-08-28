@@ -113,3 +113,38 @@ func newFlags(name, args string) *flag.FlagSet {
 	}
 	return fs
 }
+
+// parse runs fs over args and returns the operands. stdlib flag stops at the
+// first word that is not a flag, so a command's flags would only work before
+// its operands, while README.md 5 documents them after ("diff <old> <new> -o
+// <patch>"); each round takes the operands flag stopped on and re-parses what
+// follows, so either order works. A "--" still ends flag parsing for good.
+func parse(fs *flag.FlagSet, args []string) ([]string, error) {
+	var pos []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return pos, nil
+		}
+		// flag consumes a "--" it stops on, so the remainder starting just
+		// after one is the whole rest of the command line, verbatim.
+		if n := len(args) - len(rest); n > 0 && args[n-1] == "--" {
+			return append(pos, rest...), nil
+		}
+		// Otherwise flag stopped on an operand: take it and the ones after
+		// it, then let flag have the next word beginning with "-".
+		i := 1
+		for i < len(rest) && !isFlag(rest[i]) {
+			i++
+		}
+		pos = append(pos, rest[:i]...)
+		args = rest[i:]
+	}
+}
+
+// isFlag is stdlib flag's own rule for a word it will try to parse, so a lone
+// "-" stays an operand.
+func isFlag(s string) bool { return len(s) > 1 && s[0] == '-' }
