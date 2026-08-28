@@ -104,9 +104,22 @@ type typeWalk struct {
 	// vote, when set, is called for every relative field with the field's
 	// old section offset, the old absolute target, and the field kind
 	// ('n' nameOff, 't' typeOff, 'x' textOff).
-	vote    func(off, target uint64, kind byte)
+	vote func(off, target uint64, kind byte)
+	// site, when set, is called for every field the walk rewrites and for
+	// every descriptor it enters, with the old section offset, the width
+	// and the role in w.role. It exists for measurement (delta/measure.go)
+	// and is nil on every path the encoder or the decoder takes.
+	site    func(off uint64, n int, role byte)
+	role    byte
 	visited map[uint64]bool
 	queue   []uint64
+}
+
+// mark reports one rewritten field to a measurement callback.
+func (w *typeWalk) mark(off uint64) {
+	if w.site != nil {
+		w.site(off, 4, w.role)
+	}
 }
 
 // rewriteTypeOffsets rewrites the relative fields of the old binary's
@@ -175,6 +188,7 @@ func (w *typeWalk) enqueue(a uint64) {
 }
 
 func (w *typeWalk) doName(off uint64) {
+	w.mark(off)
 	if w.vote != nil {
 		w.vote(off, w.old.Mod.Types+uint64(w.u32(off)), 'n')
 	}
@@ -209,6 +223,7 @@ func (w *typeWalk) doNameData(a uint64) {
 	if p+4 > uint64(len(w.d)) {
 		return
 	}
+	w.mark(p)
 	if w.vote != nil {
 		w.vote(p, w.old.Mod.Types+uint64(w.u32(p)), 'n')
 	}
@@ -246,6 +261,7 @@ func (w *typeWalk) doType(off uint64) {
 	if v == 0 {
 		return
 	}
+	w.mark(off)
 	if w.vote != nil {
 		w.vote(off, w.old.Mod.Types+uint64(v), 't')
 	}
@@ -260,6 +276,7 @@ func (w *typeWalk) doText(off uint64) {
 	if v == ^uint32(0) {
 		return
 	}
+	w.mark(off)
 	if w.vote != nil {
 		w.vote(off, w.old.Mod.Text+uint64(v), 'x')
 	}
@@ -313,13 +330,21 @@ func (w *typeWalk) descriptor(o uint64) {
 		return
 	}
 	tflag := w.d[o+20]
+	if w.site != nil {
+		if sz := descSize(w.d, o); sz > 0 {
+			w.site(o, sz, 'D')
+		}
+	}
+	w.role = 'n'
 	w.doNameOff(o + 40) // Str
-	w.doType(o + 44)    // PtrToThis
+	w.role = 'p'
+	w.doType(o + 44) // PtrToThis
 	base := uint64(baseSize(kind))
 	var ut uint64
 	if tflag&tflagUncommon != 0 {
 		ut = o + base
 		if ut+sizeUncommon <= uint64(len(w.d)) {
+			w.role = 'n'
 			w.doNameOff(ut) // PkgPath
 		}
 	}
@@ -346,21 +371,26 @@ func (w *typeWalk) descriptor(o uint64) {
 			}
 		}
 	case kindIface:
+		w.role = 'n'
 		w.doNameData(w.u64(o + 48)) // PkgPath
 		ms, n := w.u64(o+56), w.u64(o+64)
 		if w.inSect(ms) && n < 1<<16 {
 			mo := ms - w.os.Addr
 			for k := uint64(0); k < n && mo+sizeImethod*(k+1) <= uint64(len(w.d)); k++ {
+				w.role = 'n'
 				w.doNameOff(mo + sizeImethod*k)
+				w.role = 't'
 				w.doType(mo + sizeImethod*k + 4)
 			}
 		}
 	case kindStruct:
+		w.role = 'n'
 		w.doNameData(w.u64(o + 48)) // PkgPath
 		fs, n := w.u64(o+56), w.u64(o+64)
 		if w.inSect(fs) && n < 1<<16 {
 			fo := fs - w.os.Addr
 			for k := uint64(0); k < n && fo+sizeField*(k+1) <= uint64(len(w.d)); k++ {
+				w.role = 'n'
 				w.doNameData(w.u64(fo + sizeField*k))
 				w.enqueue(w.u64(fo + sizeField*k + 8))
 			}
@@ -369,6 +399,7 @@ func (w *typeWalk) descriptor(o uint64) {
 	if ut != 0 && ut+sizeUncommon <= uint64(len(w.d)) {
 		mcount := uint64(binary.LittleEndian.Uint16(w.d[ut+4:]))
 		moff := uint64(w.u32(ut + 8))
+		w.role = 'M'
 		for k := range mcount {
 			mo := ut + moff + sizeMethod*k
 			if mo+sizeMethod > uint64(len(w.d)) {

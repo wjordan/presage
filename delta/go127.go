@@ -7,6 +7,68 @@ import (
 	"github.com/wjordan/go-binsync/delta/x86"
 )
 
+// goPred is everything the prediction was built from. It exists so that
+// encodeGoAMD64 and the measurement hook in measure.go run the same code:
+// the prediction the correction is measured against must be the one the
+// decoder produces.
+type goPred struct {
+	ob, nb, skel   *gobin.Bin
+	m, m2          *match
+	lay            *layout
+	mp             *mapper
+	layRaw         []byte
+	s1a, s1b       []byte
+	s1aNew, s1bNew []byte
+	pred           []byte
+	xst            x86.Stats
+}
+
+// predictGoAMD64 runs the transform up to and including the prediction.
+func predictGoAMD64(old, new []byte) (*goPred, error) {
+	g := &goPred{}
+	var err error
+	if g.ob, err = gobin.Parse(old); err != nil {
+		return nil, asUnsupported("old", err)
+	}
+	if g.nb, err = gobin.Parse(new); err != nil {
+		return nil, asUnsupported("new", err)
+	}
+	ob, nb := g.ob, g.nb
+	g.m = matchFuncs(ob, nb)
+
+	dmaps, shifts := buildMaps(ob, nb, g.m)
+	ov := deriveOverrides(ob, nb, g.m, dmaps, shifts)
+	g.layRaw = buildLayout(ob, nb, g.m, dmaps, shifts, ov).encode(ob)
+
+	// From here the encoder runs the decoder's code on the decoder's inputs:
+	// the layout as it will be decoded, and a skeleton built from it. That
+	// is what guarantees the prediction the correction is measured against
+	// is the prediction the decoder will produce.
+	g.skel, g.m2, err = skeletonFrom(ob, g.layRaw)
+	if err != nil {
+		return nil, err
+	}
+	g.lay, _ = decodeLayout(g.layRaw, ob)
+
+	g.s1aNew = stage1aBlobs(nb)
+	g.s1a = plainDiff(stage1aBlobs(ob), g.s1aNew)
+	if err := fillTables(g.skel, stage1aRanges(g.skel.Pcln), g.s1aNew); err != nil {
+		return nil, err
+	}
+
+	g.mp = newMapper(ob, g.skel, g.m2, g.lay)
+	bp := predictBlobs(ob, g.skel, g.m2, g.mp)
+	g.s1bNew = stage1bBlobs(nb)
+	g.s1b = plainDiff(bp.concat(), g.s1bNew)
+	if err := fillTables(g.skel, stage1bRanges(g.skel.Pcln), g.s1bNew); err != nil {
+		return nil, err
+	}
+	g.mp.blobs = bp
+
+	g.pred = predictWhole(ob, g.skel, g.lay, g.mp, &g.xst)
+	return g, nil
+}
+
 // The Go-aware transform. The patch body is four streams:
 //
 //	layout    the new file's shape: section table, moduledata values,
@@ -24,69 +86,32 @@ import (
 // 32-byte hash and a table entry each and buys nothing -- compressed
 // separately they come to within 0.1 % of the same total.
 func encodeGoAMD64(old, new []byte, o Options, st *Stats) ([]byte, error) {
-	ob, err := gobin.Parse(old)
-	if err != nil {
-		return nil, asUnsupported("old", err)
-	}
-	nb, err := gobin.Parse(new)
-	if err != nil {
-		return nil, asUnsupported("new", err)
-	}
-	m := matchFuncs(ob, nb)
-	st.Funcs = len(nb.Funcs)
-	st.Matched = m.Exact + m.Norm + m.Content
-	st.NewFuncs = m.Unmatched
-
-	dmaps, shifts := buildMaps(ob, nb, m)
-	ov := deriveOverrides(ob, nb, m, dmaps, shifts)
-	layRaw := buildLayout(ob, nb, m, dmaps, shifts, ov).encode(ob)
-
-	// From here the encoder runs the decoder's code on the decoder's inputs:
-	// the layout as it will be decoded, and a skeleton built from it. That
-	// is what guarantees the prediction the correction is measured against
-	// is the prediction the decoder will produce.
-	skel, m2, err := skeletonFrom(ob, layRaw)
+	g, err := predictGoAMD64(old, new)
 	if err != nil {
 		return nil, err
 	}
-	lay, _ := decodeLayout(layRaw, ob)
-
-	s1aNew := stage1aBlobs(nb)
-	s1a := plainDiff(stage1aBlobs(ob), s1aNew)
-	if err := fillTables(skel, stage1aRanges(skel.Pcln), s1aNew); err != nil {
-		return nil, err
-	}
-
-	mp := newMapper(ob, skel, m2, lay)
-	bp := predictBlobs(ob, skel, m2, mp)
-	s1bNew := stage1bBlobs(nb)
-	s1b := plainDiff(bp.concat(), s1bNew)
-	if err := fillTables(skel, stage1bRanges(skel.Pcln), s1bNew); err != nil {
-		return nil, err
-	}
-	mp.blobs = bp
-
-	var xst x86.Stats
-	pred := predictWhole(ob, skel, lay, mp, &xst)
-	st.PredictErr = diffBytes(pred, new)
+	st.Funcs = len(g.nb.Funcs)
+	st.Matched = g.m.Exact + g.m.Norm + g.m.Content
+	st.NewFuncs = g.m.Unmatched
+	st.PredictErr = diffBytes(g.pred, new)
 	st.Notes = append(st.Notes, fmt.Sprintf("%d insns, %d undecodable bytes, %d unrelocatable refs",
-		xst.Insns, xst.Fails, xst.Unknown+xst.NoFit))
-	s2, err := encodeCorrection(pred, new)
+		g.xst.Insns, g.xst.Fails, g.xst.Unknown+g.xst.NoFit))
+	s2, err := encodeCorrection(g.pred, new)
 	if err != nil {
 		return nil, err
 	}
 
-	st.Layout, st.Stage1a, st.Stage1b, st.Stage2 = len(layRaw), len(s1a), len(s1b), len(s2)
+	st.Layout, st.Stage1a, st.Stage1b, st.Stage2 = len(g.layRaw), len(g.s1a), len(g.s1b), len(s2)
 	w := &wbuf{}
-	w.bytes(layRaw)
-	w.u(uint64(len(s1aNew)))
-	w.bytes(s1a)
+	w.bytes(g.layRaw)
+	w.u(uint64(len(g.s1aNew)))
+	w.bytes(g.s1a)
 	// The predicted 1b blobs are padded to the new tables' lengths but never
 	// truncated, so a release that shrank a table leaves the prediction
 	// longer than the truth; the decoder is told what to expect.
-	w.u(uint64(len(s1bNew)))
-	w.bytes(s1b)
-	sum := hashOf(pred)
+	w.u(uint64(len(g.s1bNew)))
+	w.bytes(g.s1b)
+	sum := hashOf(g.pred)
 	w.raw(sum[:])
 	w.raw(s2)
 	return w.b, nil
