@@ -3,6 +3,7 @@ package delta
 import (
 	"encoding/binary"
 	"sort"
+	"strings"
 
 	"github.com/wjordan/go-binsync/delta/gobin"
 )
@@ -58,37 +59,52 @@ func predictPcln(old, new *gobin.Bin, m *match, l *layout, bp *blobPred) []byte 
 	hdr := uint64(nfunc*8 + 4)
 	recOff := make([]uint64, nfunc)
 	recs := make([][]byte, nfunc)
+
+	// Pass 1: the matched functions' records, re-targeted. The functions the
+	// release added are filled from these, so they have to exist first.
+	for j := range new.Funcs {
+		i := m.NewToOld[j]
+		if i < 0 {
+			continue
+		}
+		f := old.Funcs[i]
+		npc, nfd, sz := op.Record(f.FuncOff)
+		rec := append([]byte(nil), oft[f.FuncOff:uint64(f.FuncOff)+uint64(sz)]...)
+		for _, o := range []int{16, 20, 24} { // pcsp, pcfile, pcln
+			if x := binary.LittleEndian.Uint32(rec[o:]); x != 0 {
+				binary.LittleEndian.PutUint32(rec[o:], mapPc(x))
+			}
+		}
+		for k := range int(npc) {
+			o := gobin.FuncSize + 4*k
+			if x := binary.LittleEndian.Uint32(rec[o:]); x != 0 {
+				binary.LittleEndian.PutUint32(rec[o:], mapPc(x))
+			}
+		}
+		for k := range int(nfd) {
+			o := gobin.FuncSize + 4*int(npc) + 4*k
+			if x := binary.LittleEndian.Uint32(rec[o:]); x != ^uint32(0) {
+				binary.LittleEndian.PutUint32(rec[o:], mapGf(x))
+			}
+		}
+		if x := binary.LittleEndian.Uint32(rec[32:]); x != ^uint32(0) { // cuOffset
+			binary.LittleEndian.PutUint32(rec[32:], uint32(cuMap.Map(uint64(x)*4)/4))
+		}
+		recs[j] = rec
+	}
+	tpl := modalRecord(recs)
+	tpl.learnFuncID(old, oft)
+
+	// Pass 2: reshape what the layout says changed shape, synthesise the
+	// rest from the template, and lay the records out.
 	size := hdr
 	var prevCU uint32
 	for j, g := range new.Funcs {
-		i := m.NewToOld[j]
-		var rec []byte
-		if i >= 0 {
-			f := old.Funcs[i]
-			npc, nfd, sz := op.Record(f.FuncOff)
-			rec = append([]byte(nil), oft[f.FuncOff:uint64(f.FuncOff)+uint64(sz)]...)
-			for _, o := range []int{16, 20, 24} { // pcsp, pcfile, pcln
-				if x := binary.LittleEndian.Uint32(rec[o:]); x != 0 {
-					binary.LittleEndian.PutUint32(rec[o:], mapPc(x))
-				}
-			}
-			for k := range int(npc) {
-				o := gobin.FuncSize + 4*k
-				if x := binary.LittleEndian.Uint32(rec[o:]); x != 0 {
-					binary.LittleEndian.PutUint32(rec[o:], mapPc(x))
-				}
-			}
-			for k := range int(nfd) {
-				o := gobin.FuncSize + 4*int(npc) + 4*k
-				if x := binary.LittleEndian.Uint32(rec[o:]); x != ^uint32(0) {
-					binary.LittleEndian.PutUint32(rec[o:], mapGf(x))
-				}
-			}
-			if x := binary.LittleEndian.Uint32(rec[32:]); x != ^uint32(0) { // cuOffset
-				binary.LittleEndian.PutUint32(rec[32:], uint32(cuMap.Map(uint64(x)*4)/4))
-			}
+		rec := recs[j]
+		if rec != nil {
+			npc, nfd := binary.LittleEndian.Uint32(rec[28:]), uint32(rec[43])
 			if sh, ok := shapes[j]; ok && sh != [2]uint32{npc, nfd} {
-				rec = reshape(rec, npc, nfd, sh)
+				rec = reshape(rec, npc, nfd, sh, tpl)
 			}
 			prevCU = binary.LittleEndian.Uint32(rec[32:])
 		} else {
@@ -96,13 +112,7 @@ func predictPcln(old, new *gobin.Bin, m *match, l *layout, bp *blobPred) []byte 
 			if sh, ok := shapes[j]; ok {
 				npc, nfd = sh[0], sh[1]
 			}
-			rec = make([]byte, gobin.FuncSize+4*npc+4*nfd)
-			binary.LittleEndian.PutUint32(rec[28:], npc)
-			binary.LittleEndian.PutUint32(rec[32:], prevCU)
-			rec[43] = byte(nfd)
-			for k := range int(nfd) {
-				binary.LittleEndian.PutUint32(rec[gobin.FuncSize+4*int(npc)+4*k:], ^uint32(0))
-			}
+			rec = tpl.synth(npc, nfd, prevCU, g.Name)
 		}
 		binary.LittleEndian.PutUint32(rec[0:], uint32(g.Entry-new.Mod.Text))
 		binary.LittleEndian.PutUint32(rec[4:], uint32(nameOff[j]))
@@ -149,24 +159,204 @@ func predictPcln(old, new *gobin.Bin, m *match, l *layout, bp *blobPred) []byte 
 }
 
 // reshape rewrites a _func record whose pcdata/funcdata counts changed,
-// keeping the header and whatever of the arrays still exists.
-func reshape(rec []byte, npc, nfd uint32, sh [2]uint32) []byte {
+// keeping the header and whatever of the arrays still exists. A slot the old
+// record has no counterpart for takes the template's value.
+func reshape(rec []byte, npc, nfd uint32, sh [2]uint32, tpl *funcTemplate) []byte {
 	nr := make([]byte, gobin.FuncSize+4*sh[0]+4*sh[1])
 	copy(nr, rec[:gobin.FuncSize])
-	for k := range min(sh[0], npc) {
-		copy(nr[gobin.FuncSize+4*k:], rec[gobin.FuncSize+4*k:gobin.FuncSize+4*k+4])
+	for k := range sh[0] {
+		o := gobin.FuncSize + 4*k
+		if k < npc {
+			copy(nr[o:], rec[o:o+4])
+		} else {
+			binary.LittleEndian.PutUint32(nr[o:], tpl.pcdataAt(k))
+		}
 	}
 	for k := range sh[1] {
 		o := gobin.FuncSize + 4*sh[0] + 4*k
 		if k < nfd {
 			copy(nr[o:], rec[gobin.FuncSize+4*npc+4*k:gobin.FuncSize+4*npc+4*k+4])
 		} else {
-			binary.LittleEndian.PutUint32(nr[o:], ^uint32(0))
+			binary.LittleEndian.PutUint32(nr[o:], tpl.funcdataAt(k))
 		}
 	}
 	binary.LittleEndian.PutUint32(nr[28:], sh[0])
 	nr[43] = byte(sh[1])
 	return nr
+}
+
+// tplWords are the _func header words a synthesised record takes from the
+// template, by their offset in the record.
+var tplWords = [...]int{8, 12, 16, 20, 24} // args, deferreturn, pcsp, pcfile, pcln
+
+// A funcTemplate is the commonest value of each repeating _func field across
+// the matched functions' re-targeted records. What a release adds is mostly
+// compiler-generated wrappers, and a wrapper's record is the same record over
+// and over -- the same argument and locals pointer maps, the same arg-info
+// streams, the same frame size -- so the modal record predicts most of a new
+// function's funcdata array and its argument size, where the zeroed record
+// the codec used to synthesise predicted none of it. Both sides build the
+// template from the same re-targeted records, so it costs no patch bytes and
+// stays symmetric.
+//
+// funcID is the exception the mode cannot carry: it is 0 for an ordinary
+// function and the wrapper id for a wrapper, so it is taken per name key
+// instead (byKey). entryOff, nameOff and cuOffset are per-function and the
+// caller sets them; startLine is a source line and does not repeat, so it
+// stays zero.
+type funcTemplate struct {
+	word             [len(tplWords)]uint32
+	funcID, flag     byte
+	pcdata, funcdata []uint32
+	byKey            map[string]byte // modal funcID per name key
+}
+
+// nameKey is a coarse shape of a function name: the receiver form and the
+// last dot-separated component with trailing digits stripped, or "fm" for a
+// method value. Compiler-generated wrappers share it, which is what lets the
+// modal funcID be learned per key.
+func nameKey(n string) string {
+	if strings.HasSuffix(n, "-fm") {
+		return "fm"
+	}
+	d, depth := -1, 0
+	for i := 0; i < len(n); i++ {
+		switch n[i] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+		case '.':
+			if depth == 0 {
+				d = i
+			}
+		}
+	}
+	last := n[d+1:]
+	for len(last) > 0 && last[len(last)-1] >= '0' && last[len(last)-1] <= '9' {
+		last = last[:len(last)-1]
+	}
+	if d < 0 {
+		return last
+	}
+	rec := n[strings.LastIndexByte(n[:d], '.')+1 : d]
+	if strings.HasPrefix(rec, "(*") {
+		return "P|" + last
+	}
+	return last
+}
+
+func modalRecord(recs [][]byte) *funcTemplate {
+	var word [len(tplWords)]map[uint32]int
+	for w := range word {
+		word[w] = map[uint32]int{}
+	}
+	id, flag := map[uint32]int{}, map[uint32]int{}
+	var pcd, fnd []map[uint32]int
+	for _, rec := range recs {
+		if rec == nil {
+			continue
+		}
+		npc, nfd := int(binary.LittleEndian.Uint32(rec[28:])), int(rec[43])
+		if gobin.FuncSize+4*npc+4*nfd > len(rec) {
+			continue
+		}
+		for w, o := range tplWords {
+			word[w][binary.LittleEndian.Uint32(rec[o:])]++
+		}
+		id[uint32(rec[40])]++
+		flag[uint32(rec[41])]++
+		for len(pcd) < npc {
+			pcd = append(pcd, map[uint32]int{})
+		}
+		for len(fnd) < nfd {
+			fnd = append(fnd, map[uint32]int{})
+		}
+		for k := range npc {
+			pcd[k][binary.LittleEndian.Uint32(rec[gobin.FuncSize+4*k:])]++
+		}
+		for k := range nfd {
+			fnd[k][binary.LittleEndian.Uint32(rec[gobin.FuncSize+4*npc+4*k:])]++
+		}
+	}
+	t := &funcTemplate{}
+	for w, c := range word {
+		t.word[w] = modeOf(c, 0)
+	}
+	t.funcID, t.flag = byte(modeOf(id, 0)), byte(modeOf(flag, 0))
+	for _, c := range pcd {
+		t.pcdata = append(t.pcdata, modeOf(c, 0))
+	}
+	for _, c := range fnd {
+		t.funcdata = append(t.funcdata, modeOf(c, ^uint32(0)))
+	}
+	return t
+}
+
+// learnFuncID takes the modal funcID of each name key in the old binary. A
+// new function is mostly a compiler-generated wrapper, and a wrapper's
+// funcID is not the modal 0.
+func (t *funcTemplate) learnFuncID(old *gobin.Bin, oft []byte) {
+	c := map[string]map[uint32]int{}
+	for _, f := range old.Funcs {
+		k := nameKey(f.Name)
+		if c[k] == nil {
+			c[k] = map[uint32]int{}
+		}
+		c[k][uint32(oft[uint64(f.FuncOff)+40])]++
+	}
+	t.byKey = make(map[string]byte, len(c))
+	for k, m := range c {
+		t.byKey[k] = byte(modeOf(m, 0))
+	}
+}
+
+// modeOf is the commonest key of c, ties broken by the smaller value so that
+// the encoder and the decoder pick the same one, and def when c is empty.
+func modeOf(c map[uint32]int, def uint32) uint32 {
+	best, bestN := def, 0
+	for v, n := range c {
+		if n > bestN || n == bestN && v < best {
+			best, bestN = v, n
+		}
+	}
+	return best
+}
+
+func (t *funcTemplate) pcdataAt(k uint32) uint32 {
+	if int(k) < len(t.pcdata) {
+		return t.pcdata[k]
+	}
+	return 0
+}
+
+func (t *funcTemplate) funcdataAt(k uint32) uint32 {
+	if int(k) < len(t.funcdata) {
+		return t.funcdata[k]
+	}
+	return ^uint32(0)
+}
+
+// synth builds the _func record of a function the release added.
+func (t *funcTemplate) synth(npc, nfd, cu uint32, name string) []byte {
+	rec := make([]byte, gobin.FuncSize+4*npc+4*nfd)
+	for w, o := range tplWords {
+		binary.LittleEndian.PutUint32(rec[o:], t.word[w])
+	}
+	binary.LittleEndian.PutUint32(rec[28:], npc)
+	binary.LittleEndian.PutUint32(rec[32:], cu)
+	id := t.funcID
+	if v, ok := t.byKey[nameKey(name)]; ok {
+		id = v
+	}
+	rec[40], rec[41], rec[43] = id, t.flag, byte(nfd)
+	for k := range npc {
+		binary.LittleEndian.PutUint32(rec[gobin.FuncSize+4*k:], t.pcdataAt(k))
+	}
+	for k := range nfd {
+		binary.LittleEndian.PutUint32(rec[gobin.FuncSize+4*npc+4*k:], t.funcdataAt(k))
+	}
+	return rec
 }
 
 // resolveNameOffs decides each new function's offset into the new

@@ -24,7 +24,7 @@ findings, three of them closed:
 | `.text` residual that is mid-instruction (minor) | 632,015 B, 58.4% | probe A: net 70,013–86,463 B |
 | wrong relocated fields that a better address map would fix (minor) | 11,661 of 79,754 (14.6%) | closed, worth 19,283 B |
 | `.gopclntab` residual outside the `_func` records | 0 of 260,298 B | closed |
-| `.gopclntab` `_func` offset fields with a systematic delta (minor) | ≈132,000 of 260,298 B | probe B: ≈45,000 B |
+| `.gopclntab` `_func` offset fields with a systematic delta (minor) | ≈132,000 of 260,298 B | closed in part: the synthesised record, −3,161 B |
 | `.go.type` residual in a field the walker rewrites | minor 27,592 of 766,010 B (3.6%); patch 8,914 of 45,170 (19.7%) | closed on a minor release only |
 | `.go.type` new derived descriptors (minor) | 162,696 B, 52,991 marginal | probe C: net 35,803 B |
 | unmatched-new code already present in the old image (minor) | 1.45× against a 42 MB dictionary, control 572× | closed |
@@ -473,32 +473,62 @@ changed fields the ten commonest deltas cover.
 
 Three readings.
 
-**The five offset fields are a mapping failure, not new content.** `pcsp`,
-`pcfile`, `pcln`, `pcdata[]` and `funcdata[]` hold 222,439 of the 260,298
-wrong bytes (85%), and four of them are dominated by a handful of large
-constant deltas. The counts 1,793 / 1,792 / 1,285 / 1,280 repeat across
-`pcsp`, `pcfile` and `pcdata[]`: one block of about 1,793 functions has its
-`pctab` offsets mapped to the wrong place, and a second block of about 1,280
-has another. That is `buildDataMap` (`delta/pcln.go`, `gfBlock = 16`,
-`gfTol = 4`) picking the wrong block, for whole runs of functions at once.
-Weighting each field's wrong bytes by its top-10 share puts the addressable
-part at roughly 132,000 of 260,298 bytes on the minor pair and 1,112 of 4,549
-on the patch pair; scaling each section's measured marginal by that share gives
-approximately 45,000 and 1,065 compressed bytes — 3.1% and 1.1% of the two
-patches. Both are estimates from a share of *fields* applied to bytes; the
-exact figure needs the fix, not another probe.
+**The five offset fields were the record the codec synthesises for a function
+the release added, not a mapping failure.** `pcsp`, `pcfile`, `pcln`,
+`pcdata[]` and `funcdata[]` hold 222,439 of the 260,298 wrong bytes (85%), and
+four of them are dominated by a handful of large constant deltas. The repeated
+counts 1,793 / 1,792 / 1,285 / 1,280 looked like `buildDataMap`
+(`gfBlock = 16`, `gfTol = 4`) putting whole runs of functions through the
+wrong shift. It was not. Dumping every wrong field together with the map hop
+that produced it shows the large deltas belong, without exception, to
+*unmatched-new* functions, whose `_func` record `delta/pcln.go` synthesised as
+all zeroes with `^0` in every funcdata slot — so `new − predicted` was simply
+the true field value. The +6,759,688 group is 5,508 records, 5,507 of them
+unmatched-new and every one with `funcdata[6] = 0x672507`; +65,616 is 1,793
+unmatched-new records with `pcsp = 0x10050`. The blocks are one library's
+generated method wrappers (`github.com/felixge/httpsnoop.(*rwN).M`): the 6,231
+unmatched-new functions cover only 1,402 distinct record tuples, and the
+largest tuple repeats 1,792 times. The content maps are exonerated — over the
+matched functions they misplace 2,202 `pcln`, 2,597 `pcdata[]` and 2,700
+`funcdata[]` values, all by small local deltas.
+
+The fix is to synthesise the record from the *modal* record of the matched
+functions instead of from zeroes: what a release adds is nearly always a
+compiler-generated wrapper, and a wrapper's record repeats. Both sides compute
+the mode from the same re-targeted records, so it stays symmetric and costs no
+patch bytes. It removes 82,225 of the 260,298 wrong `.gopclntab` bytes on the
+minor pair — `funcdata[]` from 28,581 wrong fields to 12,044, `args` from
+6,567 to 3,933 — and on its own is worth 3,161 bytes of the 1,467,993-byte
+minor patch and 211 of the 93,965-byte patch release. The correction stream
+was already squashing those repeated tuples nearly for free, which is why
+82,225 wrong bytes were worth 0.2% of the patch and why the ≈45,000 estimated
+above was an order too high: a top-10 share of *fields* applied to bytes
+overstates what a compressor charges for the same tuple 1,792 times.
+
+What is left in these fields is `pcsp`, `pcfile`, `pcln` and `pcdata[]` for
+new functions. Those are per-function positions in the new pctab, which the
+decoder does hold by the time the records are built — stage 1b has already
+been applied — so recovering them means replaying the linker's first-use
+emission order over the true pctab rather than taking a mode. That is the open
+item.
 
 **`pcln` and `startLine` are real change.** `pcln` takes 6,685 distinct deltas
 with a top-10 share of 9.0%, `startLine` 5,247 with 21.6% and deltas of +1, +2,
 +4 — source lines moved. 40,469 wrong bytes between them that no regenerator
 recovers.
 
-**Two one-line fixes.** `args` takes 45 values, 96.9% of them in the top ten
-and every one a multiple of 8: the frame's argument-map size changed, and a
-small alphabet already compresses. `funcID` is +23 for 467 of 468 changed
-records on the minor pair and 29 of 30 on the patch pair — the synthesised
-record for an unmatched-new function guesses `funcID = 0` where the truth is
-the wrapper id. Worth 468 bytes; free to fix.
+**`args` and `funcID` came from the same place.** `args` takes 45 values,
+96.9% of them in the top ten and every one a multiple of 8, because the
+synthesised record guessed 0; the modal record fixes 2,634 of them. `funcID`
+was +23 for 467 of 468 changed records on the minor pair and 29 of 30 on the
+patch pair — the wrapper id, where the synthesised record guessed 0. A mode
+cannot carry that one, since the mode over all functions *is* 0, so the codec
+learns the modal `funcID` per name key from the old binary: `nameKey` is the
+receiver form plus the last dot-separated component with its trailing digits
+stripped, or `fm` for a method value, which is what a compiler-generated
+wrapper shares with the wrappers already in the old image. Changed records go
+from 468 to 297, and it is the larger half of the 3,161-byte win — a correct
+byte 40 ends a wrong run early, and the correction stream is charged per run.
 
 ## 10. Probe C — `.go.type` new descriptors by kind
 
