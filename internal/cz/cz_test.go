@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"math/rand"
 	"testing"
+
+	"github.com/andybalholm/brotli"
 )
 
 func TestRoundTrip(t *testing.T) {
@@ -25,6 +27,29 @@ func TestRoundTrip(t *testing.T) {
 		if n > 1000 && len(out) >= len(src) {
 			t.Fatalf("n=%d: compressed %d >= raw %d", n, len(out), len(src))
 		}
+	}
+}
+
+// Large streams go to brotli-11 (always quality 11, whatever the size);
+// zstd is still a candidate because its framing wins on tiny ones.
+func TestCompressChoosesSmallest(t *testing.T) {
+	src := make([]byte, 5<<20)
+	for i := range src {
+		src[i] = byte(i*7 ^ i>>5)
+	}
+	codec, out := Compress(src)
+	if codec != Brotli || len(out) >= len(src) {
+		t.Fatalf("codec %d, %d bytes", codec, len(out))
+	}
+	var buf bytes.Buffer
+	w := brotli.NewWriterOptions(&buf, brotli.WriterOptions{Quality: 11, LGWin: 24})
+	w.Write(src)
+	w.Close()
+	if buf.Len() != len(out) {
+		t.Fatalf("large stream: got %d bytes, brotli-11 gives %d", len(out), buf.Len())
+	}
+	if codec, _ := Compress([]byte{1, 2, 3}); codec != Raw {
+		t.Fatalf("tiny input: codec %d, want raw", codec)
 	}
 }
 

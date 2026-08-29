@@ -109,7 +109,7 @@ decode → byte-exact compare, with every table counted inside the patch:
 | multi-package edit (+2.3 KB code), 30 MB | 145,205 | 171,760 | **1,704** | 85× |
 | second multi-package step (v3 → v4), 30 MB | 30,196 | 40,523 | **580** | 52× |
 | prometheus 3.13.1 → 3.13.2, 94 MB | 2,691,644 | 2,719,152 | **74,112** | 36× |
-| prometheus 3.13.1 → 3.13.2, default build with DWARF, 181 MB | 4,832,993 | — | **335,235** | 14× |
+| prometheus 3.13.1 → 3.13.2, default build with DWARF, 181 MB | 4,832,993 | — | **335,047** | 14× |
 | one-line change, default build with DWARF, 59 MB | 476,887 | — | **2,002** | 238× |
 
 The two DWARF rows are the files as `go build` ships them, zlib-compressed

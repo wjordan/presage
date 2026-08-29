@@ -154,7 +154,7 @@ repository's `delta` package, including its patch header and frame table:
 | multi-package (`v1→v4`, 1.27) | 145,205 | 171,760 | 2,733 | 2,745 | **1,704** | 85× |
 | `v3→v4` (1.27) | 30,196 | 40,523 | 578 | 440 | **580** | 52× |
 | prometheus 3.13.1→3.13.2, built with Go 1.27 (94 MB) | 2,691,644 | 2,719,152 | 111,552 | 95,366 | **74,112** | **36×** |
-| prometheus 3.13.1→3.13.2, default build with DWARF (181 MB) | 4,832,993 | — | — | 8,714,361 | **335,235** | 14× |
+| prometheus 3.13.1→3.13.2, default build with DWARF (181 MB) | 4,832,993 | — | — | 8,714,361 | **335,047** | 14× |
 
 The **presage** column is what `go-binsync` ships today: the same transform
 as one module of the presage codec (`docs/general/presage-core.md`), with the
@@ -172,7 +172,7 @@ with no suffix array and a decoder that applies in place. The synthetic pairs
 move both ways: the two large ones are tens of bytes above the prototype,
 paying for the container (a 120-byte header where the prototype wrote none)
 and for the second stage-1 blob's floor, and the two small ones are ~23 %
-below it, where a patch that is mostly floor gains most from the brotli tier
+below it, where a patch that is mostly floor gains most from brotli
 (§3.5) and from predicting the unallocated bytes (§7).
 
 The official Go 1.26 builds (prometheus 3.13.1→3.13.2: 291,214 B, 9.3×;
@@ -639,29 +639,32 @@ against the `zstd -19` CLI the prototype shelled out to):
 | correction | 162,758 | 79,696 | 85,569 (+7 %) | **74,631 (−6 %)** |
 
 Pure-Go zstd is 6–14 % *worse* than the CLI the research numbers were taken
-with; pure-Go brotli at quality 11 is 6–8 % *better*. Since patch bytes are
-the product, streams take the smaller of zstd and brotli, and the brotli
-quality is chosen by size: 11 up to 4 MiB, 10 above.
+with — klauspost's best level is the equivalent of `zstd -11` (it has no
+btopt/btultra), and the CLI at -19/-22/`--long` is itself still 2–4.5 %
+behind brotli on the same frames. Pure-Go brotli at quality 11 matches the
+reference encoder byte for byte. Since patch bytes are the product, streams
+take the smaller of zstd and brotli-11; zstd stays a candidate because its
+framing wins by a few dozen bytes on the smallest patches (the `v3→v4` pair
+is 580 B with it and 613 B without) and costs ~30 ms per 8 MiB frame to try.
 
-The quality-10 tier is what blobs get, and it is the reason they are no
-longer zstd. Measured on prometheus 3.13.2 (93.8 MB) in the 8 MiB frames a
-blob is cut into, encoding eight-way parallel and decoding sequentially:
+Brotli is always quality 11. An earlier tier dropped to quality 10 above
+4 MiB on the belief that it was 25× faster and within 2 %; re-measured on the
+frames themselves it is 1.7–1.9× faster and 4–5 % larger, for patches and
+blobs alike. Prometheus 3.13.2 (93.8 MB) in the 8 MiB frames a blob is cut
+into, encoding eight-way parallel and decoding sequentially:
 
 | frame codec | blob | encode | decode |
 |---|---:|---:|---:|
 | klauspost zstd, best | 23,838,795 | 2.5 s | 78 ms |
-| brotli-5 | 22,963,451 | 0.4 s | 312 ms |
-| brotli-9 | 22,335,195 | 1.9 s | 343 ms |
-| **brotli-10** | **20,336,968** | **13 s** | **269 ms** |
+| brotli-10 | 20,363,316 | 13.3 s | 317 ms |
+| **brotli-11** | **19,579,925** | **25.7 s** | **268 ms** |
 | `zstd -19 -T0` (CLI, one stream, for reference) | 20,579,646 | 9.4 s | – |
 
-Brotli-10 in independent 8 MiB frames is 15 % smaller than the zstd blob and
-*smaller than a single `zstd -19` stream of the whole file*, which the frame
-split was expected to cost against. The publisher pays 13 s once per release
-and the target pays 269 ms; both are noise beside the 3.5 MB the target does
-not download. The first draft's "blobs are always zstd, they must stream"
-was an assumption about brotli's cost curve at quality 11, and quality 10 is
-a different curve (D22).
+The publisher pays 26 s once per release; the target pays 268 ms and
+downloads 780 KB less than at quality 10. On the 8.7 MB debug-build
+residual (three frames) quality 11 is 4.9 % smaller for 10 s more wall
+clock. The first draft's "blobs are always zstd, they must stream" was an
+assumption about brotli's cost curve (D22).
 
 Each blob frame therefore carries its own codec tag in the pointer, exactly
 as patch frames do, and a blob is not a file any single decompressor reads —
@@ -1117,7 +1120,7 @@ functions; `go test ./...` is 1.7 s in total, and no package is over 0.7 s.
 | D19 | The patch body is one frame per 8 MiB, not one frame per stream | a frame costs a 32-byte hash and a table entry; the streams compressed separately came within 0.1 % of compressing them together (§3.5) |
 | D20 | The encoder transmits the BLAKE3 of its prediction, and every prediction worker count is a compile-time constant | encoder/decoder divergence becomes a named failure and a blob fallback instead of a wrong file caught by the release hash; a prediction that varies with `GOMAXPROCS` is one two hosts can disagree about (§3.7) |
 | D21 | The prediction fills the bytes no allocated section covers: gaps cleared, `.shstrtab` copied from the old file's tail | the base is a copy of the old file, so every section that moved left stale bytes behind in its gap — 3,780 mispredicted bytes on prometheus, 109 after (§3.2) |
-| D22 | Blob frames are brotli-10, not zstd, and carry a per-frame codec tag | 15 % smaller than the zstd blob and smaller than a single `zstd -19` stream, for 13 s of publisher CPU and 269 ms of target CPU on a 94 MB binary (§3.5). Supersedes the "blobs are always zstd" half of D16 |
+| D22 | Blob frames are brotli-11, not zstd, and carry a per-frame codec tag | 18 % smaller than the zstd blob and smaller than a single `zstd -19` stream, for 26 s of publisher CPU and 268 ms of target CPU on a 94 MB binary (§3.5). Supersedes the "blobs are always zstd" half of D16; the quality-10 tier it first shipped with was re-measured at 4 % larger and dropped |
 
 Cut from the first-round design (and why): private signing keys and key
 rotation (D6); the `poke` push endpoint and control socket (D12); inline

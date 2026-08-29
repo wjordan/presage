@@ -61,12 +61,8 @@ func zstdVar(src []byte, opts ...zstd.EOption) int {
 func filepathBase(p string) string { return filepath.Base(p) }
 
 func brotliLen(src []byte) int {
-	q := 11
-	if len(src) > cz.BrotliMax {
-		q = 10
-	}
 	var buf bytes.Buffer
-	w := brotli.NewWriterOptions(&buf, brotli.WriterOptions{Quality: q, LGWin: 24})
+	w := brotli.NewWriterOptions(&buf, brotli.WriterOptions{Quality: 11, LGWin: 24})
 	w.Write(src)
 	w.Close()
 	return buf.Len()

@@ -245,7 +245,7 @@ Status: (a) built in the codec (`delta/debugz.go`, container flag
 `debugz`; `bench/dwarfz` is its CLI) and measured end to end on shipped
 files; (b) built in the codec too (`presage/dwarf`, run by the Go module
 as `presage-core.md` §7 describes; the harness is an adapter over it):
-prometheus 3.13.1 → 3.13.2 with DWARF 335,235 on the shipped files.
+prometheus 3.13.1 → 3.13.2 with DWARF 335,047 on the shipped files.
 Research: `dwarf-research.md`; measurements: `go-module-results.md` "DWARF
 builds". The problem it answers: a default `go build` keeps DWARF — 13 MB
 of zlib-compressed sections on the 43 MB synthetic, 75 MB plaintext in
@@ -580,7 +580,7 @@ small steps — is where every domain's number is large.
 2. **Layered Go region.** *Built* (`presage-core.md` §7): the Go module
    lays per-section equivalence runs and the DWARF field layer over its
    prediction, choosing per pair by price. Exit met: the DWARF prometheus
-   pair 335,235 (harness 323,744, within 3.6 %), stripped unchanged
+   pair 335,047 (harness 323,744, within 3.6 %), stripped unchanged
    (74,112), corpus gate green. The container-level region DAG (§5.2)
    stays deferred until a second consumer needs an input edge.
 3. **Portable path.** Build the `go:pclntab` op to wasm from the same

@@ -120,7 +120,7 @@ Zucchini stream (59 MB / 181 MB):
 | plaintext pair (`dwarfz plain`) | bsdiff | Zucchini | harness, eq outside `.text` | harness, no eq | **presage codec** |
 |---|---:|---:|---:|---:|---:|
 | synthetic v1 → v2c, one line | 476,887 | 597,416 | 2,652 | 2,980 | **2,002** |
-| prometheus 3.13.1 → 3.13.2, default build | 4,832,993 | 5,622,564 | 650,708 | 2,325,208 | **335,235** |
+| prometheus 3.13.1 → 3.13.2, default build | 4,832,993 | 5,622,564 | 650,708 | 2,325,208 | **335,047** |
 
 The last column is the shipped codec (`presage diff`, `presage-core.md`
 §7): the Go module's prediction, then per-section equivalence runs from
