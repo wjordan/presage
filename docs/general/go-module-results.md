@@ -106,8 +106,16 @@ no DWARF field layer, so its debug sections go through the correction as
 shifted bytes; the harness numbers below are what layer (b) adds on top.
 With the harness's own matcher instead of Zucchini's stream
 (`-native-equivalences`, `research/matcher-spike.md`) the prometheus pair
-is 323,744 (min 32 / drop 4096) and the synthetic 2,672. The plaintext
-pairs, Zucchini stream (59 MB / 181 MB):
+is 323,744 (min 32 / drop 4096) and the synthetic 2,672. That matcher now
+lives in `presage/eqmatch` (the harness flag is an adapter) and is exposed
+as presage module `eq`, but not registered by default: as a whole-file
+predictor with the positional correction it is 2.5–2.8× *larger* than the
+`lz` fallback on every pair measured — prometheus stripped 7,218,625 vs
+2,604,181, synthetic 420,341 vs 169,914, libxul 154.0 → 154.0.1 16,403,799
+vs 10,594,355 — because `lz` is the same fuzzy matching plus a literal
+stream. Its 50 % gain over Zucchini above is as the run source under the
+DWARF field layer, which is the shape it is kept for. The plaintext pairs,
+Zucchini stream (59 MB / 181 MB):
 
 | plaintext pair (`dwarfz plain`) | bsdiff | Zucchini | presage, eq outside `.text` | presage, no eq |
 |---|---:|---:|---:|---:|

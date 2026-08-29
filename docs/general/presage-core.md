@@ -84,8 +84,17 @@ Core modules (ids 0–15 reserved): `0 lz` — plan is empty, the region's
 residual is a `PlainDiff` stream against reference 0; not exact. `1 copy` —
 plan is `(ref, off)`; exact. `2 go` (`presage/gomod`) — plan is the Go
 transform's layout, stage-1a and stage-1b streams; `Materialise` runs
-`delta.GoPredict`; exact. Ids above 15 are for admitted modules (SPEC §4.1),
-unused yet.
+`delta.GoPredict`; exact. `3 eq` (`presage/eq.go` over `presage/eqmatch`,
+the matcher of `research/matcher-spike.md`) — plan is the run columns, the
+prediction is the runs copied into place; exact. It is *not* in the default
+registry: standing alone it is the same fuzzy matching as `lz` without the
+literal stream, and measures 2.5–2.8× larger than `lz` on every pair tried
+(prometheus stripped 7,218,625 vs 2,604,181; synthetic 420,341 vs 169,914;
+libxul 154.0 → 154.0.1 16,403,799 vs 10,594,355); as a declared region with
+an `lz` residual it only ties `lz` at 3× the time. Its runs are the base
+under a module that models part of a file — the layered DWARF plan — which
+is where the matcher's measured gain came from. Ids above 15 are for
+admitted modules (SPEC §4.1), unused yet.
 
 Residual: exact regions use the positional correction (`SPEC.md` §6.1 modes
 0–1, as `delta` ships them; modes 2–3 are a follow-up); declared regions use

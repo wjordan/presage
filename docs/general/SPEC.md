@@ -572,7 +572,10 @@ small steps — is where every domain's number is large.
    `delta.Encode` and the self-prediction gate green; prometheus 3.13.1 →
    3.13.2 is 74,135 vs 74,126; the unstripped pair 8,712,789 vs 8,714,361.
    Corrector modes 2–3 are still open (the `.text` residual is 63 KB;
-   *estimate* 10–20 % of that recoverable).
+   *estimate* 10–20 % of that recoverable). The whole-image matcher
+   (`presage/eqmatch`, module `eq`) is in the core but off by default: it
+   ties or loses to `lz` standing alone and earns its place only under a
+   layered plan (`go-module-results.md`).
 2. **Portable path.** Build the `go:pclntab` op to wasm from the same
    source; run under wazero compiler and interpreter on the 30 MB and 94 MB
    pairs; publish ns/function. Exit: identical `H_pred` native vs wasm on

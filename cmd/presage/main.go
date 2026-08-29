@@ -74,9 +74,15 @@ func diff(args []string) error {
 	fs := flag.NewFlagSet("diff", flag.ExitOnError)
 	out := fs.String("o", "", "write the patch here (required)")
 	verbose := fs.Bool("v", false, "report where the patch bytes went")
+	modules := fs.String("modules", "", "restrict the encoder to these modules, by name (e.g. lz,eq)")
 	fs.Parse(flagsFirst(fs, args))
 	if fs.NArg() != 2 || *out == "" {
 		usage()
+	}
+	reg := gomod.Registry()
+	allowed, err := moduleIDs(reg, *modules)
+	if err != nil {
+		return err
 	}
 	old, err := os.ReadFile(fs.Arg(0))
 	if err != nil {
@@ -88,7 +94,7 @@ func diff(args []string) error {
 	}
 	start := time.Now()
 	var st presage.Stats
-	patch, err := presage.Encode([][]byte{old}, target, presage.Options{Registry: gomod.Registry(), Stats: &st})
+	patch, err := presage.Encode([][]byte{old}, target, presage.Options{Registry: reg, Modules: allowed, Stats: &st})
 	if err != nil {
 		return err
 	}
@@ -106,6 +112,27 @@ func diff(args []string) error {
 		}
 	}
 	return nil
+}
+
+// moduleIDs resolves a comma-separated list of module names; empty means
+// every registered module.
+func moduleIDs(reg *presage.Registry, names string) ([]byte, error) {
+	if names == "" {
+		return nil, nil
+	}
+	var ids []byte
+	for _, name := range strings.Split(names, ",") {
+		found := false
+		for _, m := range reg.Candidates() {
+			if m.Name() == name {
+				ids, found = append(ids, m.ID()), true
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("unknown module %q", name)
+		}
+	}
+	return ids, nil
 }
 
 func apply(args []string) error {

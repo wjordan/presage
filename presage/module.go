@@ -33,6 +33,7 @@ const (
 	ModuleLZ   = 0 // shifted delta against reference 0; the fallback for anything
 	ModuleCopy = 1 // bytes of a reference, verbatim
 	ModuleGo   = 2 // the Go linux/amd64 module (presage/gomod)
+	// ModuleEq = 3 is declared in eq.go.
 )
 
 // Registry is the set of modules an encoder may choose from or a decoder
