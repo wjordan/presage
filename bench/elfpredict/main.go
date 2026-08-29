@@ -581,8 +581,8 @@ func buildRungPlans(oldImage, newImage *image, ep equivalencePlan, structure pre
 			s, ok := newImage.Debug[dwarfSecNames[k]]
 			return ok && (!eqCovers(ep, s.Off, s.Size) || k == dwSymtab || k == dwAddr || k == dwStrtab || k == dwFrame)
 		}
-		if dp, ok := buildDwarfPlan(oldImage, newImage, withRecords, addrMap); ok && !noDwarf {
-			dwarfBytes = dp.marshal()
+		if dp, ok := buildDwarfPlan(oldImage, newImage, ep, withRecords, addrMap); ok && !noDwarf {
+			dwarfBytes = dp.Marshal()
 			paired := 0
 			for _, u := range dp.Records[dwInfo] {
 				if u.NewLen != 0 {

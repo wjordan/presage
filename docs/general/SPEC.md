@@ -243,8 +243,9 @@ no equivalences: 2,356 → 1,536 xz, joint brotli 1,314 against the codec's
 
 Status: (a) built in the codec (`delta/debugz.go`, container flag
 `debugz`; `bench/dwarfz` is its CLI) and measured end to end on shipped
-files; (b) built in the harness (`bench/elfpredict/dwarf.go`), not yet
-ported to the codec.
+files; (b) built in the codec too (`presage/dwarf`, run by the Go module
+as `presage-core.md` §7 describes; the harness is an adapter over it):
+prometheus 3.13.1 → 3.13.2 with DWARF 335,235 on the shipped files.
 Research: `dwarf-research.md`; measurements: `go-module-results.md` "DWARF
 builds". The problem it answers: a default `go build` keeps DWARF — 13 MB
 of zlib-compressed sections on the 43 MB synthetic, 75 MB plaintext in
@@ -576,7 +577,13 @@ small steps — is where every domain's number is large.
    (`presage/eqmatch`, module `eq`) is in the core but off by default: it
    ties or loses to `lz` standing alone and earns its place only under a
    layered plan (`go-module-results.md`).
-2. **Portable path.** Build the `go:pclntab` op to wasm from the same
+2. **Layered Go region.** *Built* (`presage-core.md` §7): the Go module
+   lays per-section equivalence runs and the DWARF field layer over its
+   prediction, choosing per pair by price. Exit met: the DWARF prometheus
+   pair 335,235 (harness 323,744, within 3.6 %), stripped unchanged
+   (74,112), corpus gate green. The container-level region DAG (§5.2)
+   stays deferred until a second consumer needs an input edge.
+3. **Portable path.** Build the `go:pclntab` op to wasm from the same
    source; run under wazero compiler and interpreter on the 30 MB and 94 MB
    pairs; publish ns/function. Exit: identical `H_pred` native vs wasm on
    the corpus; AOT decode within 3× native.

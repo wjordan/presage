@@ -135,3 +135,53 @@ selection with measurement. Nested regions. Wasm tier. The DWARF module —
 it is the first thing to build on this core (harness layer (b),
 `bench/elfpredict/dwarf.go`), and it is what forces multi-region and the
 input DAG (its `.text` map comes from the Go region), so those come with it.
+
+## 7. Milestone 2: the layered Go region
+
+The unstripped Go binary is the case M1 leaves at 8.7 MB on prometheus
+(`go-module-results.md`): the transform predicts `.text`, the tables and
+the mapped data sections, and copies every other section positionally —
+the debug sections, `.symtab`, `.strtab` — so an inserted byte in
+`.debug_info` costs the rest of the section. The harness's layered plan
+(eq → Go tables → DWARF fields) has that pair at 323,744.
+
+M2 ports the layering *inside the `go` region*: one region, one module id,
+a plan with three parts. The container's region DAG (SPEC §5.2) stays
+deferred — nothing else needs an input edge yet, and a plan-internal order
+is verified by the same region hash. The three parts, in the order the
+decoder runs them, each writing only what it owns:
+
+1. **Go prediction** (`delta.GoExpand`): the M1 op. Besides the predicted
+   file it exports what the next parts need — which sections the transform
+   *modelled* and which it merely copied, the old→new address map, and the
+   size change of every matched function.
+2. **Equivalence runs** (`presage/eqmatch`), per unmodelled section: the
+   old section against the new one, runs in section-relative offsets, laid
+   over the prediction. This is where `eq` earns its keep (§4): under a
+   layer that then projects the fields the runs stopped at.
+3. **DWARF fields** (`presage/dwarf`, the harness layer moved): for every
+   reference field of the old `.debug_info`, `.debug_addr`, `.debug_frame`,
+   `.debug_line` and `.symtab`, project its position and its value into the
+   new image and write it. Positions project through the run that copied
+   them (or a record table where a section has one — `.debug_info`'s
+   units always, and the fixed-row tables `.symtab`, `.strtab`,
+   `.debug_addr`, `.debug_frame`, which byte matching aligns by chance);
+   values through the nearest run; addresses through the Go map.
+
+Plan: `[go plan][uvarint len][dwarf plan][uvarint len][runs]`, the last two
+absent (length 0) when the file has no `.debug_info`, so a stripped
+binary's plan is M1's. The wire form of the two is `presage/dwarf`'s own
+(`Plan.Marshal`, `Plan.MarshalRuns`), which the harness shares.
+
+Exit: the DWARF prometheus pair (`prom-3.13.{1,2}-Dz`, applied to the
+shipped compressed file) within 10 % of the harness's 323,744, and the
+stripped pair unchanged; corpus gate green.
+
+*Status: built and met.* prometheus DWARF pair 335,235 (from 8,716,505;
+3.6 % above the harness), synthetic 2,002 (harness 2,652), stripped
+prometheus 74,112, corpus gate green. Two things the measurement forced:
+the unallocated sections are not in the transform's layout, so the DWARF
+plan carries their geometry; and the layer is priced against the bare
+prediction where the bare misprediction is under 1 MiB, because
+near-identical builds (the corpus) pay more for the record tables than for
+the positional copy's correction.

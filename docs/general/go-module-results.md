@@ -117,10 +117,24 @@ stream. Its 50 % gain over Zucchini above is as the run source under the
 DWARF field layer, which is the shape it is kept for. The plaintext pairs,
 Zucchini stream (59 MB / 181 MB):
 
-| plaintext pair (`dwarfz plain`) | bsdiff | Zucchini | presage, eq outside `.text` | presage, no eq |
-|---|---:|---:|---:|---:|
-| synthetic v1 → v2c, one line | 476,887 | 597,416 | **2,652** | 2,980 |
-| prometheus 3.13.1 → 3.13.2, default build | 4,832,993 | 5,622,564 | **650,708** | 2,325,208 |
+| plaintext pair (`dwarfz plain`) | bsdiff | Zucchini | harness, eq outside `.text` | harness, no eq | **presage codec** |
+|---|---:|---:|---:|---:|---:|
+| synthetic v1 → v2c, one line | 476,887 | 597,416 | 2,652 | 2,980 | **2,002** |
+| prometheus 3.13.1 → 3.13.2, default build | 4,832,993 | 5,622,564 | 650,708 | 2,325,208 | **335,235** |
+
+The last column is the shipped codec (`presage diff`, `presage-core.md`
+§7): the Go module's prediction, then per-section equivalence runs from
+`presage/eqmatch` over the sections the transform copies positionally, then
+the DWARF field layer (`presage/dwarf`, the harness layer moved) with the
+transform's own address map — 11 s to encode the prometheus pair, 1.4 s to
+apply, both applied back to the exact file. Against the harness's own
+matcher run (323,744) it is within 3.6 %, and the plan is chosen per pair:
+where the debug sections barely changed, the tables cost more than the
+positional copy's correction, so the encoder prices both and keeps the
+smaller (the corpus gate's near-identical builds take the bare prediction).
+The same port found a bug the harness numbers carried: the `.debug_addr`
+header's length was rebuilt as the header record's own length on the
+decoder, 3 wrong bytes per contribution.
 
 These are the end-to-end numbers for the files as `go build` ships them,
 since the recompression adds nothing; the other tools on the shipped

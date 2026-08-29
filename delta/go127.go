@@ -177,14 +177,11 @@ func GoAnalyse(old, new []byte, st *Stats) (plan, pred []byte, err error) {
 // the tables the plan may ask for, so a corrupt plan cannot become an
 // allocation; it is the target's declared size.
 func GoPredict(old, plan []byte, maxLen int64) ([]byte, error) {
-	pred, rest, err := goPredict(old, plan, maxTransform, maxLen)
+	g, err := GoExpand(old, plan, maxLen)
 	if err != nil {
 		return nil, err
 	}
-	if len(rest) != 0 {
-		return nil, fmt.Errorf("%w: %d trailing plan bytes", errCorrupt, len(rest))
-	}
-	return pred, nil
+	return g.Pred, nil
 }
 
 // IsUnsupported reports whether err is the transform declining an input,
@@ -192,10 +189,11 @@ func GoPredict(old, plan []byte, maxLen int64) ([]byte, error) {
 func IsUnsupported(err error) bool { return isUnsupported(err) }
 
 func applyGoAMD64(old, body []byte, h *Header) ([]byte, error) {
-	pred, rest, err := goPredict(old, body, h.Transform, h.NewSize)
+	g, rest, err := goPredict(old, body, h.Transform, h.NewSize)
 	if err != nil {
 		return nil, err
 	}
+	pred := g.pred
 	r := &rbuf{b: rest}
 	var sum Hash
 	copy(sum[:], r.take(32))
@@ -213,8 +211,8 @@ func applyGoAMD64(old, body []byte, h *Header) ([]byte, error) {
 }
 
 // goPredict reads a goAnalyse plan from the front of body and returns the
-// prediction and what follows the plan.
-func goPredict(old, body []byte, tf byte, maxLen int64) (pred, rest []byte, err error) {
+// decoder's state, its prediction in pred, and what follows the plan.
+func goPredict(old, body []byte, tf byte, maxLen int64) (g *goPred, rest []byte, err error) {
 	ob, err := gobin.Parse(old)
 	if err != nil {
 		return nil, nil, fmt.Errorf("delta: this patch needs a Go binary the codec understands: %w", err)
@@ -253,7 +251,9 @@ func goPredict(old, body []byte, tf byte, maxLen int64) (pred, rest []byte, err 
 		return nil, nil, err
 	}
 	mp.blobs = bp
-	return predictWhole(ob, skel, lay, mp, nil), r.b, nil
+	g = &goPred{ob: ob, skel: skel, m2: m, lay: lay, mp: mp}
+	g.pred = predictWhole(ob, skel, lay, mp, nil)
+	return g, r.b, nil
 }
 
 // skeletonFrom decodes a layout and builds the decoder's view of the new
