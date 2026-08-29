@@ -21,7 +21,7 @@ one-line change to a 30 MB Go binary — patch bytes on the wire, linear scale
 
   hdiffz -p-8  ████████████████████████████████████████████████  176,929
   bsdiff       ████████████████████████████████████████▊         150,475
-  go-binsync   ▌                                                   2,262   ← 67× smaller than bsdiff
+  go-binsync   ▏                                                   1,201   ← 125× smaller than bsdiff
 ```
 
 bsdiff and hdiffz are the strongest general-purpose binary differs available.
@@ -82,19 +82,19 @@ built with Go 1.27, fetched over a medium-quality link: 20 Mbit/s, 200 ms RTT,
 
 | | Full download (`zstd -19`) | Generic delta (hdiffz) | go-binsync (Go-aware delta) |
 |---|---:|---:|---:|
-| Bytes sent | 20.6 MB | 2.7 MB | **0.095 MB** |
-| Encode time · peak memory | 9 s · 0.36 GB | 7 s · 0.39 GB | **2.4 s** · 0.90 GB |
-| Apply on the target | 0.1 s · 13 MB | 0.1 s · 25 MB | 0.9 s · 0.92 GB |
-| Transfer on that link | ≈ 2.4 min (≈ 20 s with 8 parallel ranges) | ≈ 15 s | **≈ 1.0 s** |
+| Bytes sent | 20.6 MB | 2.7 MB | **0.074 MB** |
+| Encode time · peak memory | 9 s · 0.36 GB | 7 s · 0.39 GB | **6.1 s** · 0.97 GB |
+| Apply on the target | 0.1 s · 13 MB | 0.1 s · 25 MB | 1.0 s · 0.92 GB |
+| Transfer on that link | ≈ 2.4 min (≈ 20 s with 8 parallel ranges) | ≈ 15 s | **≈ 0.8 s** |
 
 Bytes dominate as the link degrades: with 1 % loss a single TCP stream carries
 about 1.2 Mbit/s whatever the link rate, so the full download takes minutes and
 the generic patch a quarter of a minute, while go-binsync's patch fits in a
-couple of round trips — 213× less than the 20.3 MB blob a cold target would
-take, and 28× less than the best generic delta. (go-binsync fetches that blob
+couple of round trips — 274× less than the 20.3 MB blob a cold target would
+take, and 36× less than the best generic delta. (go-binsync fetches that blob
 with parallel ranged requests, which recovers most of the loss penalty; a small
-patch never pays it in the first place.) The encoder is faster than the generic
-tools because it never builds a suffix array over the file. Memory is the weak
+patch never pays it in the first place.) The encoder builds no suffix array over the
+file; its time goes to running the decoder's prediction to price it. Memory is the weak
 number: the decoder peaks at 7.6× the size of the binary, most of it the
 prediction's working set rather than the file buffers, and getting that to ≈ 2×
 is the open item (`docs/DESIGN.md` §11.3).
@@ -104,11 +104,19 @@ decode → byte-exact compare, with every table counted inside the patch:
 
 | Pair (all built with Go 1.27) | bsdiff | hdiffz | go-binsync | vs bsdiff |
 |---|---:|---:|---:|---:|
-| one-line change, 30 MB | 150,475 | 176,929 | **2,262** | **67×** |
-| +3-byte string literal, 30 MB | 24,874 | 33,713 | **438** | 57× |
-| multi-package edit (+2.3 KB code), 30 MB | 145,205 | 171,760 | **2,745** | 53× |
-| second multi-package step (v3 → v4), 30 MB | 30,196 | 40,523 | **440** | 69× |
-| prometheus 3.13.1 → 3.13.2, 94 MB | 2,691,644 | 2,719,152 | **95,366** | 28× |
+| one-line change, 30 MB | 150,475 | 176,929 | **1,201** | **125×** |
+| +3-byte string literal, 30 MB | 24,874 | 33,713 | **545** | 46× |
+| multi-package edit (+2.3 KB code), 30 MB | 145,205 | 171,760 | **1,704** | 85× |
+| second multi-package step (v3 → v4), 30 MB | 30,196 | 40,523 | **580** | 52× |
+| prometheus 3.13.1 → 3.13.2, 94 MB | 2,691,644 | 2,719,152 | **74,112** | 36× |
+| prometheus 3.13.1 → 3.13.2, default build with DWARF, 181 MB | 4,832,993 | — | **335,235** | 14× |
+| one-line change, default build with DWARF, 59 MB | 476,887 | — | **2,002** | 238× |
+
+The two DWARF rows are the files as `go build` ships them, zlib-compressed
+debug sections and all; the patch is applied back to the exact file. The
+smallest patches carry about 100 B of container — header, frame table and
+the 32-byte hash of the prediction — which is where the 3-byte edit's ratio
+goes.
 
 On a minor release with thousands of new functions the patch is dominated by
 the new content and the gain drops to about 1.6×. That is the expected result:
@@ -132,7 +140,7 @@ for that. Each rung below understands more of the binary than the one above it:
 | `xdelta3 -9` | 1.93 MB | 15.2 MB |
 | `zstd --patch-from` | 538 KB | 8.5 MB |
 | bsdiff / hdiffz | 150 / 177 KB | 2.69 / 2.72 MB |
-| **go-binsync** | **2,262 B** | **95,366 B** |
+| **go-binsync** | **1,201 B** | **74,112 B** |
 
 A chunk store re-sends 93 % of a fresh archive on the one-liner and *more*
 than one on the real release, because almost no chunk survives the shift and
@@ -329,10 +337,10 @@ CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o s
 
 | Knob | Effect |
 |---|---|
-| `-ldflags=-s -w` (strip DWARF + symtab) | **Recommended** (`publish` warns). The codec expands compressed DWARF before diffing and recompresses it exactly on apply, so an unstripped prometheus patch release is 8.7 MB rather than the 29 MB a byte-level tool ships; stripped it is 74 KB, and the binary ~30 % smaller. |
+| `-ldflags=-s -w` (strip DWARF + symtab) | **Recommended** (`publish` warns). The codec expands compressed DWARF before diffing, projects the debug sections' reference fields through its own function map, and recompresses exactly on apply, so an unstripped prometheus patch release is 335 KB rather than the 4.8 MB bsdiff ships (29 MB for Zucchini); stripped it is 74 KB, and the binary ~50 % smaller. |
 | `-ldflags=-buildid=` | removes the ~80 always-changing bytes; identical sources give identical binaries on any build box |
 | `-trimpath`, `CGO_ENABLED=0` | reproducible builds — the head hash is derivable from source |
-| `-buildmode=exe` or `-buildmode=pie` | either; a PIE binary is ~10 % larger and its patches are the same size (one-line change: 1,277 B PIE, 1,334 B exe) |
+| `-buildmode=exe` or `-buildmode=pie` | either; a PIE binary is ~10 % larger and its patches are the same size (one-line change: 1,156 B PIE, 1,201 B exe) |
 | PGO | freeze the profile across releases you intend to delta |
 
 ## 9. Supported inputs and fallbacks

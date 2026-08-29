@@ -147,13 +147,24 @@ and counted (nothing is an oracle input). The prototype column is
 `bench/gotransform/` (`go-aware-transform.md` §10–11); **v1** is this
 repository's `delta` package, including its patch header and frame table:
 
-| Pair (toolchain) | bsdiff | hdiffz -p-8 | prototype | **v1** | vs bsdiff |
-|---|---:|---:|---:|---:|---:|
-| one-line (`v1→v2c`, 29.6 MB, Go 1.27) | 150,475 | 176,929 | 2,207 | **2,262** | 67× |
-| +3-byte string (`v1→v2l`, 1.27) | 24,874 | 33,713 | 566 | **438** | 57× |
-| multi-package (`v1→v4`, 1.27) | 145,205 | 171,760 | 2,733 | **2,745** | 53× |
-| `v3→v4` (1.27) | 30,196 | 40,523 | 578 | **440** | 69× |
-| prometheus 3.13.1→3.13.2, built with Go 1.27 (94 MB) | 2,691,644 | 2,719,152 | 111,552 | **95,366** | **28×** |
+| Pair (toolchain) | bsdiff | hdiffz -p-8 | prototype | v1 | **presage** | vs bsdiff |
+|---|---:|---:|---:|---:|---:|---:|
+| one-line (`v1→v2c`, 29.6 MB, Go 1.27) | 150,475 | 176,929 | 2,207 | 2,262 | **1,201** | 125× |
+| +3-byte string (`v1→v2l`, 1.27) | 24,874 | 33,713 | 566 | 438 | **545** | 46× |
+| multi-package (`v1→v4`, 1.27) | 145,205 | 171,760 | 2,733 | 2,745 | **1,704** | 85× |
+| `v3→v4` (1.27) | 30,196 | 40,523 | 578 | 440 | **580** | 52× |
+| prometheus 3.13.1→3.13.2, built with Go 1.27 (94 MB) | 2,691,644 | 2,719,152 | 111,552 | 95,366 | **74,112** | **36×** |
+| prometheus 3.13.1→3.13.2, default build with DWARF (181 MB) | 4,832,993 | — | — | 8,714,361 | **335,235** | 14× |
+
+The **presage** column is what `go-binsync` ships today: the same transform
+as one module of the presage codec (`docs/general/presage-core.md`), with the
+segment maps, far pieces, pointer consensus and the header prediction of
+§3.2–§3.4 landed after v1, and for a default build the DWARF field layer
+(§3.5, `presage/dwarf`). The two smallest pairs are above v1 by the presage
+container's ~100 B — a region record, a frame table and the prediction's
+32-byte hash — which the per-pair corpus gate accepts (within 2 % + 64 B of
+`delta.Encode`). The v1 column and the discussion below are the history of
+how the transform got there.
 
 The real pair is 14 % below the prototype and within 1 % of the 94,470 B that
 an hdiffz stage 2 reached (the range §3.4 was aiming for), from an encoder

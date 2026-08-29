@@ -1,0 +1,175 @@
+<title>Patching Go Binaries with Presage</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+:root{
+  --bg:#f5f7f9; --paper:#ffffff; --ink:#182230; --ink2:#4b5563; --muted:#6b7683;
+  --rule:#d9dee4; --rule2:#eceff2; --code-bg:#eef1f4;
+  --plan:#1d67b0; --plan-soft:#dbe7f4; --fix:#c96a2e; --fix-soft:#f6e3d6;
+  --go:#2f7d4f; --go-soft:#dcefe3; --bad:#b3402f;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#12171d; --paper:#181e25; --ink:#e6e9ec; --ink2:#c2c9d1; --muted:#98a3ae;
+    --rule:#2c343e; --rule2:#222932; --code-bg:#1f262e;
+    --plan:#4a90d6; --plan-soft:#1c2f44; --fix:#cf7a42; --fix-soft:#3a2818;
+    --go:#5fb37f; --go-soft:#1c3326; --bad:#e0705f; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#12171d; --paper:#181e25; --ink:#e6e9ec; --ink2:#c2c9d1; --muted:#98a3ae;
+  --rule:#2c343e; --rule2:#222932; --code-bg:#1f262e;
+  --plan:#4a90d6; --plan-soft:#1c2f44; --fix:#cf7a42; --fix-soft:#3a2818;
+  --go:#5fb37f; --go-soft:#1c3326; --bad:#e0705f; color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Source Serif 4",Georgia,"Times New Roman",serif;font-size:18px;line-height:1.55;-webkit-font-smoothing:antialiased}
+h1,h2,table,figcaption,.eyebrow,code,.mono{font-family:"JetBrains Mono","SFMono-Regular",Menlo,Consolas,monospace}
+main{max-width:66ch;margin:0 auto;padding:56px 24px 96px}
+.eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+h1{font-size:clamp(30px,4.5vw,44px);line-height:1.12;font-weight:700;letter-spacing:-.02em;margin:10px 0 18px;text-wrap:balance}
+h2{font-size:22px;font-weight:700;letter-spacing:-.01em;margin:64px 0 6px;text-wrap:balance}
+p{margin:0 0 18px}
+.lede{font-size:21px;line-height:1.45;color:var(--ink2)}
+code{font-size:.86em;background:var(--code-bg);padding:1px 5px;border-radius:3px}
+strong{font-weight:600}
+.plan{color:var(--plan);font-weight:600}.fix{color:var(--fix);font-weight:600}.golayer{color:var(--go);font-weight:600}
+figure{margin:28px 0}
+figcaption{font-size:13px;color:var(--muted);line-height:1.5;margin-top:10px}
+.card{background:var(--paper);border:1px solid var(--rule);border-radius:8px;padding:20px 22px}
+.tbl{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
+th,td{padding:7px 10px;border-bottom:1px solid var(--rule2);text-align:left;vertical-align:top}
+th{font-weight:500;color:var(--muted);font-size:12px;letter-spacing:.04em;text-transform:uppercase}
+td.n,th.n{text-align:right;white-space:nowrap}
+td.hi{color:var(--go);font-weight:700}
+canvas{display:block;width:100%;height:auto}
+.key{display:flex;flex-wrap:wrap;gap:14px;font:12px "JetBrains Mono",monospace;color:var(--muted);margin-top:8px}
+.key span::before{content:"";display:inline-block;width:10px;height:10px;margin-right:6px;vertical-align:-1px;border-radius:2px;background:var(--k)}
+.notes p{font-size:15px;color:var(--ink2);margin-bottom:12px}
+hr{border:0;border-top:1px solid var(--rule);margin:56px 0}
+</style>
+<main>
+<div class="eyebrow">presage · research note · follow-up</div>
+<h1>Patching Go binaries with presage</h1>
+<p class="lede">The first note showed presage halving Chrome's Zucchini patches by having the decoder rebuild the parts of a binary a small change disturbs. Go binaries carry a different kind of disturbance — tens of megabytes of tables the linker regenerates on every build — and one extra layer that understands those tables turns a 3 MB patch into a 74 KB one — and, on the builds most people actually ship, a layer over <em>that</em> turns a 9 MB patch into 335 KB.</p>
+
+<figure class="card"><div class="tbl"><table>
+<tr><th>Method</th><th class="n">Bytes</th></tr>
+<tr><td>Full download</td><td class="n">18,441,744</td></tr>
+<tr><td>Zucchini</td><td class="n">3,031,380</td></tr>
+<tr><td>go-binsync, the Go-specific codec it grew out of</td><td class="n">74,126</td></tr>
+<tr><td>presage, the shipped codec</td><td class="n hi">74,112</td></tr>
+<tr><td>presage, research harness with per-function selection</td><td class="n">72,192</td></tr>
+</table></div>
+<figcaption>Prometheus 3.13.1 → 3.13.2, a patch release, Linux x86-64, after compression. Full download is the new binary with <code>xz -9</code>. The shipped codec is what <code>go-binsync publish</code> writes today; the harness number is the same layers plus a per-function choice between two code models that has not been ported yet.</figcaption></figure>
+
+<h2>What is in a Go binary</h2>
+<p>A Go program is a statically linked executable with everything it needs inside it: the code, the runtime, and the metadata the runtime uses to run it. That metadata is large. Prometheus 3.13.2 is 94 MB, and less than half of it is machine code.</p>
+
+<figure><canvas id="sections" width="1200" height="150"></canvas>
+<div class="key"><span style="--k:var(--ink2)">.text — machine code</span><span style="--k:var(--go)">.gopclntab — pc/line tables</span><span style="--k:var(--plan)">.go.type — type descriptors</span><span style="--k:var(--fix)">.rodata</span><span style="--k:var(--muted)">other</span></div>
+<figcaption>Prometheus 3.13.2 by section. <code>.gopclntab</code> alone is 35 MB: for every function, a record saying where it starts, what file and line each instruction came from, how deep its stack frame is at each point, which words on the stack are pointers. <code>.go.type</code> is 12 MB of descriptors the runtime consults for reflection, interfaces and garbage collection.</figcaption></figure>
+
+<p>These tables are what make a Go binary hard to patch. They are not written by hand and not preserved between builds: the linker regenerates them from scratch, sorted by address, packed tightly, with offsets pointing at one another. Add one line to one function and that function grows by a few dozen bytes, every function after it moves, and every table entry that names an address moves with it. The code section changes the way the first note described — every branch that crosses the edit gets a new displacement — and the tables change everywhere. Zucchini finds the moved code well enough; it has no way to know that a 35 MB table is a deterministic function of the function list, so it ships the differences, and a patch release comes out at 3 MB.</p>
+
+<p>There is a tool built for exactly this: <em>go-binsync</em>, a codec written specifically for Go executables and the starting point for this work. It reads the old binary's tables, works out from a short description of the new function list what the new tables must contain, regenerates them, and ships only what it got wrong. On the same pair it produces 74 KB. The question this note answers is whether that kind of format knowledge belongs in a separate tool, or whether it can be one layer of a general predictor — and what happens to patch size when it is.</p>
+
+<h2>Presage in one paragraph</h2>
+<p>A presage patch has two parts. The <span class="plan">plan</span> lets the decoder build a complete guess at the new binary from the old one: which functions moved where, which regions are copies of old regions, how references inside them should be translated. The <span class="fix">correction</span> lists every byte the guess got wrong. The guess is deterministic, so the encoder can run the decoder's code, see exactly what it will produce, and price the correction before shipping it. Prediction is built from independent layers — whole-file equivalences, a structural function map, reference retargeting, relocation and unwind-table models — each responsible for a kind of region, and each measured by how many bytes it leaves for the correction.</p>
+
+<h2>The Go layer</h2>
+<p>The Go layer is the go-binsync decoder, called as one more layer. Its plan is small: a description of how the new function list differs from the old one (which functions were added, removed or resized), how the data sections shifted, and a few thousand bytes of table content that cannot be derived. From that and the old binary, the decoder regenerates <code>.gopclntab</code>, the type descriptors and the other Go data sections in full, and lays them into the guess. On the patch release above, the layer's plan is about 60 KB compressed and the tables it writes are 47 MB — essentially all of them correct.</p>
+
+<p>Adding the layer changed two other things about how presage works on these files, both worth explaining.</p>
+
+<p><strong>The function map comes for free.</strong> Presage's structural layer needs to know which old function became which new one, and where each one now lives. On a Chrome binary that map is built from symbols and transmitted. On a Go binary it is already implied by the Go layer's plan — the function list <em>is</em> the map — so the decoder derives it and the plan carries none. On a small change that is the difference between an 18 KB plan and a 2 KB one.</p>
+
+<p><strong>Code is predicted function by function.</strong> The Go layer's model of the code section copies each old function to its new address and retargets its references there. A function that was edited is laid down in pieces — the parts that survived the edit at their new offsets, relocated at their true positions — and the pieces may come from anywhere in the old binary, not just from the function's own old body. That matters more than it sounds: the code a one-line change adds is rarely new to the binary, because the compiler emits the same sequences for the same constructs, and a piece borrowed from the right place is a piece the correction does not have to carry. The encoder tries each candidate by relocating it and keeps it only when the result beats the plain copy by a margin. Presage then chooses, per function, between this model and its own, taking whichever leaves fewer bytes wrong.</p>
+
+<h2>Results</h2>
+<figure class="card"><div class="tbl"><table>
+<tr><th>Pair</th><th>Change</th><th class="n">Zucchini</th><th class="n">presage, generic</th><th class="n">go-binsync</th><th class="n">presage, shipped</th><th class="n">presage, harness</th></tr>
+<tr><td>Prometheus 3.13.1 → 3.13.2</td><td>patch release</td><td class="n">3,031,380</td><td class="n">3,573,176</td><td class="n">74,126</td><td class="n hi">74,112</td><td class="n">72,192</td></tr>
+<tr><td>Prometheus 3.13.2 → 3.14.0</td><td>minor release</td><td class="n">6,143,736</td><td class="n">5,553,876</td><td class="n">1,350,486</td><td class="n hi">1,350,683</td><td class="n">1,274,324</td></tr>
+<tr><td>30 MB test program</td><td>one line added</td><td class="n">173,060</td><td class="n">173,692</td><td class="n">1,184</td><td class="n hi">1,201</td><td class="n">1,476</td></tr>
+<tr><td>same, built as PIE</td><td>one line added</td><td class="n">66,420</td><td class="n">—</td><td class="n">1,140</td><td class="n hi">1,156</td><td class="n">1,488</td></tr>
+</table></div>
+<figcaption>Bytes after compression. The harness column is plan plus correction with <code>xz -9e</code>; the shipped codec and go-binsync write one container with a frame table and a hash of the prediction. The test program is Go's own test server plus enough dependencies to reach 30 MB, rebuilt after adding one <code>if</code> statement.</figcaption></figure>
+
+<p>Three things to read off the table. Without the Go layer, presage is no better than Zucchini on Go binaries — its Chrome-tuned layers can copy the tables but cannot regenerate them. With it, the shipped codec lands within 0.1 % of the Go-specific tool on every pair, which is the point: the Go transform is now one module of a general predictor, and nothing was lost in the move. The harness column is what the research build gets by choosing, per function, between the Go layer's code model and presage's own — 3 % on the patch release, 6 % on the minor — and that choice is the piece still to port. On the one-line change the plan's fixed streams show: about 300 bytes the single-purpose tool never carried.</p>
+
+<figure><canvas id="ladder" width="1200" height="270"></canvas>
+<figcaption>The one-line change, log scale, as the layers land. Regenerating the tables removes two orders of magnitude; deriving the function map removes one more; the rest is the code model and the headers.</figcaption></figure>
+
+<h2>The last thousand bytes</h2>
+<p>At this scale it is worth asking what a patch for a one-line change still contains. Comparing presage's guess against the real file byte by byte: of 30 million bytes, 318 are wrong. 132 of them are random by construction — the build ID the Go linker writes, the GNU build ID, a FIPS integrity hash — and no predictor will ever get them. The remaining 186 are spread over the edited function and a few table entries that refer to it. The rest of the patch is the plan.</p>
+
+<figure><canvas id="func" width="1200" height="200"></canvas>
+<div class="key"><span style="--k:var(--bad)">byte still wrong</span></div>
+<figcaption>The 900 bytes of the edited function, in the guess. Top: copying the old function positionally and relocating it as one block — 372 wrong bytes in long runs, where the inserted code pushed everything after it out of alignment. Bottom: the function laid down in pieces, including pieces borrowed from other functions — 179 wrong bytes, the operands the borrowed code had differently.</figcaption></figure>
+
+<h2>What a default build changes</h2>
+<p>Everything above is for stripped binaries, which is how Go programs are usually shipped. A plain <code>go build</code> also keeps debug information — DWARF — and on the test program that adds 13 MB of it. The sections are compressed with zlib, individually, by the linker. That is a problem for every byte-oriented patcher: the same one-line change that costs 1.2 KB stripped costs <strong>9.3 MB</strong> with debug info, for Zucchini and for the Go codec alike, because a compressed stream whose input changed at all is a different stream from beginning to end.</p>
+
+<figure><canvas id="dwarf" width="1200" height="320"></canvas>
+<div class="key"><span style="--k:var(--ink2)">section size, decompressed</span><span style="--k:var(--bad)">what a byte-level delta of the decompressed section costs</span></div>
+<figcaption>The debug sections of the test program, log scale. Once decompressed, seven of the eight are nearly identical between the two builds. <code>.debug_info</code> is not: it holds 480,000 four-byte references between its own entries, and every one that points past the edited compilation unit shifted by the 61 bytes that unit grew.</figcaption></figure>
+
+<p>This is the shape of problem presage exists for, and it is handled in two layers. Decompression is exact — Go's own <code>compress/zlib</code> reproduces the linker's output byte for byte at the level the linker uses — so the decoder works on the decompressed bytes and recompresses, shipping nothing for the transform itself. And the section that resists a byte-level delta does so for one structural reason, offsets that slid, which is the same reason code and tables resist it, and is handled the same way: the decoder walks the <em>old</em> <code>.debug_info</code> with the old abbreviation table, finds every reference field, projects its position and its value into the new image — through the run of unchanged bytes that carried it, or a table of paired records where a section is rows that byte-matching aligns by chance — and writes the projected value. Addresses go through the function map the Go layer already has. The same walk covers the address, frame and line tables and the symbol table.</p>
+
+<figure class="card"><div class="tbl"><table>
+<tr><th>Pair, default build</th><th class="n">bsdiff</th><th class="n">Zucchini</th><th class="n">go-binsync</th><th class="n">presage, shipped</th></tr>
+<tr><td>30 MB test program with DWARF (59 MB)</td><td class="n">476,887</td><td class="n">9,397,472</td><td class="n">1,408,107</td><td class="n hi">2,002</td></tr>
+<tr><td>Prometheus 3.13.1 → 3.13.2 with DWARF (181 MB)</td><td class="n">4,832,993</td><td class="n">28,963,240</td><td class="n">8,714,361</td><td class="n hi">335,235</td></tr>
+</table></div>
+<figcaption>Bytes after compression, for the files as <code>go build</code> ships them; every patch is applied back to the exact file. bsdiff is given the decompressed pair, the best case for it; Zucchini and go-binsync (with its decompression transform but no field layer) work on the shipped files. The one-line change with debug info now costs 2,002 bytes against 1,201 stripped.</figcaption></figure>
+
+<p>Two things the measurement taught. The equivalence matcher that finds the unchanged runs is worthless on its own — as a whole-file predictor it is 2.5× <em>larger</em> than a plain delta, because a plain delta is the same fuzzy matching with a literal stream — and earns its place only under a layer that fixes what the runs stopped at. And the layer has to be priced: on builds whose debug sections barely changed, the record tables cost more than a positional copy's correction, so the encoder predicts both ways and ships the smaller.</p>
+
+<hr>
+<div class="notes">
+<p>Numbers are from a prototype measured on the pairs shown; the Prometheus binaries are the official release downloads. Zucchini is Chromium's, built from source, with its output compressed by <code>xz -9e</code> as its updater does. Both go-binsync and presage verify their output against the release hash before it is used, so a wrong guess costs bytes, never correctness.</p>
+<p>The Go layer and the piece-wise code model are shared code: the changes made while building the layer — deriving the function map, recomputing the ELF headers from the section table, borrowing code from other functions — also shrank the standalone Go codec's patches, from 1,334 to 1,184 bytes on the one-line change and from 1,353,084 to 1,350,486 on the minor release. Since then the codec has become presage itself: <code>go-binsync</code> publishes presage patches, and the Go transform, the decompression transform and the DWARF layer are its modules.</p>
+</div>
+</main>
+<script>
+(function(){
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const mono='"JetBrains Mono", monospace';
+function ctx(id){const c=document.getElementById(id);const x=c.getContext('2d');x.clearRect(0,0,c.width,c.height);return [c,x];}
+function draw(){
+  const ink=css('--ink'),ink2=css('--ink2'),muted=css('--muted'),rule=css('--rule'),plan=css('--plan'),fix=css('--fix'),go=css('--go'),bad=css('--bad'),paper=css('--paper'),soft=css('--rule2');
+  // sections
+  {const [c,x]=ctx('sections');const W=c.width;const parts=[['.text',42116561,ink2],['.gopclntab',35205370,go],['.go.type',11770480,plan],['.rodata',3678233,fix],['other',998910,muted]];
+   const tot=parts.reduce((a,p)=>a+p[1],0);let px=0;
+   parts.forEach(p=>{const w=p[1]/tot*W;x.fillStyle=p[2];x.fillRect(px,20,w-2,70);if(w>90){x.fillStyle='#fff';x.font='500 18px '+mono;x.fillText(p[0],px+10,50);x.font='16px '+mono;x.fillText((p[1]/1e6).toFixed(1)+' MB',px+10,76)}px+=w});
+   x.fillStyle=muted;x.font='15px '+mono;x.fillText('0',0,120);x.textAlign='right';x.fillText('93.8 MB',W,120);x.textAlign='left';}
+  // ladder
+  {const [c,x]=ctx('ladder');const W=c.width,H=c.height,L=300,R=40,T=24,B=44;
+   const rows=[['Zucchini',173060,muted],['presage, generic',173692,muted],['+ Go tables regenerated',19992,go],['+ function map derived',1868,go],['+ piece-wise code, headers',1476,go]];
+   const lg=v=>Math.log10(v),lo=3,hi=5.4;const rh=(H-T-B)/rows.length;const sx=v=>L+(lg(v)-lo)/(hi-lo)*(W-L-R);
+   [1000,10000,100000].forEach(v=>{const px=sx(v);x.strokeStyle=rule;x.beginPath();x.moveTo(px,T-8);x.lineTo(px,H-B+4);x.stroke();x.fillStyle=muted;x.font='15px '+mono;x.textAlign='center';x.fillText(v>=1e6?(v/1e6)+' MB':(v/1000)+' KB',px,H-B+26)});
+   rows.forEach((r,i)=>{const y=T+i*rh;x.fillStyle=r[2];x.fillRect(L,y+7,sx(r[1])-L,rh-14);x.fillStyle=ink;x.font='17px '+mono;x.textAlign='right';x.fillText(r[0],L-14,y+rh/2+6);x.textAlign='left';x.font='500 16px '+mono;x.fillText(r[1].toLocaleString(),sx(r[1])+10,y+rh/2+6)});}
+  // function strips
+  {const [c,x]=ctx('func');const W=c.width,L=250,base=0xdf11e4,N=900;
+   const before=[[0xdf11e4,1],[0xdf11f4,35],[0xdf1218,18],[0xdf122b,8],[0xdf1234,8],[0xdf1251,18],[0xdf1265,39],[0xdf128d,47],[0xdf12bd,19],[0xdf12d1,20],[0xdf12e7,9],[0xdf12f2,21],[0xdf1332,22],[0xdf1397,22],[0xdf13c9,1],[0xdf13cf,1],[0xdf13dc,31],[0xdf1407,7],[0xdf141f,20],[0xdf144f,17],[0xdf1561,1]];
+   const after=[[0xdf11eb,4],[0xdf122d,6],[0xdf1234,8],[0xdf1251,18],[0xdf1265,7],[0xdf1270,2],[0xdf129e,23],[0xdf1332,22],[0xdf1397,22],[0xdf13c9,1],[0xdf13cf,1],[0xdf13ee,13],[0xdf1407,7],[0xdf141f,20],[0xdf144f,17],[0xdf1561,1]];
+   const bw=(W-L-10)/N;
+   [['one block',before,16],['in pieces',after,110]].forEach(([lab,runs,y])=>{x.fillStyle=paper;x.fillRect(L,y,N*bw,56);x.strokeStyle=rule;x.strokeRect(L,y,N*bw,56);
+     runs.forEach(([o,n])=>{x.fillStyle=bad;x.fillRect(L+(o-base)*bw,y,Math.max(n*bw,1.5),56)});
+     x.fillStyle=ink;x.font='17px '+mono;x.textAlign='right';x.fillText(lab,L-14,y+34);x.textAlign='left';
+     const wrong=runs.reduce((a,r)=>a+r[1],0);x.font='15px '+mono;x.fillStyle=muted;x.fillText(wrong+' wrong bytes, '+runs.length+' runs',L,y+76)});}
+  // dwarf
+  {const [c,x]=ctx('dwarf');const W=c.width,H=c.height,L=250,R=30,T=16,B=40;
+   const rows=[['.debug_info',11505019,422512],['.debug_loclists',6015644,280],['.debug_line',5254022,1600],['.debug_frame',1687012,852],['.debug_rnglists',1455883,220],['.debug_addr',260888,548],['.symtab',949824,904],['.strtab',2036620,104]];
+   const lg=v=>Math.log10(v),lo=2,hi=7.2;const rh=(H-T-B)/rows.length;const sx=v=>L+(lg(v)-lo)/(hi-lo)*(W-L-R);
+   [100,1000,10000,100000,1000000,10000000].forEach(v=>{const px=sx(v);x.strokeStyle=rule;x.beginPath();x.moveTo(px,T-6);x.lineTo(px,H-B);x.stroke();x.fillStyle=muted;x.font='15px '+mono;x.textAlign='center';x.fillText(v>=1e6?(v/1e6)+' MB':v>=1000?(v/1000)+' KB':v+' B',px,H-B+26)});
+   x.textAlign='left';
+   rows.forEach((r,i)=>{const y=T+i*rh;x.fillStyle=ink2;x.fillRect(L,y+3,sx(r[1])-L,rh/2-5);x.fillStyle=bad;x.fillRect(L,y+rh/2,sx(r[2])-L,rh/2-5);x.fillStyle=ink;x.font='16px '+mono;x.textAlign='right';x.fillText(r[0],L-12,y+rh/2+6);x.textAlign='left';x.font='500 14px '+mono;x.fillText(r[2].toLocaleString(),sx(r[2])+8,y+rh-7)});}
+}
+draw();
+const mq=matchMedia('(prefers-color-scheme: dark)');mq.addEventListener&&mq.addEventListener('change',draw);
+new MutationObserver(draw).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+})();
+</script>
