@@ -513,6 +513,36 @@ literals and the encoding degenerates to exactly the prototype's positional
 one. Control varints and literals are separate streams because their
 statistics differ by an order of magnitude.
 
+**Transform 2 chooses between two shapes of this stream.** Which one is
+smaller is a property of the release rather than of the codec (research 14):
+a patch release's residual is near-misses a few bytes apart, so merging runs
+up to 32 correct bytes apart costs almost nothing -- the swallowed bytes are
+correct, and xor-ed against the prediction they are zeros -- and saves a
+region header each; a minor release's residual is genuinely new content,
+where the literal stream's value is that it matches *itself*, and xor against
+an unrelated prediction destroys those matches. The encoder therefore writes
+the correction twice -- once as above, once with `merge = 32`, literal
+regions carrying `want^pred`, and gaps, spans, match ops and literals as four
+streams -- compresses both with the compressor that will ship them, and keeps
+the smaller. The choice is the low bit of `nRegions`, and the columnar shape
+declares two more stream lengths:
+
+```
+correction := uvarint newLen, uvarint nRegions<<1|alt, then
+  alt = 0:     uvarint ctrlLen, uvarint litLen, ctrl, lit
+  alt = 1:     uvarint gapLen, uvarint spanLen, uvarint opLen, uvarint litLen,
+               gaps, spans, ops, lit    ← a literal region carries want^pred
+```
+
+A transform-1 stream carries no flag bit and only the first shape, because
+that is the only one its deployed decoder reads. Measured on prometheus: the
+patch release 3.13.1→3.13.2 takes the merged shape and its patch falls from
+78,462 to 74,550 B (−5.0 %); the minor release 3.13.2→3.14.0 keeps the
+shipped shape and moves by +316 B, a tenth of that stream's 3,411 B
+compression noise floor and entirely the flag bit shifting brotli's block
+boundaries. The price is a second compression of the largest stream in the
+patch: the minor pair encodes in 13.1 s rather than 7.6 s.
+
 Two properties matter operationally. The source window starts at the region
 and runs *forward*, into bytes no earlier region has touched, so the decoder
 snapshots it, writes the region in place, and **applies the correction over

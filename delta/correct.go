@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/wjordan/go-binsync/delta/internal/lz"
+	"github.com/wjordan/go-binsync/internal/cz"
 )
 
 // The correction turns a prediction into the real file (docs/DESIGN.md 3.4).
@@ -41,18 +42,46 @@ const (
 // it follows from the region's end and the file's length.
 const lzRegion = 1
 
+// The whole correction is in turn written one of two ways, and which one
+// wins is a property of the release rather than of the codec (docs/DESIGN.md
+// 3.4, research 14.5). A patch release's residual is near-misses a few bytes
+// apart: merging runs up to 32 correct bytes apart costs almost nothing --
+// the swallowed bytes are correct, so under xor they are zeros -- and saves
+// a region header each. A minor release's residual is new content, where the
+// same two transforms cost 3%, because there the literal stream's value is
+// that it matches *itself*, and xor against an unrelated prediction destroys
+// those matches.
+var (
+	shipped  = corrShape{merge: mergeGap}
+	nearmiss = corrShape{merge: 32, xor: true, cols: true, bit: 1}
+)
+
+// corrShape is one way of laying the same regions out.
+type corrShape struct {
+	merge int    // identical bytes a region absorbs rather than pay a header
+	xor   bool   // a literal region carries want^pred, not want
+	cols  bool   // gaps, spans, lz ops and literals as four streams
+	bit   uint64 // the header flag that names this shape
+}
+
 func slackAt(end, n int) int { return min(srcSlack, n-end) }
 
-// encodeCorrection writes the stream that turns pred into want. The two must
-// be the same length.
-func encodeCorrection(pred, want []byte) ([]byte, error) {
-	if len(pred) != len(want) {
-		return nil, fmt.Errorf("delta: prediction is %d bytes, target is %d", len(pred), want)
-	}
-	var ctrl, lit []byte
+func putU(dst *[]byte, v uint64) {
 	var tmp [binary.MaxVarintLen64]byte
-	putU := func(v uint64) { ctrl = append(ctrl, tmp[:binary.PutUvarint(tmp[:], v)]...) }
+	*dst = append(*dst, tmp[:binary.PutUvarint(tmp[:], v)]...)
+}
 
+// write lays the correction out in this shape. flagged says the stream is a
+// transform-2 one, whose region count carries the shape in its low bit; a
+// transform-1 stream has no flag because its decoder knows only one shape.
+func (sh corrShape) write(pred, want []byte, flagged bool) []byte {
+	// An interleaved shape writes gaps, spans and ops into one stream; a
+	// columnar one gives each its own.
+	var ctrl, spans, ops, lit []byte
+	gapDst, spanDst, opDst := &ctrl, &ctrl, &ctrl
+	if sh.cols {
+		spanDst, opDst = &spans, &ops
+	}
 	nregions, prevEnd := 0, 0
 	for s := 0; s < len(want); {
 		if pred[s] == want[s] {
@@ -64,59 +93,131 @@ func encodeCorrection(pred, want []byte) ([]byte, error) {
 		e := s + 1
 		for e < len(want) {
 			k := e
-			for k < len(want) && k-e < mergeGap && pred[k] == want[k] {
+			for k < len(want) && k-e < sh.merge && pred[k] == want[k] {
 				k++
 			}
-			if k-e < mergeGap && k < len(want) {
+			if k-e < sh.merge && k < len(want) {
 				e = k + 1
 				continue
 			}
 			break
 		}
-		slack := slackAt(e, len(pred))
-		putU(uint64(s - prevEnd))
-		mark := len(ctrl)
-		putU(uint64(e-s)<<1 | lzRegion)
-		c2, l2 := lz.Emit(pred[s:e+slack], want[s:e], ctrl, lit)
-		if len(c2)-mark+len(l2)-len(lit) < e-s {
-			ctrl, lit = c2, l2
+		putU(gapDst, uint64(s-prevEnd))
+		n := e - s
+		mark := len(*spanDst)
+		putU(spanDst, uint64(n)<<1|lzRegion)
+		opMark, litMark := len(*opDst), len(lit)
+		c2, l2 := lz.Emit(pred[s:e+slackAt(e, len(pred))], want[s:e], *opDst, lit)
+		if len(*spanDst)-mark+len(c2)-opMark+len(l2)-litMark < n {
+			*opDst, lit = c2, l2
 		} else {
-			ctrl = ctrl[:mark]
-			putU(uint64(e-s) << 1)
-			lit = append(lit, want[s:e]...)
+			*spanDst = (*spanDst)[:mark]
+			putU(spanDst, uint64(n)<<1)
+			if sh.xor {
+				for i := s; i < e; i++ {
+					lit = append(lit, pred[i]^want[i])
+				}
+			} else {
+				lit = append(lit, want[s:e]...)
+			}
 		}
 		nregions++
-		prevEnd = e
-		s = e
+		prevEnd, s = e, e
 	}
 
 	w := &wbuf{}
 	w.u(uint64(len(want)))
-	w.u(uint64(nregions))
+	nr := uint64(nregions)
+	if flagged {
+		nr = nr<<1 | sh.bit
+	}
+	w.u(nr)
 	w.u(uint64(len(ctrl)))
+	if sh.cols {
+		w.u(uint64(len(spans)))
+		w.u(uint64(len(ops)))
+	}
 	w.u(uint64(len(lit)))
 	w.raw(ctrl)
+	w.raw(spans) // empty unless columnar, where ctrl then holds only gaps
+	w.raw(ops)
 	w.raw(lit)
-	return w.b, nil
+	return w.b
 }
 
-// EncodeCorrection writes the stream that turns pred into want. It is
-// exported so experimental predictors can use the production correction
-// format while their prediction formats are still being evaluated.
+// encodeCorrection writes the stream that turns pred into want. The two must
+// be the same length.
+//
+// adaptive is transform 2 and above: the correction is written both ways,
+// both are compressed by the compressor that will ship them, and the smaller
+// is kept. The second pass is the price -- one more compression of the
+// largest stream in the patch -- and it is what makes a patch release pay
+// its own encoding rather than a minor release's.
+func encodeCorrection(pred, want []byte, adaptive bool) ([]byte, error) {
+	if len(pred) != len(want) {
+		return nil, fmt.Errorf("delta: prediction is %d bytes, target is %d", len(pred), len(want))
+	}
+	a := shipped.write(pred, want, adaptive)
+	if !adaptive {
+		return a, nil
+	}
+	b := nearmiss.write(pred, want, true)
+	var nb int
+	done := make(chan struct{})
+	go func() { defer close(done); nb = czLen(b) }()
+	na := czLen(a)
+	<-done
+	if nb < na {
+		return b, nil
+	}
+	return a, nil
+}
+
+// czLen is what a stream will cost once the container compresses it: the
+// same compressor at the same frame size, so the shape is chosen on the
+// number that ships.
+func czLen(b []byte) int {
+	n := 0
+	for off := 0; ; off += FrameSize {
+		end := min(off+FrameSize, len(b))
+		_, z := cz.Compress(b[off:end])
+		n += len(z)
+		if end == len(b) {
+			return n
+		}
+	}
+}
+
+// EncodeCorrection writes the stream that turns pred into want, in the one
+// shape every deployed decoder reads. It is exported so experimental
+// predictors can use the production correction format while their prediction
+// formats are still being evaluated.
 func EncodeCorrection(pred, want []byte) ([]byte, error) {
-	return encodeCorrection(pred, want)
+	return encodeCorrection(pred, want, false)
 }
 
 // applyCorrection rewrites buf, which holds the prediction, into the real
 // file. It allocates only the scratch copy of one region's source window.
-func applyCorrection(buf, stream []byte) error {
+func applyCorrection(buf, stream []byte, flagged bool) error {
 	r := &rbuf{b: stream}
 	n := r.u()
-	nregions := r.un(uint64(len(buf))+1, "region count")
-	ctrlLen := r.un(uint64(len(stream)), "control stream length")
+	maxRegions := uint64(len(buf)) + 1
+	if flagged {
+		maxRegions = maxRegions<<1 | 1
+	}
+	v := r.un(maxRegions, "region count")
+	nregions, alt := v, false
+	if flagged {
+		nregions, alt = v>>1, v&1 != 0
+	}
+	gapLen := r.un(uint64(len(stream)), "control stream length")
+	var spanLen, opLen uint64
+	if alt {
+		spanLen = r.un(uint64(len(stream)), "span stream length")
+		opLen = r.un(uint64(len(stream)), "op stream length")
+	}
 	litLen := r.un(uint64(len(stream)), "literal stream length")
-	ctrl := r.take(ctrlLen)
-	lit := r.take(litLen)
+	gaps, spans, ops, lit := r.take(gapLen), r.take(spanLen), r.take(opLen), r.take(litLen)
 	if err := r.done(); err != nil {
 		return err
 	}
@@ -126,13 +227,21 @@ func applyCorrection(buf, stream []byte) error {
 
 	var scratch []byte
 	pos := 0
-	c := &rbuf{b: ctrl}
+	// The interleaved shape reads gaps, spans and ops from one cursor.
+	c := &rbuf{b: gaps}
+	sr, or := c, c
+	if alt {
+		sr, or = &rbuf{b: spans}, &rbuf{b: ops}
+	}
 	rd := &lz.Reader{Lit: lit}
 	for i := uint64(0); i < nregions; i++ {
 		gap := c.un(uint64(len(buf)), "region gap")
-		v := c.un(uint64(len(buf))<<1|1, "region span")
+		v := sr.un(uint64(len(buf))<<1|1, "region span")
 		if c.err != nil {
 			return c.err
+		}
+		if sr.err != nil {
+			return sr.err
 		}
 		span, isLZ := v>>1, v&lzRegion != 0
 		if gap > uint64(len(buf)-pos) {
@@ -146,7 +255,13 @@ func applyCorrection(buf, stream []byte) error {
 			if span > uint64(len(rd.Lit)) {
 				return fmt.Errorf("%w: region %d wants %d literal bytes, %d remain", errCorrupt, i, span, len(rd.Lit))
 			}
-			copy(buf[pos:], rd.Lit[:span])
+			if alt {
+				for j := range int(span) {
+					buf[pos+j] ^= rd.Lit[j]
+				}
+			} else {
+				copy(buf[pos:], rd.Lit[:span])
+			}
 			rd.Lit = rd.Lit[span:]
 			pos += int(span)
 			continue
@@ -154,15 +269,17 @@ func applyCorrection(buf, stream []byte) error {
 		slack := slackAt(pos+int(span), len(buf))
 		src := append(scratch[:0], buf[pos:pos+int(span)+slack]...)
 		scratch = src
-		rd.Ctrl = c.b
+		rd.Ctrl = or.b
 		if err := rd.Apply(src, buf[pos:pos+int(span)]); err != nil {
 			return fmt.Errorf("%w: region %d: %v", errCorrupt, i, err)
 		}
-		c.b = rd.Ctrl
+		or.b = rd.Ctrl
 		pos += int(span)
 	}
-	if len(c.b) != 0 {
-		return fmt.Errorf("%w: %d control bytes after the last region", errCorrupt, len(c.b))
+	for _, rest := range [][]byte{c.b, sr.b, or.b} {
+		if len(rest) != 0 {
+			return fmt.Errorf("%w: %d control bytes after the last region", errCorrupt, len(rest))
+		}
 	}
 	if len(rd.Lit) != 0 {
 		return fmt.Errorf("%w: %d literal bytes after the last region", errCorrupt, len(rd.Lit))
@@ -172,5 +289,5 @@ func applyCorrection(buf, stream []byte) error {
 
 // ApplyCorrection rewrites buf, which holds a prediction, using stream.
 func ApplyCorrection(buf, stream []byte) error {
-	return applyCorrection(buf, stream)
+	return applyCorrection(buf, stream, false)
 }

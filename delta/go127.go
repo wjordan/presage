@@ -122,7 +122,7 @@ func encodeGoAMD64(old, new []byte, tf byte, o Options, st *Stats) ([]byte, erro
 		st.Notes = append(st.Notes, fmt.Sprintf("%d invented pctab slots, %d fresh, %d gaps",
 			g.lay.NPcFresh, fresh, len(g.lay.PcGaps)))
 	}
-	s2, err := encodeCorrection(g.pred, new)
+	s2, err := encodeCorrection(g.pred, new, tf >= TransformGoSegmap)
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +193,7 @@ func applyGoAMD64(old, body []byte, h *Header) ([]byte, error) {
 		return nil, fmt.Errorf("delta: the predicted base does not match the encoder's; " +
 			"encoder and decoder disagree, fetch the blob")
 	}
-	if err := applyCorrection(pred, s2); err != nil {
+	if err := applyCorrection(pred, s2, h.Transform >= TransformGoSegmap); err != nil {
 		return nil, err
 	}
 	return pred, nil

@@ -1163,6 +1163,38 @@ switch rather than a better encoding: the patch pair wins because its
 residual is near-misses, and the minor pair does not because its residual is
 new content.
 
+### 14.7 What landed
+
+The pair-adaptive encoder is in `delta/correct.go`, under transform 2 only:
+the correction is written both ways, both are compressed with the codec's own
+compressor, the smaller is kept, and the choice is the low bit of the region
+count. Measured end to end, `diff` then `patch` then `cmp`:
+
+| pair | before | after | Δ |
+|---|---:|---:|---:|
+| prometheus 3.13.1→3.13.2 (merged shape) | 78,462 | **74,550** | **−3,912 (−5.0%)** |
+| prometheus 3.13.2→3.14.0 (shipped shape) | 1,352,768 | 1,353,084 | +316 |
+| synthetic v1→v2c / v1→v4 / v1→v2l / v3→v4 | 1,333 / 1,853 / 531 / 563 | 1,334 / 1,853 / 531 / 563 | +1 / 0 / 0 / 0 |
+
+The minor pair's +316 is the flag bit and nothing else: the flagged and
+unflagged shipped streams are the same 3,400,362 raw bytes — only the region
+count's *value* changes, 163,010 to 326,020, both three-byte varints — and
+compressing them alone gives 891,709 against 890,321, +1,388 here and −171 on
+the patch pair. It is brotli's block boundaries moving, a tenth of §14.2's
+3,411 B noise floor, and it is the whole price of a self-describing stream.
+
+Encode time is the second compression of the largest stream in the patch:
+2.52 s → 2.80 s on the patch pair, 7.59 s → 13.06 s on the minor one, and
++0.03 s on the synthetic pairs. The two candidates are compressed
+concurrently, so the cost is one compression, not two.
+
+The merge threshold is **fixed at 32, not swept**. Re-measured against the
+shipped shape with xor and columnar, merge ∈ {4, 8, 16, 24, 32, 48} costs the
+patch pair −62, −2,009, −3,050, −3,386, **−3,715**, −3,318, so 32 is the
+argmax and a sweep over {4, 16, 32} buys 0 B; on the minor pair every
+combination of merge and xor loses (best +22,863 at merge=32), so the sweep
+buys nothing there either. Three extra compressions for no bytes.
+
 ## Reproducing
 
 ```
