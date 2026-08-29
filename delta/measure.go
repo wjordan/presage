@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 
 	"github.com/wjordan/go-binsync/delta/gobin"
+	"github.com/wjordan/go-binsync/delta/internal/lz"
 )
 
 // This file exists for measurement. bench/goattr attributes the residual --
@@ -277,4 +278,26 @@ func descName(b *gobin.Bin, self *gobin.Section, off uint32) string {
 		return ""
 	}
 	return string(d[p : p+n])
+}
+
+// The correction encoder's two parameters and its match engine, exposed so
+// that a probe can re-encode the same regions a different way and price the
+// result against the shipped format (bench/goattr level c). Measurement
+// only: nothing here is reachable from Encode or Apply.
+const (
+	MergeGap = mergeGap
+	SrcSlack = srcSlack
+)
+
+// EmitLZ appends to ctrl and lit the ops that rebuild dst from src.
+func EmitLZ(src, dst, ctrl, lit []byte) (ctrlOut, litOut []byte) {
+	return lz.Emit(src, dst, ctrl, lit)
+}
+
+// ApplyLZ rebuilds out from src and the streams, and returns what is left of
+// them, so a probe can check that its own stream really decodes.
+func ApplyLZ(ctrl, lit, src, out []byte) (ctrlRest, litRest []byte, err error) {
+	r := &lz.Reader{Ctrl: ctrl, Lit: lit}
+	err = r.Apply(src, out)
+	return r.Ctrl, r.Lit, err
 }
