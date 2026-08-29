@@ -91,20 +91,30 @@ Unstripped synthetic pair (`bench/out/bin127/v1-F1 → v2c-F1`, 43 MB):
 `.strtab` 2 MB. Go codec 9,293,321; Zucchini 9,397,472; presage 9,371,156 —
 the compressed streams differ entirely. Go's `compress/zlib` at level 1
 (`BestSpeed`) reproduces every section byte for byte (`bench/dwarfprobe`),
-on this build and on the prometheus one, so the numbers that matter are
-on the decompressed pair (`objcopy --decompress-debug-sections`; 59 MB):
-the compressed patch is the plaintext patch plus a codec id per section
-(SPEC §4.5 (a), not yet plumbed).
+on this build and on the prometheus one, so the patch is made on the
+plaintext (SPEC §4.5 (a)): `bench/dwarfz plain` expands every
+`SHF_COMPRESSED` section in place, keeping every inter-section gap, and
+`dwarfz pack` inverts it with the set of compressed sections read from the
+old file, so the transform costs 0 plan bytes. Verified on both pairs:
+`pack(plain(f)) == f` for every file, and `pack(plain(new), old) == new`,
+which is the decoder's path. The plaintext pairs (59 MB / 181 MB):
 
-| decompressed pair | bsdiff | Zucchini | presage, eq outside `.text` | presage, no eq |
+| plaintext pair (`dwarfz plain`) | bsdiff | Zucchini | presage, eq outside `.text` | presage, no eq |
 |---|---:|---:|---:|---:|
-| synthetic v1 → v2c, one line | 476,916 | 597,596 | **2,708** | 3,036 |
-| prometheus 3.13.1 → 3.13.2, default build (181 MB) | 4,837,754 | 5,596,196 | **650,040** | 2,325,468 |
+| synthetic v1 → v2c, one line | 476,887 | 597,416 | **2,652** | 2,980 |
+| prometheus 3.13.1 → 3.13.2, default build | 4,832,993 | 5,622,564 | **650,708** | 2,325,208 |
 
-On the compressed prometheus pair as `go build` ships it: bsdiff
-29,004,245, Zucchini 28,963,240. The stripped prometheus patch is 71,192 (presage) / 74,126
+These are the end-to-end numbers for the files as `go build` ships them,
+since the recompression adds nothing; the other tools on the shipped
+compressed pair: bsdiff 29,004,245, Zucchini 28,963,240 (prometheus);
+Zucchini 9,397,472 (synthetic, above). Earlier rows were
+measured on `objcopy --decompress-debug-sections` output (650,040 /
+2,325,468; Zucchini 5,596,196; bsdiff 4,837,754), which is not the true
+plaintext: objcopy realigns the sections and rewrites `.strtab` (74 KB
+smaller), so the shipped file is not recoverable from it.
+The stripped prometheus patch is 71,192 (presage) / 74,126
 (codec) / 3,031,380 (Zucchini) for comparison, so DWARF costs 9× the
-stripped patch here; on the one-line synthetic it costs 900 B.
+stripped patch here; on the one-line synthetic it costs 800 B.
 `-no-text-equivalences` is the mode that wins on the real pair: the Go code
 model owns `.text` (the stream there cost more than it bought on the
 stripped pairs) and the Zucchini stream owns the debug sections, where it

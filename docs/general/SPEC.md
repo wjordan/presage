@@ -240,8 +240,9 @@ no equivalences: 2,356 → 1,536 xz, joint brotli 1,314 against the codec's
 
 ### 4.5 Built-in module: DWARF
 
-Status: layer (b) built in the harness (`bench/elfpredict/dwarf.go`) and
-measured; layer (a) verified as an exact transform, not yet plumbed.
+Status: both layers built in the harness and measured end to end —
+(a) as `bench/dwarfz` (`plain`/`pack`, an exact inverse pair), (b) as
+`bench/elfpredict/dwarf.go`.
 Research: `dwarf-research.md`; measurements: `go-module-results.md` "DWARF
 builds". The problem it answers: a default `go build` keeps DWARF — 13 MB
 of zlib-compressed sections on the 43 MB synthetic, 75 MB plaintext in
@@ -266,9 +267,19 @@ Huffman-only re-encode (deterministic, pure Go, ~320 B per 32 KB block),
 then opaque bytes. A mismatch is a size cost, never a correctness one: the
 region hash (§4.3) catches it before a byte ships. Verified
 (`bench/dwarfprobe`): `zlib.BestSpeed` reproduces every section byte for
-byte on the synthetic and on the prometheus build, so the layer's cost is
-one codec id per section; the harness measures the plaintext pair
-(`objcopy --decompress-debug-sections`) and the compressed number follows.
+byte on the synthetic and on the prometheus build. `bench/dwarfz plain`
+expands every `SHF_COMPRESSED` section in place (payload replaces header
+plus stream, flag cleared, `sh_addralign` restored from the `Elf64_Chdr`,
+later sections and the section header table shifted with every
+inter-section gap kept) and `dwarfz pack` inverts it, taking the set of
+sections to compress from the old file the decoder already holds, so the
+transform ships nothing — not even the codec id, until a second encoder
+joins the registry. Verified `pack(plain(f)) == f` on every unstripped
+build and `pack(plain(new), old) == new` on both pairs, which is the
+decoder's path; the harness measures the `dwarfz plain` pair and that
+number is the shipped-file number. (`objcopy --decompress-debug-sections`
+is not the plaintext: it realigns sections and rewrites `.strtab`, so the
+shipped file cannot be rebuilt from it.)
 
 *(b) The DWARF layer* is a field locator over a record map, not a DWARF
 model. The decoder walks the *old* `.debug_info` against the old
@@ -316,12 +327,15 @@ table places the bytes, rewrites each unit's length prefix, and projects.
 its `sec_offset` map is their record map. All of them name `.text` through
 the Go module's function map.
 
-**Measured** (harness, plaintext pairs; details in `go-module-results.md`):
-synthetic one-line pair (59 MB) 2,708 B with the equivalence stream, 3,036
-with none, against Zucchini's 597,596 and 1,458,732 before the layer;
-prometheus 3.13.1 → 3.13.2 default build (181 MB) 650,040 with the stream
-kept out of `.text`, 2,325,468 with none, against Zucchini's 5,596,196
-(28,963,240 on the compressed files as shipped). Two harness bugs the
+**Measured** (harness on the `dwarfz plain` pairs, which is the end-to-end
+number for the files as shipped; details in `go-module-results.md`):
+synthetic one-line pair (59 MB) 2,652 B with the equivalence stream, 2,980
+with none, against Zucchini's 597,416 and bsdiff's 476,887 on the
+plaintext (9,397,472 as shipped; 1,458,732 before the layer); prometheus
+3.13.1 → 3.13.2 default build (181 MB) 650,708 with the stream kept out of
+`.text`, 2,325,208 with none, against Zucchini's 5,622,564 and bsdiff's
+4,832,993 on the plaintext (28,963,240 / 29,004,245 on the compressed
+files as shipped). Two harness bugs the
 unstripped pairs exposed, both fixed in `delta` so the codec has them too:
 the Go module's tail copy (`.shstrtab` aligned at the end of the file) was
 applied to the whole post-section tail, shifting 13 MB of debug sections;
