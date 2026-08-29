@@ -744,6 +744,22 @@ patch pair, against the +15,511 and +301 those slots are worth: **+14,391 net
 field, not a prediction, so it belongs with `RecShapes` rather than in `synth`,
 and it is the only version of this idea the measurements support.
 
+**Built, with one correction (docs/DESIGN.md 3.2.2).** The mask alone is not
+enough: this probe's cursor reads the *true* offsets of the matched
+functions' slots and a decoder has only its own re-targeted ones. Driving the
+cursor from those loses it — one mispredicted offset in 880,000 poisons every
+allocation after it, and the mask then finds 56 of 142 fresh slots on the
+patch pair and 346 of 9,572 on the minor pair, for −11 B and −1,516 B. The
+fix is to stop reading predicted offsets at all: the cursor walks `pctab`'s
+own tables and the layout carries, besides the bits, a `uvarint` per record
+saying how many tables to skip first — 959 B compressed on the minor pair,
+71 B on the patch pair, and the replay is then exact on every fresh slot.
+Measured end to end: minor 1,371,442 → **1,352,768 (+18,674, 1.4%)**, patch
+78,703 → **78,462 (+241, 0.3%)**, the four synthetic pairs unchanged to the
+byte. Run-length coding the bits was measured too: 5% smaller compressed on
+its own, 1,814 B worse in the patch, because the body is one frame and the
+run form is 2.2× the raw bytes.
+
 ## 12. Probe E — aligning a descriptor's method table by name
 
 Method (level `b`, `bench/goattr/typealign.go`). Level 10b says the method
@@ -913,7 +929,7 @@ thing to add at that point; on its own it does not pay.
 | closed: dictionary or renumbering for new code | 1.45× vs a 572× control | — | no |
 | a field-fix layer for `.go.type` | closed: 27,592 B of 766,010, 11,837 marginal | open: 8,914 B of 45,170, 8,226 marginal | not probed |
 | closed: replaying `pctab` to predict invented `_func` slots | every rule tried is negative; ceiling +29,634 | best rule +155; ceiling +383 | no |
-| D. transmit the `pctab` fresh/dedup mask instead (§11) | +14,391 (1.0%) | +258 (0.3%) | maybe, as a layout field |
+| D. transmit the `pctab` fresh/dedup mask instead (§11) | **built: +18,674 (1.4%)** | **built: +241 (0.3%)** | done |
 | closed: per-descriptor method-table alignment (§12) | +6,497 realistic, +7,957 oracle (0.47–0.58%) | −260 | no |
 
 Three of the four remaining sources are worth building and one is a bug. Their

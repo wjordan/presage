@@ -2,6 +2,7 @@ package delta
 
 import (
 	"encoding/binary"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -96,13 +97,17 @@ func predictPcln(old, new *gobin.Bin, m *match, l *layout, bp *blobPred) []byte 
 	tpl.learnFuncID(old, oft)
 
 	// Pass 2: reshape what the layout says changed shape, synthesise the
-	// rest from the template, and lay the records out.
+	// rest from the template, fill the invented pc-table slots from the
+	// pctab cursor, and lay the records out.
+	cur := &pcCursor{tab: np.Table(np.Pctab), off: 1, mask: l.PcFresh, nbit: l.NPcFresh, gaps: l.PcGaps}
 	size := hdr
 	var prevCU uint32
 	for j, g := range new.Funcs {
 		rec := recs[j]
+		keep := -1 // pcdata slots inherited from the old record; -1 = the record is new
 		if rec != nil {
 			npc, nfd := binary.LittleEndian.Uint32(rec[28:]), uint32(rec[43])
+			keep = int(npc)
 			if sh, ok := shapes[j]; ok && sh != [2]uint32{npc, nfd} {
 				rec = reshape(rec, npc, nfd, sh, tpl)
 			}
@@ -114,6 +119,7 @@ func predictPcln(old, new *gobin.Bin, m *match, l *layout, bp *blobPred) []byte 
 			}
 			rec = tpl.synth(npc, nfd, prevCU, g.Name)
 		}
+		cur.fill(rec, keep)
 		binary.LittleEndian.PutUint32(rec[0:], uint32(g.Entry-new.Mod.Text))
 		binary.LittleEndian.PutUint32(rec[4:], uint32(nameOff[j]))
 		size = (size + 7) &^ 7
@@ -156,6 +162,215 @@ func predictPcln(old, new *gobin.Bin, m *match, l *layout, bp *blobPred) []byte 
 		binary.LittleEndian.PutUint64(out[32+8*k:], off)
 	}
 	return out
+}
+
+// The pctab replay (docs/DESIGN.md 3.2.2).
+//
+// cmd/link/internal/ld.generatePctab lays pctab out as the distinct pc-value
+// tables in allocation order, starting at offset 1: per function pcsp,
+// pcfile, pcln, pcdata[0], pcdata[1], pcdata[3..n) and finally pcinline,
+// which writeFuncs stores in pcdata[2]. A table whose content is new lands on
+// the running high-water mark and one whose content repeats lands wherever
+// its twin already is, so a slot the codec has to invent -- every pc-table
+// slot of a function the release added, and the pcdata slots a reshape
+// appends -- is either the next unallocated table or unknowable. The layout
+// says which, one bit per slot, plus one gap per record saying how many
+// tables the linker allocated in between.
+
+// eachPcSlot calls f with the offsets, within a _func record with npc pcdata
+// slots, of the record's pc-table slots in the linker's allocation order.
+func eachPcSlot(npc uint32, f func(o int)) {
+	f(16) // pcsp
+	f(20) // pcfile
+	f(24) // pcln
+	for k := uint32(0); k < npc; k++ {
+		if k != 2 {
+			f(gobin.FuncSize + 4*int(k))
+		}
+	}
+	if npc > 2 {
+		f(gobin.FuncSize + 8) // pcinline, allocated after the function's others
+	}
+}
+
+// pcCursor walks the tables of pctab in allocation order. off is the table
+// the next fresh allocation lands on; a record's gap skips the tables the
+// functions in between claimed, and each slot the mask calls fresh takes off
+// and steps past it. Nothing here reads a predicted offset, so the cursor
+// cannot be led astray by a mispredicted record.
+type pcCursor struct {
+	tab  []byte
+	off  uint32
+	mask []byte
+	nbit int
+	i    int
+	gaps []uint32
+	g    int
+}
+
+// step moves off past the table it stands on. pc-value tables are
+// self-delimiting, so the length is parsed out of pctab.
+func (c *pcCursor) step() {
+	if int(c.off) >= len(c.tab) {
+		return
+	}
+	c.off += uint32(gobin.PcTableLen(c.tab, int(c.off)))
+}
+
+// skip advances n tables, and stops at the end of pctab however large a
+// corrupt n is.
+func (c *pcCursor) skip(n uint32) {
+	for i := uint32(0); i < n && int(c.off) < len(c.tab); i++ {
+		c.step()
+	}
+}
+
+// end is where the table at off finishes; offset 0 is the empty table and
+// consumes nothing.
+func (c *pcCursor) end(off uint32) uint32 {
+	if off == 0 || int(off) >= len(c.tab) {
+		return off
+	}
+	return off + uint32(gobin.PcTableLen(c.tab, int(off)))
+}
+
+// bit reads the next mask bit. A bit past the end of the mask is not fresh,
+// so a short mask costs bytes rather than indexing out of range.
+func (c *pcCursor) bit() bool {
+	k := c.i
+	c.i++
+	return k < c.nbit && c.mask[k/8]&(1<<(k%8)) != 0
+}
+
+func (c *pcCursor) set(v bool) {
+	if c.i%8 == 0 {
+		c.mask = append(c.mask, 0)
+	}
+	if v {
+		c.mask[c.i/8] |= 1 << (c.i % 8)
+	}
+	c.i++
+}
+
+// fill is the decoder's half: it gives every invented slot of one record the
+// cursor's table when the mask says the linker allocated one there. keep is
+// how many leading pcdata slots the record inherited from its old
+// counterpart, or -1 when the whole record was synthesised.
+func (c *pcCursor) fill(rec []byte, keep int) {
+	first := true
+	eachPcSlot(binary.LittleEndian.Uint32(rec[28:]), func(o int) {
+		if keep >= 0 && (o < gobin.FuncSize || (o-gobin.FuncSize)/4 < keep) {
+			return
+		}
+		if first {
+			first = false
+			if c.g < len(c.gaps) {
+				c.skip(c.gaps[c.g])
+			}
+			c.g++
+		}
+		if c.bit() {
+			binary.LittleEndian.PutUint32(rec[o:], c.off)
+			c.step()
+		}
+	})
+}
+
+// eachRecShape calls f for every new function with the pcdata count the
+// decoder will give its record and how many pcdata slots that record
+// inherits, which is the one place the set of invented slots is decided.
+func eachRecShape(old *gobin.Bin, l *layout, m *match, f func(j int, npc uint32, keep int)) {
+	shapes := make(map[int]uint32, len(l.RecShapes))
+	for _, r := range l.RecShapes {
+		shapes[r.Idx] = r.Npcdata
+	}
+	mode := gobin.ModalShape(old)
+	for j, i := range m.NewToOld {
+		npc, keep := mode[0], -1
+		if i >= 0 {
+			onpc, _, _ := old.Pcln.Record(old.Funcs[i].FuncOff)
+			npc, keep = onpc, int(onpc)
+		}
+		if sh, ok := shapes[j]; ok {
+			npc = sh
+		}
+		f(j, npc, keep)
+	}
+}
+
+// pcReplayShape counts what the layout's replay fields must hold: one bit
+// per invented slot and one gap per record that has any. The decoder checks
+// both before it trusts them.
+func pcReplayShape(old *gobin.Bin, l *layout, m *match) (slots, gaps int) {
+	eachRecShape(old, l, m, func(j int, npc uint32, keep int) {
+		n := 0
+		eachPcSlot(npc, func(o int) {
+			if keep < 0 || o >= gobin.FuncSize && (o-gobin.FuncSize)/4 >= keep {
+				n++
+			}
+		})
+		if n > 0 {
+			gaps++
+		}
+		slots += n
+	})
+	return slots, gaps
+}
+
+// checkPcReplay is the rest of the decoder's bounds check: the mask must
+// hold one bit per slot the layout says the codec invents, and one gap per
+// record that has such a slot. A pair that added no function sends neither.
+func checkPcReplay(old *gobin.Bin, l *layout, m *match) error {
+	if l.NPcFresh == 0 && len(l.PcGaps) == 0 {
+		return nil
+	}
+	if slots, gaps := pcReplayShape(old, l, m); l.NPcFresh != slots || len(l.PcGaps) != gaps {
+		return fmt.Errorf("%w: the pctab replay carries %d slots and %d gaps, the layout implies %d and %d",
+			errCorrupt, l.NPcFresh, len(l.PcGaps), slots, gaps)
+	}
+	return nil
+}
+
+// buildPcFresh is the encoder's half. It replays the allocation over the
+// real new records -- where the high-water mark is exact, since every table
+// is in front of it -- and writes down, per invented slot, whether the mark
+// is where that slot points, and per record, how far the cursor has to move
+// to reach the mark.
+func buildPcFresh(old, new *gobin.Bin, m *match, l *layout) (int, []byte, []uint32) {
+	np := new.Pcln
+	c := &pcCursor{tab: np.Table(np.Pctab), off: 1}
+	nft := np.Table(np.Functab)
+	hi := uint32(1)
+	eachRecShape(old, l, m, func(j int, npc uint32, keep int) {
+		rec := nft[new.Funcs[j].FuncOff:]
+		first := true
+		eachPcSlot(npc, func(o int) {
+			v := uint32(0) // a record too short to hold the slot has no table there
+			if o+4 <= len(rec) {
+				v = binary.LittleEndian.Uint32(rec[o:])
+			}
+			if keep < 0 || o >= gobin.FuncSize && (o-gobin.FuncSize)/4 >= keep {
+				if first {
+					first = false
+					n := uint32(0)
+					for c.off < hi && int(c.off) < len(c.tab) {
+						c.step()
+						n++
+					}
+					c.gaps = append(c.gaps, n)
+				}
+				fresh := v == hi
+				c.set(fresh)
+				if fresh {
+					c.step()
+				}
+			}
+			if e := c.end(v); e > hi {
+				hi = e
+			}
+		})
+	})
+	return c.i, c.mask, c.gaps
 }
 
 // reshape rewrites a _func record whose pcdata/funcdata counts changed,

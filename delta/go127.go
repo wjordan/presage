@@ -2,6 +2,7 @@ package delta
 
 import (
 	"fmt"
+	"math/bits"
 
 	"github.com/wjordan/go-binsync/delta/gobin"
 	"github.com/wjordan/go-binsync/delta/x86"
@@ -46,7 +47,7 @@ func predictGoAMD64(old, new []byte, tf byte) (*goPred, error) {
 	// deriveOverrides runs with the maps installed, so the override table
 	// does not spend two varints re-fixing a target a map already places.
 	ov := deriveOverrides(ob, nb, g.m, dmaps, shifts, segs)
-	g.layRaw = buildLayout(ob, nb, g.m, dmaps, shifts, ov, segs).encode(ob, tf)
+	g.layRaw = buildLayout(ob, nb, g.m, dmaps, shifts, ov, segs, tf).encode(ob, tf)
 
 	// From here the encoder runs the decoder's code on the decoder's inputs:
 	// the layout as it will be decoded, and a skeleton built from it. That
@@ -112,6 +113,14 @@ func encodeGoAMD64(old, new []byte, tf byte, o Options, st *Stats) ([]byte, erro
 		encodeSegMaps(w, g.lay.Segs)
 		st.Notes = append(st.Notes, fmt.Sprintf("%d segment maps, %d pieces, %d B of layout",
 			len(g.lay.Segs), pieces, len(w.b)))
+	}
+	if g.lay.NPcFresh > 0 {
+		fresh := 0
+		for _, b := range g.lay.PcFresh {
+			fresh += bits.OnesCount8(b)
+		}
+		st.Notes = append(st.Notes, fmt.Sprintf("%d invented pctab slots, %d fresh, %d gaps",
+			g.lay.NPcFresh, fresh, len(g.lay.PcGaps)))
 	}
 	s2, err := encodeCorrection(g.pred, new)
 	if err != nil {

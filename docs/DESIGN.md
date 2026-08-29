@@ -391,6 +391,64 @@ offset — that is the actual code change — and fragmentation, which takes the
 wrong bytes from 1,152,688 to 632,149 but the correction runs from 10,451 to
 39,239, eating 23,779 B of the gain at 0.6 B a run.
 
+#### 3.2.2 Replaying the linker's `pctab` allocation
+
+The `predict .gopclntab` row re-targets a matched function's pc-table
+offsets, but a function the release *added* has no old record to re-target:
+`synth` fills its `pcsp`/`pcfile`/`pcln`/`pcdata[]` from the modal record,
+which is right 15 % of the time. The linker allocates `pctab` strictly
+sequentially — `cmd/link/internal/ld.generatePctab` walks the functions in
+link order and per function appends `pcsp`, `pcfile`, `pcln`, `pcdata[0]`,
+`pcdata[1]`, `pcdata[3..n)` and finally `pcinline`, which `writeFuncs` stores
+in `pcdata[2]`; it starts at offset 1, records a zero-length table as offset
+0, and skips a table it has already emitted, since pc-value symbols are
+content-addressable. So `pctab` *is* the distinct tables in allocation order,
+a table whose content is new lands exactly on the running high-water mark —
+9,572 of 9,572 invented fresh slots on the minor pair, none past it — and a
+table whose content repeats lands wherever its twin already is, which nothing
+the decoder holds identifies (`go-residual-attribution.md` §11).
+
+**Wire format.** The layout gains a field at its end: a bit per *invented*
+slot — every pc-table slot of an unmatched function's record, plus the
+`pcdata` slots a reshape appends — in record order and, within a record, in
+the emission order above; and a `uvarint` gap per record that has any such
+slot. 1 means the linker allocated that table fresh; 0 means anything else
+and the slot keeps the modal template's value, which is what the codec sends
+today. Zero-length tables need no third state: the template is already 0 for
+the slots that are usually empty (`pcdata[2]`, right 86.6 % of the time that
+way). The bits are packed rather than run-length coded — the fresh slots are
+22 % of the total and scattered, so the runs are short. Compressed on its own
+the run form looks 5 % better (12,001 B raw, 1,063 B compressed, against
+5,357 B and 1,120 B for the vector), but the patch body is compressed as one
+frame and the 6.6 KB of extra raw bytes cost more than the runs save: the
+minor pair's patch is 1,354,582 B with runs and 1,352,768 B with the vector.
+
+**Decoder.** One cursor over the real `pctab` (a stage-1b table, so both
+sides hold it), standing on the table the next fresh allocation will take and
+starting at offset 1. At a record's first invented slot the cursor skips that
+record's gap — the tables the functions in between claimed — and then each
+slot whose bit is set takes the cursor and steps it past that table, whose
+length is parsed out of `pctab`, since pc-value tables are self-delimiting.
+The cursor never reads a predicted offset, which is the point: driving it
+from the matched records' own re-targeted offsets was measured first and one
+mispredicted offset in 880,000 poisons every allocation after it — 56 of 142
+slots on the patch pair, 346 of 9,572 on the minor pair, and a net loss on
+both. The gaps cost 959 B compressed on the minor pair and 71 B on the patch
+pair, and make the replay exact on every fresh slot. The bit count must be
+the number of invented slots the layout implies, the vector must be that many
+bits and there must be exactly one gap per record that has one; anything else
+is `errCorrupt`, and a gap that would walk off the end of `pctab` stops there.
+Transform 2 and above; the field is that transform's rather than a new one,
+since transform 2 has not shipped. It is written only when the release added
+a function, and it is last in the layout so that a pair with nothing to
+replay pays not one byte for it.
+
+**Effect.** The minor pair goes from 1,371,442 B to 1,352,768 (**+18,674**,
+1.4 %) and the patch pair from 78,703 to 78,462 (**+241**, 0.3 %), both after
+paying for the bits and the gaps; the replay is exact on all 9,572 and all
+142 fresh slots. The four synthetic pairs add no function and are unchanged
+to the byte.
+
 ### 3.3 Why no suffix array
 
 Once the layout table is applied the prediction has **exactly** the new

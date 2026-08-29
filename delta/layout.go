@@ -46,6 +46,13 @@ type layout struct {
 	// otherwise get wrong
 	RecShapes []recShape
 
+	// the pctab replay (pcln.go, docs/DESIGN.md 3.2.2): one bit per invented
+	// _func pc-table slot saying the linker allocated that table fresh, and
+	// one gap per record that has such a slot; transform 2 and above only
+	NPcFresh int
+	PcFresh  []byte
+	PcGaps   []uint32
+
 	Shifts    map[string]*shiftTable
 	DataMaps  map[string]*dataMap
 	Overrides []addrOverride
@@ -204,7 +211,41 @@ func (l *layout) encode(old *gobin.Bin, tf byte) []byte {
 		w.bytes(l.DataMaps[n].encodeRLE())
 	}
 	encodeOverrides(w, l.Overrides)
+	// The pctab replay is last and is written only when the release added a
+	// function, so a pair that invents no slot pays nothing for it at all.
+	if tf >= TransformGoSegmap && l.NPcFresh > 0 {
+		encodePcReplay(w, l)
+	}
 	return w.b
+}
+
+// encodePcReplay writes the pctab replay: the fresh bits packed LSB first,
+// then one cursor gap per record that has an invented slot (pcln.go).
+func encodePcReplay(w *wbuf, l *layout) {
+	w.u(uint64(l.NPcFresh))
+	w.bytes(l.PcFresh)
+	w.u(uint64(len(l.PcGaps)))
+	for _, g := range l.PcGaps {
+		w.u(uint64(g))
+	}
+}
+
+// decodePcReplay reads it back, checking that the vector holds the bits it
+// claims. That the counts are the ones the layout implies is checked in
+// skeleton, where the function list is known.
+func decodePcReplay(r *rbuf, l *layout) error {
+	l.NPcFresh = int(r.un(uint64(len(r.b))*8, "pctab fresh bit count"))
+	l.PcFresh = r.bytes()
+	if r.err == nil && len(l.PcFresh) != (l.NPcFresh+7)/8 {
+		return fmt.Errorf("%w: the pctab fresh mask is %d bytes for %d slots",
+			errCorrupt, len(l.PcFresh), l.NPcFresh)
+	}
+	n := r.un(uint64(len(r.b)), "pctab gap count")
+	l.PcGaps = make([]uint32, 0, n)
+	for i := uint64(0); i < n && r.err == nil; i++ {
+		l.PcGaps = append(l.PcGaps, uint32(r.un(1<<31, "pctab gap")))
+	}
+	return r.err
 }
 
 func decodeLayout(b []byte, old *gobin.Bin, tf byte) (*layout, error) {
@@ -256,6 +297,11 @@ func decodeLayout(b []byte, old *gobin.Bin, tf byte) (*layout, error) {
 		l.DataMaps[name] = dm
 	}
 	l.Overrides = decodeOverrides(r)
+	if tf >= TransformGoSegmap && r.err == nil && len(r.b) > 0 {
+		if err := decodePcReplay(r, l); err != nil {
+			return nil, err
+		}
+	}
 	if err := r.done(); err != nil {
 		return nil, err
 	}
@@ -473,7 +519,7 @@ func decodeFuncLayout(old *gobin.Bin, l *layout) ([]*gobin.Func, *match, error) 
 }
 
 // buildLayout is the encoder side.
-func buildLayout(old, new *gobin.Bin, m *match, dmaps map[string]*dataMap, shifts map[string]*shiftTable, ov []addrOverride, segs []segMap) *layout {
+func buildLayout(old, new *gobin.Bin, m *match, dmaps map[string]*dataMap, shifts map[string]*shiftTable, ov []addrOverride, segs []segMap, tf byte) *layout {
 	l := &layout{NewLen: uint64(len(new.File)), Shifts: shifts, DataMaps: dmaps, Overrides: ov, Segs: segs}
 	for _, s := range new.Order {
 		l.Sects = append(l.Sects, sectInfo{s.Name, s.Addr, s.Off, s.Size, s.NoBits})
@@ -500,6 +546,10 @@ func buildLayout(old, new *gobin.Bin, m *match, dmaps map[string]*dataMap, shift
 		if def != [2]uint32{npc, nfd} {
 			l.RecShapes = append(l.RecShapes, recShape{j, npc, nfd})
 		}
+	}
+	// the replay reads RecShapes, so it comes last
+	if tf >= TransformGoSegmap {
+		l.NPcFresh, l.PcFresh, l.PcGaps = buildPcFresh(old, new, m, l)
 	}
 	return l
 }
@@ -537,6 +587,9 @@ func skeleton(old *gobin.Bin, l *layout) (*gobin.Bin, *match, error) {
 	}
 	b.Funcs = funcs
 	if err := checkSegMaps(l.Segs, old, funcs, m); err != nil {
+		return nil, nil, err
+	}
+	if err := checkPcReplay(old, l, m); err != nil {
 		return nil, nil, err
 	}
 	if last := funcs[len(funcs)-1]; last.End > b.Text.Addr+b.Text.Size || funcs[0].Entry < b.Text.Addr {
