@@ -249,7 +249,7 @@ func allMappedPlan(p predictionPlan) predictionPlan {
 
 func runCombined(externalPath string, oldImage, newImage *image, structure predictionPlan, structureBytes, structuralPred []byte, outDir string, reference int) (*combinedReport, planArtifacts, error) {
 	t := startStage("equivalence parse")
-	ep, err := parseExternalEquivalence(externalPath, oldImage, newImage)
+	ep, err := buildEquivalencePlan(externalPath, oldImage, newImage)
 	if err != nil {
 		return nil, planArtifacts{}, err
 	}
@@ -1068,6 +1068,9 @@ func run() error {
 	outDir := flag.String("out", "", "optional artifact directory")
 	reference := flag.Int("reference", 0, "reference whole-patch byte count")
 	equivalencePatch := flag.String("equivalence-patch", "", "optional raw patch supplying whole-file equivalences")
+	flag.BoolVar(&nativeEq, "native-equivalences", false, "match the whole-file equivalences here instead of reading them from -equivalence-patch")
+	flag.IntVar(&nativeEqMin, "native-eq-min", nativeEqMin, "shortest run -native-equivalences will emit")
+	flag.IntVar(&nativeEqDrop, "native-eq-drop", nativeEqDrop, "how far -native-equivalences lets a run's score fall below its peak before cutting it")
 	resume := flag.String("resume", "", "artifact directory of a previous run; replays the whole-image rungs from its cached plans")
 	rungs := flag.String("rungs", "corrected-fields", `comma-separated rung names to measure; "all" restores the full ladder including the scoreboard rungs`)
 	probes := flag.String("probes", "", "comma-separated probes to run instead of measuring: chunks, dict, rnfdict, ...")
@@ -1081,6 +1084,9 @@ func run() error {
 		selectStrategy = *selector
 	default:
 		return fmt.Errorf("-select must be bytes, corr, or fields")
+	}
+	if err := checkNativeEqFlags(*equivalencePatch); err != nil {
+		return err
 	}
 	if *rungs == "all" {
 		onlyRungs = nil
@@ -1299,7 +1305,7 @@ func run() error {
 	}
 
 	var combined *combinedReport
-	if *equivalencePatch != "" {
+	if *equivalencePatch != "" || nativeEq {
 		var art planArtifacts
 		combined, art, err = runCombined(*equivalencePatch, oldImage, newImage, mappedPlan, mappedPlanBytes, mappedRelocPred, *outDir, *reference)
 		if err != nil {

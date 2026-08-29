@@ -104,7 +104,10 @@ files gives 1,408,107 on the synthetic pair (from 9,293,321) and 8,714,361
 on prometheus, both applied back to the exact shipped file. The codec has
 no DWARF field layer, so its debug sections go through the correction as
 shifted bytes; the harness numbers below are what layer (b) adds on top.
-The plaintext pairs (59 MB / 181 MB):
+With the harness's own matcher instead of Zucchini's stream
+(`-native-equivalences`, `research/matcher-spike.md`) the prometheus pair
+is 323,744 (min 32 / drop 4096) and the synthetic 2,672. The plaintext
+pairs, Zucchini stream (59 MB / 181 MB):
 
 | plaintext pair (`dwarfz plain`) | bsdiff | Zucchini | presage, eq outside `.text` | presage, no eq |
 |---|---:|---:|---:|---:|
