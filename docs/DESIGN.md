@@ -652,18 +652,28 @@ as patch frames do, and a blob is not a file any single decompressor reads —
 hence the object key is `blobs/<hash>.blob`, not `.zst`.
 
 ```
-magic "BSZ1"  u8 transform (0 = plain, 1 = go-amd64-v1)  u8 flags
+magic "BSZ1"  u8 transform (0 = plain, 1 = go-amd64-v1)  u8 flags (bit 0 = debugz)
 header: uvarint header_len, then
         b3 from[32], b3 to[32], uvarint old_size, uvarint new_size,
         uvarint nframes, per frame: uvarint off, uvarint len, uvarint zlen,
                                     u8 codec (0 raw, 1 zstd, 2 brotli), b3 hash[32]
 frames: independently decodable, each ≤ 8 MiB decompressed, concatenating in
-        order to the patch body, which for transform 1 is
+        order to the patch body, which begins with uvarint expanded_new_size
+        when debugz is set, and for transform 1 is then
           layout (section table, moduledata values, function layout, pclntab
                   table offsets, data maps, shift tables, pointer overrides),
           stage-1a delta, stage-1b delta, b3 of the prediction[32],
           stage-2 correction
 ```
+
+The debugz flag (`delta/debugz.go`) says both files were coded with their
+`SHF_COMPRESSED` sections expanded: the encoder expands old and new, checks
+that new rebuilds exactly from its expansion with Go's zlib at level 1 (what
+the linker used) and the old file's set of compressed sections, and only
+then sets the flag; the decoder expands old, decodes to the expanded new,
+recompresses, and verifies against `to` as always. `from`, `to`, `old_size`
+and `new_size` describe the files as shipped. A decoder that does not know a
+flag bit treats the patch as an unsupported transform and fetches the blob.
 
 Frames are cut at 8 MiB, not at stream boundaries: a frame costs a 32-byte
 hash and a table entry, and compressing the streams separately came to within

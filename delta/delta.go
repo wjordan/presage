@@ -89,6 +89,12 @@ func Encode(old, new []byte, o Options) ([]byte, error) {
 	if st == nil {
 		st = &Stats{}
 	}
+	if pOld, pNew, ok := expandPair(old, new); ok {
+		// Code the expanded files; the decoder recompresses (debugz.go).
+		h.Flags |= FlagDebugZ
+		old, new = pOld, pNew
+		st.Notes = append(st.Notes, fmt.Sprintf("compressed debug sections expanded: %d -> %d bytes", h.NewSize, len(new)))
+	}
 	var body []byte
 	var err error
 	if !o.PlainOnly && o.transformCap() >= TransformGoAMD64 {
@@ -107,6 +113,11 @@ func Encode(old, new []byte, o Options) ([]byte, error) {
 			return nil, err
 		}
 		h.Transform = TransformPlain
+	}
+	if h.Flags&FlagDebugZ != 0 {
+		w := &wbuf{}
+		w.u(uint64(len(new)))
+		body = append(w.b, body...)
 	}
 	st.Transform = h.Transform
 	st.Body = len(body)
@@ -137,17 +148,39 @@ func Apply(old, patch []byte, w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	shipped := old
+	inner := *h // the codec sees the expanded sizes
+	if h.Flags&FlagDebugZ != 0 {
+		r := &rbuf{b: body}
+		inner.NewSize = int64(r.un(maxPatchSize, "expanded size"))
+		if r.err != nil {
+			return r.err
+		}
+		body = r.b
+		if old, err = ExpandDebug(old); err != nil {
+			return fmt.Errorf("delta: expanding the old file's debug sections: %w", err)
+		}
+		inner.OldSize = int64(len(old))
+	}
 	var out []byte
 	switch h.Transform {
 	case TransformPlain:
-		out, err = applyPlain(old, body, h)
+		out, err = applyPlain(old, body, &inner)
 	case TransformGoAMD64, TransformGoSegmap, TransformGoFar:
-		out, err = applyGoAMD64(old, body, h)
+		out, err = applyGoAMD64(old, body, &inner)
 	default:
-		return &ErrUnsupportedTransform{h.Transform}
+		return &ErrUnsupportedTransform{Transform: h.Transform}
 	}
 	if err != nil {
 		return err
+	}
+	if h.Flags&FlagDebugZ != 0 {
+		if int64(len(out)) != inner.NewSize {
+			return fmt.Errorf("%w: expanded output is %d bytes, body says %d", errCorrupt, len(out), inner.NewSize)
+		}
+		if out, err = PackDebug(out, shipped); err != nil {
+			return fmt.Errorf("%w: recompressing debug sections: %v", errCorrupt, err)
+		}
 	}
 	if int64(len(out)) != h.NewSize {
 		return fmt.Errorf("%w: output is %d bytes, header says %d", errCorrupt, len(out), h.NewSize)

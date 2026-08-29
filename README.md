@@ -327,7 +327,7 @@ CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o s
 
 | Knob | Effect |
 |---|---|
-| `-ldflags=-s -w` (strip DWARF + symtab) | **Required** (`publish` warns). Unstripped, every patch is ≥ 60 % of a full download because DWARF rewrites wholesale; stripping cuts a prometheus patch from 27.9 MB to 2.7 MB and the binary by ~30 %. |
+| `-ldflags=-s -w` (strip DWARF + symtab) | **Recommended** (`publish` warns). The codec expands compressed DWARF before diffing and recompresses it exactly on apply, so an unstripped prometheus patch release is 8.7 MB rather than the 29 MB a byte-level tool ships; stripped it is 74 KB, and the binary ~30 % smaller. |
 | `-ldflags=-buildid=` | removes the ~80 always-changing bytes; identical sources give identical binaries on any build box |
 | `-trimpath`, `CGO_ENABLED=0` | reproducible builds — the head hash is derivable from source |
 | `-buildmode=exe` or `-buildmode=pie` | either; a PIE binary is ~10 % larger and its patches are the same size (one-line change: 1,277 B PIE, 1,334 B exe) |

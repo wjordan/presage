@@ -70,11 +70,21 @@ type Header struct {
 	BodyOff int64
 }
 
+// knownFlags are the Header.Flags bits this build implements.
+const knownFlags = FlagDebugZ
+
 // ErrUnsupportedTransform means the patch was produced by a newer codec than
-// this build implements. The caller should fetch the blob instead.
-type ErrUnsupportedTransform struct{ Transform byte }
+// this build implements — a transform number above maxTransform, or a
+// header flag it does not know. The caller should fetch the blob instead.
+type ErrUnsupportedTransform struct {
+	Transform byte
+	Flags     byte // the unknown flag bits, zero when the transform is the problem
+}
 
 func (e *ErrUnsupportedTransform) Error() string {
+	if e.Flags != 0 {
+		return fmt.Sprintf("delta: patch uses header flags %#x this build does not implement", e.Flags)
+	}
 	return fmt.Sprintf("delta: patch uses transform %d, this build implements up to %d", e.Transform, maxTransform)
 }
 
@@ -106,6 +116,9 @@ func ParseHeader(b []byte) (*Header, error) {
 		return nil, fmt.Errorf("%w: bad magic", errCorrupt)
 	}
 	h := &Header{Transform: b[4], Flags: b[5]}
+	if unknown := h.Flags &^ knownFlags; unknown != 0 {
+		return nil, &ErrUnsupportedTransform{Transform: h.Transform, Flags: unknown}
+	}
 	r := &rbuf{b: b[6:]}
 	rec := r.bytes()
 	if r.err != nil {

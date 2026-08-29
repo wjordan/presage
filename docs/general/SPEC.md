@@ -240,9 +240,10 @@ no equivalences: 2,356 → 1,536 xz, joint brotli 1,314 against the codec's
 
 ### 4.5 Built-in module: DWARF
 
-Status: both layers built in the harness and measured end to end —
-(a) as `bench/dwarfz` (`plain`/`pack`, an exact inverse pair), (b) as
-`bench/elfpredict/dwarf.go`.
+Status: (a) built in the codec (`delta/debugz.go`, container flag
+`debugz`; `bench/dwarfz` is its CLI) and measured end to end on shipped
+files; (b) built in the harness (`bench/elfpredict/dwarf.go`), not yet
+ported to the codec.
 Research: `dwarf-research.md`; measurements: `go-module-results.md` "DWARF
 builds". The problem it answers: a default `go build` keeps DWARF — 13 MB
 of zlib-compressed sections on the 43 MB synthetic, 75 MB plaintext in

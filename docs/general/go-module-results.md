@@ -88,8 +88,9 @@ synthetic 1,176 / 1,184 / 1,194 / 1,199, patch 74,255 / 74,126 / 74,320 /
 
 Unstripped synthetic pair (`bench/out/bin127/v1-F1 → v2c-F1`, 43 MB):
 13 MB of zlib-compressed DWARF (`SHF_COMPRESSED`), `.symtab` 950 KB,
-`.strtab` 2 MB. Go codec 9,293,321; Zucchini 9,397,472; presage 9,371,156 —
-the compressed streams differ entirely. Go's `compress/zlib` at level 1
+`.strtab` 2 MB. Before the transform: Go codec 9,293,321; Zucchini
+9,397,472; presage 9,371,156 — the compressed streams differ entirely.
+Go's `compress/zlib` at level 1
 (`BestSpeed`) reproduces every section byte for byte (`bench/dwarfprobe`),
 on this build and on the prometheus one, so the patch is made on the
 plaintext (SPEC §4.5 (a)): `bench/dwarfz plain` expands every
@@ -97,7 +98,13 @@ plaintext (SPEC §4.5 (a)): `bench/dwarfz plain` expands every
 `dwarfz pack` inverts it with the set of compressed sections read from the
 old file, so the transform costs 0 plan bytes. Verified on both pairs:
 `pack(plain(f)) == f` for every file, and `pack(plain(new), old) == new`,
-which is the decoder's path. The plaintext pairs (59 MB / 181 MB):
+which is the decoder's path. The same transform is wired into the codec
+(`delta/debugz.go`, header flag `debugz`): `go-binsync diff` on the shipped
+files gives 1,408,107 on the synthetic pair (from 9,293,321) and 8,714,361
+on prometheus, both applied back to the exact shipped file. The codec has
+no DWARF field layer, so its debug sections go through the correction as
+shifted bytes; the harness numbers below are what layer (b) adds on top.
+The plaintext pairs (59 MB / 181 MB):
 
 | plaintext pair (`dwarfz plain`) | bsdiff | Zucchini | presage, eq outside `.text` | presage, no eq |
 |---|---:|---:|---:|---:|
