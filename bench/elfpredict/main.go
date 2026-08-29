@@ -55,19 +55,23 @@ type oracleReport struct {
 // .text, so that it can be compared with the whole-image incumbent patch
 // without the scope favouring it.
 type wholeImageReport struct {
-	NewImageBytes          int         `json:"new_image_bytes"`
-	NonTextBytes           int         `json:"non_text_bytes"`
-	EquivalenceOnly        stageReport `json:"equivalence_only"`
-	EquivalenceDerived     stageReport `json:"equivalence_derived_retargeting"`
-	StructurallyRetargeted stageReport `json:"structurally_retargeted"`
-	PerFunctionSelection   stageReport `json:"per_function_selection"`
-	ProjectedRelocations   stageReport `json:"projected_relocations"`
-	ModelledEhFrame        stageReport `json:"modelled_eh_frame"`
-	ModelledRoData         stageReport `json:"modelled_rodata"`
-	CorrectedFields        stageReport `json:"corrected_fields"`
-	CorrectedFieldsGated   stageReport `json:"corrected_fields_gated"`
-	SparsePlan             stageReport `json:"sparse_plan"`
-	Reloc                  relocStats  `json:"reloc_table"`
+	NewImageBytes               int         `json:"new_image_bytes"`
+	NonTextBytes                int         `json:"non_text_bytes"`
+	EquivalenceOnly             stageReport `json:"equivalence_only"`
+	EquivalenceDerived          stageReport `json:"equivalence_derived_retargeting"`
+	StructurallyRetargeted      stageReport `json:"structurally_retargeted"`
+	PerFunctionSelection        stageReport `json:"per_function_selection"`
+	EquivalenceRelocations      stageReport `json:"equivalence_relocations"`
+	EquivalenceRelocationsByRow stageReport `json:"equivalence_relocations_byrow"`
+	EquivalenceRelocationsSlots stageReport `json:"equivalence_relocations_slots"`
+	StructuralRelocations       stageReport `json:"structural_relocations"`
+	ProjectedRelocations        stageReport `json:"projected_relocations"`
+	ModelledEhFrame             stageReport `json:"modelled_eh_frame"`
+	ModelledRoData              stageReport `json:"modelled_rodata"`
+	CorrectedFields             stageReport `json:"corrected_fields"`
+	CorrectedFieldsGated        stageReport `json:"corrected_fields_gated"`
+	SparsePlan                  stageReport `json:"sparse_plan"`
+	Reloc                       relocStats  `json:"reloc_table"`
 }
 
 type combinedReport struct {
@@ -363,6 +367,11 @@ func buildRungPlans(oldImage, newImage *image, ep equivalencePlan, structure pre
 	epBytes, structureBytes, choices, derivedPlan, retargetPlan, selectedPlan []byte) ([]rung, string, error) {
 	target := newImage.Data
 	var notes notesBuf
+	// The relocation column diagnostics are printed from inside the codec;
+	// routing them through notes means a memo hit reprints them too.
+	prevDiag := relocDiag
+	relocDiag = notes.printf
+	defer func() { relocDiag = prevDiag }()
 	// Every rung that carries the full map can write its equivalence sources
 	// against it. The two rungs below that point cannot, and keep the plan as
 	// it arrived.
@@ -398,6 +407,7 @@ func buildRungPlans(oldImage, newImage *image, ep equivalencePlan, structure pre
 			NewOff: newRela.Off, NewSize: newRela.Size,
 		}
 		t := startStage("relocation plan")
+		notes.printf("relocation oracle: structural (reference points, function map, then equivalences)\n")
 		rp, err := buildRelocPlan(oldImage.Data, newImage.Data, base, newPointerOracle(ep, structure, &base))
 		if err != nil {
 			return nil, "", err
@@ -405,9 +415,72 @@ func buildRungPlans(oldImage, newImage *image, ep equivalencePlan, structure pre
 		t.done("")
 		notes.printf("relocation columns: gap correction %d B, addend correction %d B, tail correction %d B\n",
 			len(rp.GapCorrection), len(rp.AddendCorrection), len(rp.TailCorrection))
+		// The rung between the two: everything the projected-relocation rung
+		// has except the per-function choice. An empty choice stream leaves
+		// the decoder's selection loop unreached, so every mapped function
+		// keeps its structurally retargeted body.
+		rungs = append(rungs, rung{"structural-relocations", combinedPlan{
+			Equivalences: epMapped, Structure: structureBytes, Reloc: rp.marshal(),
+		}.marshal()})
 		rungs = append(rungs, rung{"projected-relocations", combinedPlan{
 			Equivalences: epMapped, Structure: structureBytes, Choices: choices, Reloc: rp.marshal(),
 		}.marshal()})
+
+		// The fair fight: Zucchini's method assembled from this project's
+		// parts. Whole-image equivalences, every reference retargeted through
+		// the equivalence projection, and the relocation table rebuilt by the
+		// projected-relocation plan under that same projection. It carries the
+		// derived plan's slim structure -- section shift ranges only -- so no
+		// function map, no reference points and no per-function selection
+		// reach either the retargeting or the relocation oracle.
+		//
+		// The by-row variant is the same rung with one column predicted the
+		// old way: addends paired by position rather than joined on the slot.
+		// It is the measurement behind §3.3, so it is kept runnable.
+		//
+		// The slots variant goes one step further back, to what upstream
+		// Zucchini actually does: the slot is the only part of an entry it
+		// models, and r_addend is left to the byte correction.
+		if wantRung("equivalence-relocations") || wantRung("equivalence-relocations-byrow") ||
+			wantRung("equivalence-relocations-slots") {
+			derived, err := unmarshalCombinedPlan(derivedPlan)
+			if err != nil {
+				return nil, "", err
+			}
+			slim, err := unmarshalPlan(derived.Structure, oldImage.textBytes())
+			if err != nil {
+				return nil, "", err
+			}
+			for _, v := range []struct {
+				name      string
+				pairing   string // stage-name tag
+				note      string // how the addend column is handled
+				pairByRow bool
+				noAddends bool
+			}{
+				{"equivalence-relocations", "slot join", "addends paired by slot join", false, false},
+				{"equivalence-relocations-byrow", "row index", "addends paired by row index", true, false},
+				{"equivalence-relocations-slots", "slots only", "no addend column: addend bytes stay as the equivalence copy left them", false, true},
+			} {
+				if !wantRung(v.name) {
+					continue
+				}
+				eb := base
+				eb.PairByRow, eb.NoAddends = v.pairByRow, v.noAddends
+				t = startStage("relocation plan (equivalence oracle, " + v.pairing + ")")
+				notes.printf("relocation oracle: equivalence map only (no function map, no reference points); %s\n", v.note)
+				erp, err := buildRelocPlan(oldImage.Data, newImage.Data, eb, newPointerOracle(ep, slim, &eb))
+				if err != nil {
+					return nil, "", err
+				}
+				t.done("")
+				notes.printf("%s columns: gap correction %d B, addend correction %d B, tail correction %d B; reloc plan xz %d\n",
+					v.name, len(erp.GapCorrection), len(erp.AddendCorrection), len(erp.TailCorrection), xzSize(erp.marshal()))
+				rungs = append(rungs, rung{v.name, combinedPlan{
+					Equivalences: derived.Equivalences, Structure: derived.Structure, Reloc: erp.marshal(),
+				}.marshal()})
+			}
+		}
 
 		var sparseRo []byte
 		oldEh, okOldEh := oldImage.Sections[".eh_frame"]
@@ -642,7 +715,11 @@ func runWholeImage(oldImage, newImage *image, epBytes, structureBytes, choices, 
 	into := map[string]*stageReport{
 		"equivalence-only": &out.EquivalenceOnly, "equivalence-derived": &out.EquivalenceDerived,
 		"structurally-retargeted": &out.StructurallyRetargeted, "per-function-selection": &out.PerFunctionSelection,
-		"projected-relocations": &out.ProjectedRelocations, "modelled-eh-frame": &out.ModelledEhFrame,
+		"equivalence-relocations":       &out.EquivalenceRelocations,
+		"equivalence-relocations-byrow": &out.EquivalenceRelocationsByRow,
+		"equivalence-relocations-slots": &out.EquivalenceRelocationsSlots,
+		"structural-relocations":        &out.StructuralRelocations,
+		"projected-relocations":         &out.ProjectedRelocations, "modelled-eh-frame": &out.ModelledEhFrame,
 		"modelled-rodata": &out.ModelledRoData, "corrected-fields": &out.CorrectedFields,
 		"corrected-fields-gated": &out.CorrectedFieldsGated, "sparse-plan": &out.SparsePlan,
 	}
@@ -779,8 +856,9 @@ func wantRung(name string) bool { return onlyRungs == nil || onlyRungs[name] }
 // rungs is wanted. Everything from the relocation plan on is built eagerly and
 // costs minutes, so a run aimed at an early rung should not pay for it.
 func wantLateRungs() bool {
-	for _, n := range []string{"projected-relocations", "modelled-eh-frame", "modelled-rodata",
-		"corrected-fields", "corrected-fields-gated", "sparse-plan"} {
+	for _, n := range []string{"projected-relocations", "equivalence-relocations", "equivalence-relocations-byrow",
+		"equivalence-relocations-slots", "structural-relocations",
+		"modelled-eh-frame", "modelled-rodata", "corrected-fields", "corrected-fields-gated", "sparse-plan"} {
 		if wantRung(n) {
 			return true
 		}
@@ -863,6 +941,10 @@ func run() error {
 	onlyProbes = commaSet(*probes)
 	dictProbeWindow = *dictWindow
 	memoDir, xzJobs = *memoFlag, *jobs
+	// Set before the two early returns below: -resume and a plans-memo hit
+	// both reach the rungs without passing the later assignment, and a dump
+	// probe that silently writes nothing is worse than no probe at all.
+	dumpDir = *outDir
 	if *resume != "" {
 		return resumeWholeImage(*oldPath, *newPath, *resume, *outDir, *reference)
 	}
@@ -1024,7 +1106,6 @@ func run() error {
 	}
 
 	var combined *combinedReport
-	dumpDir = *outDir
 	if *equivalencePatch != "" {
 		var art planArtifacts
 		combined, art, err = runCombined(*equivalencePatch, oldImage, newImage, mappedPlan, mappedPlanBytes, mappedRelocPred, *outDir, *reference)

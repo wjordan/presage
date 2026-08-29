@@ -134,6 +134,32 @@ type relocPlan struct {
 	GapCorrection    []byte
 	AddendCorrection []byte
 	TailCorrection   []byte
+	// PairByRow selects the positional addend pairing of §3.3 instead of the
+	// slot join. It is off by default and is only marshalled when set, so a
+	// plan that does not use it is byte-identical to one from before it
+	// existed.
+	PairByRow bool
+	// NoAddends drops the addend column altogether: the plan predicts and
+	// corrects the slot gaps and the tail only, and the decoder leaves every
+	// entry's addend bytes exactly as the equivalence copy wrote them. That is
+	// what upstream Zucchini does with .rela.dyn -- it treats r_offset as a
+	// reference and never looks at r_addend -- so the addends it gets wrong
+	// are paid for by the ordinary byte correction instead.
+	NoAddends bool
+}
+
+// flags packs the optional trailing flag word. Zero means the word is absent,
+// which keeps every plan written before the flags existed valid and
+// byte-identical.
+func (p relocPlan) flags() uint64 {
+	var f uint64
+	if p.PairByRow {
+		f |= relocFlagPairByRow
+	}
+	if p.NoAddends {
+		f |= relocFlagNoAddends
+	}
+	return f
 }
 
 func (p relocPlan) marshal() []byte {
@@ -146,8 +172,17 @@ func (p relocPlan) marshal() []byte {
 	b = appendStream(b, p.GapCorrection)
 	b = appendStream(b, p.AddendCorrection)
 	b = appendStream(b, p.TailCorrection)
+	if f := p.flags(); f != 0 {
+		b = appendU(b, f)
+	}
 	return b
 }
+
+const (
+	relocFlagPairByRow = 1
+	relocFlagNoAddends = 2
+	relocFlagsKnown    = relocFlagPairByRow | relocFlagNoAddends
+)
 
 func unmarshalRelocPlan(b []byte) (relocPlan, error) {
 	r := &planReader{b: b}
@@ -161,6 +196,14 @@ func unmarshalRelocPlan(b []byte) (relocPlan, error) {
 		return relocPlan{}, err
 	}
 	gap, addend, tail := r.stream(), r.stream(), r.stream()
+	if len(r.b) != 0 {
+		flags := r.u()
+		if flags&^uint64(relocFlagsKnown) != 0 {
+			return relocPlan{}, errors.New("unknown relocation plan flag")
+		}
+		p.PairByRow = flags&relocFlagPairByRow != 0
+		p.NoAddends = flags&relocFlagNoAddends != 0
+	}
 	if r.err != nil || len(r.b) != 0 {
 		return relocPlan{}, errors.New("trailing or invalid relocation plan data")
 	}
@@ -275,6 +318,34 @@ func relocAddendColumn(proj []relaEntry, slots []uint64) []byte {
 	return addend
 }
 
+// relocAddendByRow is the positional pairing the slot join replaced: new entry
+// i takes the projected addend of old entry i. It is kept as a measurable
+// option because it is what Zucchini-style row pairing does, and the gap
+// between the two numbers is the whole argument of §3.3. Where the new table
+// is longer than the old the surplus rows predict zero; where it is shorter
+// the surplus old rows are dropped.
+func relocAddendByRow(proj []relaEntry, n int) []byte {
+	addend := make([]byte, n*8)
+	for i := 0; i < n && i < len(proj); i++ {
+		putU64Col(addend, i, proj[i].addend)
+	}
+	return addend
+}
+
+// relocAddendPrediction is the addend column both sides build, chosen by the
+// plan's flags. A NoAddends plan has no addend column at all, and returns nil:
+// the decoder then leaves the addend bytes of every entry as it found them.
+func relocAddendPrediction(p relocPlan, proj []relaEntry, gap []byte) []byte {
+	switch {
+	case p.NoAddends:
+		return nil
+	case p.PairByRow:
+		return relocAddendByRow(proj, int(p.RelCount))
+	default:
+		return relocAddendColumn(proj, slotsFromGaps(gap, p.Anchor, p.RelCount))
+	}
+}
+
 func relocTailColumn(old []byte, p relocPlan, lookup func(uint64) x86.Target) []byte {
 	_, oldTail := parseRela(old[p.OldOff : p.OldOff+p.OldSize])
 	project := func(v uint64) uint64 {
@@ -312,6 +383,11 @@ func slotsFromGaps(gap []byte, anchor, relCount uint64) []uint64 {
 	return slots
 }
 
+// relocDiag receives the per-column diagnostics. buildRungPlans points it at
+// the notes buffer of the rung-plan build, so that a memo hit reprints them
+// rather than silently dropping them.
+var relocDiag = func(format string, args ...any) { fmt.Fprintf(os.Stderr, format, args...) }
+
 // relocCodecStats separates the two candidate causes of an expensive column
 // correction: a projection that gets the values wrong, or a byte-oriented
 // correction codec applied to a column of 8-byte values, where every value
@@ -337,7 +413,7 @@ func relocCodecStats(name string, got, want, correction []byte) {
 		resid = binary.AppendVarint(resid, int64(w-g))
 	}
 	if onlyProbes == nil {
-		fmt.Fprintf(os.Stderr, "  %s column: %d values, %d exact (%.3f%%); correction %d B -> xz %d; numeric residual %d B -> xz %d\n",
+		relocDiag("  %s column: %d values, %d exact (%.3f%%); correction %d B -> xz %d; numeric residual %d B -> xz %d\n",
 			name, n, exact, 100*float64(exact)/float64(n),
 			len(correction), xzSize(correction), len(resid), xzSize(resid))
 	}
@@ -352,7 +428,11 @@ func assembleRela(dst, gap, addend, tail []byte, anchor uint64, relCount uint64)
 		o := dst[i*relaEntrySize:]
 		binary.LittleEndian.PutUint64(o, slot)
 		binary.LittleEndian.PutUint64(o[8:], relTypeRelative)
-		binary.LittleEndian.PutUint64(o[16:], binary.LittleEndian.Uint64(addend[i*8:]))
+		// A nil column means the plan says nothing about addends, so the bytes
+		// the prediction already holds are left in place.
+		if addend != nil {
+			binary.LittleEndian.PutUint64(o[16:], binary.LittleEndian.Uint64(addend[i*8:]))
+		}
 	}
 	copy(dst[relCount*relaEntrySize:], tail)
 }
@@ -366,9 +446,11 @@ func applyReloc(out, old []byte, p relocPlan, lookup func(uint64) x86.Target) (r
 	}
 	// The corrected gaps give the exact new slots, which are the join key for
 	// the addend column.
-	addend := relocAddendColumn(proj, slotsFromGaps(gap, p.Anchor, p.RelCount))
-	if err := delta.ApplyCorrection(addend, p.AddendCorrection); err != nil {
-		return relocStats{}, fmt.Errorf("relocation addend column: %w", err)
+	addend := relocAddendPrediction(p, proj, gap)
+	if addend != nil {
+		if err := delta.ApplyCorrection(addend, p.AddendCorrection); err != nil {
+			return relocStats{}, fmt.Errorf("relocation addend column: %w", err)
+		}
 	}
 	tail := relocTailColumn(old, p, lookup)
 	if err := delta.ApplyCorrection(tail, p.TailCorrection); err != nil {
@@ -417,13 +499,14 @@ func buildRelocPlan(old, target []byte, base relocPlan, lookup func(uint64) x86.
 	if p.GapCorrection, err = delta.EncodeCorrection(gap, wantGap); err != nil {
 		return relocPlan{}, err
 	}
-	// The gap correction is exact, so the decoder's join key is wantGap.
-	addend := relocAddendColumn(proj, slotsFromGaps(wantGap, p.Anchor, p.RelCount))
-	if p.AddendCorrection, err = delta.EncodeCorrection(addend, wantAddend); err != nil {
-		return relocPlan{}, err
-	}
 	relocCodecStats("gap", gap, wantGap, p.GapCorrection)
-	relocCodecStats("addend", addend, wantAddend, p.AddendCorrection)
+	// The gap correction is exact, so the decoder's join key is wantGap.
+	if addend := relocAddendPrediction(p, proj, wantGap); addend != nil {
+		if p.AddendCorrection, err = delta.EncodeCorrection(addend, wantAddend); err != nil {
+			return relocPlan{}, err
+		}
+		relocCodecStats("addend", addend, wantAddend, p.AddendCorrection)
+	}
 	tail := relocTailColumn(old, p, lookup)
 	if p.TailCorrection, err = delta.EncodeCorrection(tail, wantTail); err != nil {
 		return relocPlan{}, err
