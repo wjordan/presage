@@ -10,7 +10,10 @@ import (
 	"os"
 	"os/exec"
 
+	"path/filepath"
+
 	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 	"github.com/wjordan/go-binsync/internal/cz"
 	"github.com/wjordan/go-binsync/presage"
 )
@@ -34,6 +37,10 @@ func main() {
 			zs := len(cz.CompressZstd(raw))
 			bs := brotliLen(raw)
 			xs := xzLen(raw)
+			if dump := os.Getenv("CZDUMP"); dump != "" {
+				check(os.WriteFile(fmt.Sprintf("%s/%s.f%d", dump, filepathBase(p), i), raw, 0o644))
+			}
+			fmt.Printf("    klauspost variants: allLit %d single+allLit %d\n", zstdVar(raw, zstd.WithAllLitEntropyCompression(true)), zstdVar(raw, zstd.WithAllLitEntropyCompression(true), zstd.WithSingleSegment(true)))
 			tz += zs
 			tb += bs
 			tc += int(f.ZLen)
@@ -43,6 +50,15 @@ func main() {
 		fmt.Printf("  total: chosen %d | zstd-only %d | brotli-only %d | xz-9e per frame %d | xz-9e whole body %d\n", tc, tz, tb, tx, xzLen(body))
 	}
 }
+
+func zstdVar(src []byte, opts ...zstd.EOption) int {
+	opts = append([]zstd.EOption{zstd.WithEncoderLevel(zstd.SpeedBestCompression), zstd.WithWindowSize(8 << 20), zstd.WithEncoderConcurrency(1)}, opts...)
+	e, err := zstd.NewWriter(nil, opts...)
+	check(err)
+	return len(e.EncodeAll(src, nil))
+}
+
+func filepathBase(p string) string { return filepath.Base(p) }
 
 func brotliLen(src []byte) int {
 	q := 11
