@@ -260,8 +260,8 @@ pointer with a compare-and-swap, then uploads the blob in parallel frames, so
 targets on the chain see the release as soon as the patch is up. Exits 0
 without changes if the head already has this hash; finishes a blob upload a
 previous run left incomplete.
-Warns if the binary contains DWARF or a symbol table, is PIE, or was built from
-a modified VCS tree; `--force` publishes anyway.
+Warns if the binary contains DWARF or a symbol table, or was built from a
+modified VCS tree; `--force` publishes anyway.
 Flags: `--force`, `--cache DIR`.
 
 ### `go-binsync agent <store> <path>`
@@ -330,16 +330,16 @@ CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o s
 | `-ldflags=-s -w` (strip DWARF + symtab) | **Required** (`publish` warns). Unstripped, every patch is ≥ 60 % of a full download because DWARF rewrites wholesale; stripping cuts a prometheus patch from 27.9 MB to 2.7 MB and the binary by ~30 %. |
 | `-ldflags=-buildid=` | removes the ~80 always-changing bytes; identical sources give identical binaries on any build box |
 | `-trimpath`, `CGO_ENABLED=0` | reproducible builds — the head hash is derivable from source |
-| `-buildmode=exe` (Linux default) | keep; PIE is 6 % larger with larger patches |
+| `-buildmode=exe` or `-buildmode=pie` | either; a PIE binary is ~10 % larger and its patches are the same size (one-line change: 1,277 B PIE, 1,334 B exe) |
 | PGO | freeze the profile across releases you intend to delta |
 
 ## 9. Supported inputs and fallbacks
 
-- The Go-aware codec supports stripped, non-PIE linux/amd64 binaries built by
+- The Go-aware codec supports stripped linux/amd64 binaries, exe or PIE, built by
   the current stable Go release (1.27); each Go release is validated against a
   self-prediction check before it is enabled, and the publisher picks the
   transform the *deployed* decoder can read.
-- Anything else — other toolchains, arm64, PIE, non-Go binaries, or an unknown
+- Anything else — other toolchains, arm64, non-Go binaries, or an unknown
   layout — uses the generic delta (≤ 256 MB) and, beyond that, the blob.
 - A target that meets a patch it cannot read fetches the blob. Every path
   ends in the same hash-verified file.

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/wjordan/go-binsync/delta"
+	"github.com/wjordan/go-binsync/delta/x86"
 )
 
 func TestPlanRoundTripAndCorrection(t *testing.T) {
@@ -20,7 +21,7 @@ func TestPlanRoundTripAndCorrection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, _, err := predict(old, b, true)
+	got, _, err := predict(old, b, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +46,7 @@ func TestPlanRejectsTruncation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for n := range b {
-		if _, err := unmarshalPlan(b[:n], old); err == nil {
+		if _, err := unmarshalPlan(b[:n], old, nil); err == nil {
 			t.Fatalf("accepted truncation to %d bytes", n)
 		}
 	}
@@ -171,7 +172,7 @@ func TestPlanColumnRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := unmarshalPlan(b, old)
+	got, err := unmarshalPlan(b, old, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +221,7 @@ func TestSparseStructureSerializes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sparse plan did not serialize: %v", err)
 	}
-	got, err := unmarshalPlan(b, old)
+	got, err := unmarshalPlan(b, old, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,5 +376,40 @@ func TestPredictedSourcesNeedTheirOwnMap(t *testing.T) {
 	eqs, err := decodeEquivalences(got, sparse)
 	if err == nil && reflect.DeepEqual(eqs, ep.Eqs) {
 		t.Fatal("the wrong function map decoded the source column correctly, so a mismatch could pass unnoticed")
+	}
+}
+
+// A planGoDerived plan carries no map: the decoder takes it from the
+// Go-table plan beside it, and the plan refuses to decode without one.
+func TestGoDerivedPlanSerializes(t *testing.T) {
+	old := bytes.Repeat([]byte{0x90}, 0x100)
+	maps := []mapping{
+		{Src: 0x00, SrcSize: 0x20, Dst: 0x00, DstSize: 0x20, Copy: true},
+		{Src: 0x40, SrcSize: 0x20, Dst: 0x30, DstSize: 0x28, Copy: true},
+	}
+	p := predictionPlan{OldAddr: 0x1000, NewAddr: 0x2000, TargetLen: 0x100, Mode: planGoDerived, Maps: maps}
+	b, err := p.marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dense := p
+	dense.Mode = planDense
+	db, err := dense.marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) >= len(db) {
+		t.Errorf("derived plan is %d bytes, dense %d: the map columns should be gone", len(b), len(db))
+	}
+	if _, err := unmarshalPlan(b, old, nil); err == nil {
+		t.Error("derived plan decoded without a map to derive")
+	}
+	prior := func(uint64) x86.Target { return x86.Target{} }
+	got, err := unmarshalPlan(b, old, func() (derivedMap, error) { return derivedMap{maps: maps, prior: prior}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Mode != planGoDerived || !slices.Equal(got.Maps, maps) || got.Prior == nil {
+		t.Errorf("round trip: mode %v, maps %v, prior set %v", got.Mode, got.Maps, got.Prior != nil)
 	}
 }

@@ -40,6 +40,7 @@ type mapper struct {
 	shifts    map[string]*shiftTable
 	overrides map[uint64]uint64
 	segs      map[int][]segPiece // resized functions' pieces, by new index
+	segLocal  map[int][]segPiece // the same, less the far pieces: what offsets map through
 	blobs     *blobPred
 }
 
@@ -70,7 +71,7 @@ func (mp *mapper) mapAddrBase(t uint64, self *gobin.Func) (uint64, refClass) {
 		// into it goes through its segment map -- for a branch into it and
 		// for a back-edge inside it alike.
 		o := t - f.Entry
-		if segs := mp.segs[j]; len(segs) > 0 {
+		if segs := mp.segLocal[j]; len(segs) > 0 {
 			o = mapSegOff(segs, o, g.Size())
 		}
 		if f == self {
@@ -107,6 +108,15 @@ func (mp *mapper) lookup(self *gobin.Func) func(uint64) x86.Target {
 			return x86.Target{}
 		}
 		return x86.Target{Addr: a, Known: true}
+	}
+}
+
+// entryLookup is the mapper as the header predictor asks it: the new home
+// of the old entry point, if it has one.
+func (mp *mapper) entryLookup() func(uint64) (uint64, bool) {
+	return func(t uint64) (uint64, bool) {
+		a, cls := mp.mapAddr(t, nil)
+		return a, cls != rcTextUnmatch && cls != rcOutside
 	}
 }
 
@@ -147,7 +157,7 @@ func predictText(mp *mapper, out []byte, st *x86.Stats) {
 				lo := g.Entry - dst.Text.Addr
 				body, into := src.FuncBytes(f), out[lo:lo+g.Size()]
 				if segs := mp.segs[j]; len(segs) > 0 {
-					relocatePieces(body, into, f.Entry, g.Entry, segs, mp.lookup(f), &stats[w])
+					relocatePieces(src.Text.Data, body, into, f.Entry-src.Text.Addr, f.Entry, g.Entry, segs, mp.lookup(f), &stats[w])
 					continue
 				}
 				x86.Relocate(body, into, f.Entry, g.Entry, mp.lookup(f), &stats[w], nil)

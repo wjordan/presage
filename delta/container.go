@@ -29,8 +29,12 @@ const (
 	// new shape, so a decoder that implements only transform 1 is served a
 	// transform-1 patch or falls back to the blob (3.6).
 	TransformGoSegmap = 2
+	// TransformGoFar lets a segment-map piece name old code outside the
+	// function's own old body (segfar.go), so that the code an edit added
+	// is copied from wherever the compiler emitted it before.
+	TransformGoFar = 3
 
-	maxTransform = TransformGoSegmap
+	maxTransform = TransformGoFar
 )
 
 // FrameSize is the uncompressed size of one patch frame. Frames are

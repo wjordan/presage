@@ -112,6 +112,7 @@ type Bin struct {
 	GoVer  string  // from .go.buildinfo, e.g. "go1.27.0"
 	Module string  // main module path, for logs
 	Vers   string  // main module version or vcs.revision, for logs
+	PIE    bool    // ET_DYN: pointers hold link-time addresses that .rela rebases at load
 }
 
 // Unsupported marks an input the Go-aware codec declines. It is never a
@@ -133,10 +134,10 @@ func Parse(raw []byte) (*Bin, error) {
 	if f.Machine != elf.EM_X86_64 || f.Class != elf.ELFCLASS64 || f.ByteOrder != binary.LittleEndian {
 		return nil, unsup("not linux/amd64 (%v, %v)", f.Machine, f.Class)
 	}
-	if f.Type != elf.ET_EXEC {
-		return nil, unsup("not a static executable (%v); PIE and shared objects relocate at load time", f.Type)
+	if f.Type != elf.ET_EXEC && f.Type != elf.ET_DYN {
+		return nil, unsup("not an executable (%v)", f.Type)
 	}
-	b := &Bin{File: raw, Sects: map[string]*Section{}}
+	b := &Bin{File: raw, Sects: map[string]*Section{}, PIE: f.Type == elf.ET_DYN}
 	for _, s := range f.Sections {
 		if s.Name == "" || s.Flags&elf.SHF_ALLOC == 0 {
 			continue
@@ -172,11 +173,14 @@ func Parse(raw []byte) (*Bin, error) {
 		return nil, unsup("built with %q, the Go-aware codec supports %s", b.GoVer, SupportedGo)
 	}
 	mod := b.Sects[".go.module"]
-	if mod == nil || b.Sects[".go.type"] == nil {
-		return nil, unsup("no .go.module/.go.type: not the %s layout", SupportedGo)
+	if mod == nil {
+		return nil, unsup("no .go.module: not the %s layout", SupportedGo)
 	}
 	if b.Mod, err = parseModuledata(mod.Data); err != nil {
 		return nil, err
+	}
+	if b.SectionOf(b.Mod.Types) == nil {
+		return nil, unsup("moduledata.types %#x is in no section: not the %s layout", b.Mod.Types, SupportedGo)
 	}
 	if b.Mod.PcHeader != pcs.Addr {
 		return nil, unsup("moduledata.pcHeader %#x is not .gopclntab %#x", b.Mod.PcHeader, pcs.Addr)

@@ -196,6 +196,23 @@ func EncodeCorrection(pred, want []byte) ([]byte, error) {
 	return encodeCorrection(pred, want, false)
 }
 
+// CorrectionShapes writes the correction in both shapes a transform-2
+// decoder reads, the shipped default and the near-miss form, so an
+// experimental predictor can price them with its own compressor. Either is
+// applied with ApplyFlaggedCorrection.
+func CorrectionShapes(pred, want []byte) (plain, near []byte, err error) {
+	if len(pred) != len(want) {
+		return nil, nil, fmt.Errorf("delta: prediction is %d bytes, target is %d", len(pred), len(want))
+	}
+	return shipped.write(pred, want, true), nearmiss.write(pred, want, true), nil
+}
+
+// ApplyFlaggedCorrection is ApplyCorrection for a stream from
+// CorrectionShapes, whose region count carries the shape.
+func ApplyFlaggedCorrection(buf, stream []byte) error {
+	return applyCorrection(buf, stream, true)
+}
+
 // applyCorrection rewrites buf, which holds the prediction, into the real
 // file. It allocates only the scratch copy of one region's source window.
 func applyCorrection(buf, stream []byte, flagged bool) error {

@@ -42,7 +42,10 @@ func predictGoAMD64(old, new []byte, tf byte) (*goPred, error) {
 	dmaps, shifts := buildMaps(ob, nb, g.m)
 	var segs []segMap
 	if tf >= TransformGoSegmap {
-		segs = buildSegMaps(ob, nb, g.m)
+		// scored against the maps alone: the overrides and the pieces
+		// themselves are not known yet
+		pm := &mapper{src: ob, dst: nb, m: g.m, srcToDst: g.m.OldToNew, dstToSrc: g.m.NewToOld, dataMaps: dmaps, shifts: shifts}
+		segs = buildSegMaps(ob, nb, g.m, pm, tf)
 	}
 	// deriveOverrides runs with the maps installed, so the override table
 	// does not spend two varints re-fixing a target a map already places.
@@ -210,12 +213,13 @@ func skeletonFrom(old *gobin.Bin, layRaw []byte, tf byte) (*gobin.Bin, *match, e
 }
 
 func newMapper(old, skel *gobin.Bin, m *match, l *layout) *mapper {
-	return &mapper{
+	mp := &mapper{
 		src: old, dst: skel, m: m,
 		srcToDst: m.OldToNew, dstToSrc: m.NewToOld,
 		dataMaps: l.DataMaps, shifts: l.Shifts, overrides: overrideMap(l.Overrides),
-		segs: segsByIdx(l.Segs),
 	}
+	mp.segs, mp.segLocal = segsByIdx(l.Segs, old, skel, m)
+	return mp
 }
 
 // asUnsupported turns a gobin rejection into the codec's own sentinel, so

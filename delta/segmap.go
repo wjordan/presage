@@ -216,24 +216,54 @@ func alignFunc(oldBody, newBody []byte) []segPiece {
 // whole scope: a same-length pair is already at offset 0 nearly everywhere,
 // and an unmatched function has no old body to segment. Alignment is per
 // function and order-independent, so the worker count does not change the
-// patch.
-func buildSegMaps(old, new *gobin.Bin, m *match) []segMap {
+// patch. From transform 3 a second pass adds far pieces (segfar.go), scored
+// with the local pieces of every function already in the map, so that the
+// fill they are measured against is the decoder's own.
+func buildSegMaps(old, new *gobin.Bin, m *match, mp *mapper, tf byte) []segMap {
 	per := make([][]segPiece, len(new.Funcs))
-	var wg sync.WaitGroup
-	for w := range predictWorkers {
-		wg.Add(1)
-		go func(w int) {
-			defer wg.Done()
-			for j := w; j < len(new.Funcs); j += predictWorkers {
-				i := m.NewToOld[j]
-				if i < 0 || old.Funcs[i].Size() == new.Funcs[j].Size() {
-					continue
-				}
-				per[j] = alignFunc(old.FuncBytes(old.Funcs[i]), new.FuncBytes(new.Funcs[j]))
-			}
-		}(w)
+	resized := func(j int) bool {
+		i := m.NewToOld[j]
+		return i >= 0 && old.Funcs[i].Size() != new.Funcs[j].Size()
 	}
-	wg.Wait()
+	each := func(fn func(j int)) {
+		var wg sync.WaitGroup
+		for w := range predictWorkers {
+			wg.Add(1)
+			go func(w int) {
+				defer wg.Done()
+				for j := w; j < len(new.Funcs); j += predictWorkers {
+					if resized(j) {
+						fn(j)
+					}
+				}
+			}(w)
+		}
+		wg.Wait()
+	}
+	each(func(j int) {
+		per[j] = alignFunc(old.FuncBytes(old.Funcs[m.NewToOld[j]]), new.FuncBytes(new.Funcs[j]))
+	})
+	if tf >= TransformGoFar {
+		var ix *textIndex
+		for j := range new.Funcs {
+			if resized(j) {
+				ix = indexText(old.Text.Data)
+				break
+			}
+		}
+		if ix != nil {
+			mp.segLocal = make(map[int][]segPiece)
+			for j, s := range per {
+				if len(s) > 0 {
+					mp.segLocal[j] = s
+				}
+			}
+			each(func(j int) {
+				f, g := old.Funcs[m.NewToOld[j]], new.Funcs[j]
+				per[j] = ix.farAlign(old, new, f, g, per[j], mp.lookup(f))
+			})
+		}
+	}
 	var maps []segMap
 	for j, s := range per {
 		if len(s) > 0 {
@@ -281,7 +311,7 @@ func encodeSegMaps(w *wbuf, maps []segMap) {
 // checked without the function list: indices strictly increasing and below
 // nfunc, at least one piece each, and pieces monotone and non-overlapping in
 // both bodies. The sizes are checked in skeleton, where the bodies are known.
-func decodeSegMaps(r *rbuf, nfunc int) []segMap {
+func decodeSegMaps(r *rbuf, nfunc int, far bool) []segMap {
 	n := r.un(uint64(min(nfunc, len(r.b)+1)), "segment map count")
 	if n == 0 {
 		return nil
@@ -354,7 +384,7 @@ func decodeSegMaps(r *rbuf, nfunc int) []segMap {
 			if r.err != nil {
 				return nil
 			}
-			if o < oldEnd || o+int64(s.N) > segMaxOff {
+			if !far && o < oldEnd || o+int64(s.N) > segMaxOff || o < -segMaxOff {
 				r.fail("function %d has pieces that overlap in the old body", maps[i].Idx)
 				return nil
 			}
@@ -365,8 +395,9 @@ func decodeSegMaps(r *rbuf, nfunc int) []segMap {
 }
 
 // checkSegMaps is the rest of the decoder's bounds check: every mapped
-// function must be matched, and every piece must fit both bodies.
-func checkSegMaps(maps []segMap, old *gobin.Bin, funcs []*gobin.Func, m *match) error {
+// function must be matched, and every piece must fit both bodies -- or,
+// for a far piece, the new body and the old .text.
+func checkSegMaps(maps []segMap, old *gobin.Bin, funcs []*gobin.Func, m *match, far bool) error {
 	for _, sm := range maps {
 		if sm.Idx >= len(funcs) {
 			return fmt.Errorf("%w: segment map for function %d, which does not exist", errCorrupt, sm.Idx)
@@ -376,9 +407,16 @@ func checkSegMaps(maps []segMap, old *gobin.Bin, funcs []*gobin.Func, m *match) 
 			return fmt.Errorf("%w: segment map for unmatched function %d", errCorrupt, sm.Idx)
 		}
 		oldSize, newSize := int64(old.Funcs[i].Size()), int64(funcs[sm.Idx].Size())
+		base := int64(old.Funcs[i].Entry - old.Text.Addr)
 		for _, s := range sm.Segs {
-			if int64(s.New)+int64(s.N) > newSize || int64(s.Old)+int64(s.N) > oldSize {
+			if int64(s.New)+int64(s.N) > newSize {
 				return fmt.Errorf("%w: a piece of function %d runs past its body", errCorrupt, sm.Idx)
+			}
+			if !isFar(s, oldSize) {
+				continue
+			}
+			if !far || base+int64(s.Old) < 0 || base+int64(s.Old)+int64(s.N) > int64(len(old.Text.Data)) {
+				return fmt.Errorf("%w: a piece of function %d runs past the old body", errCorrupt, sm.Idx)
 			}
 		}
 	}
@@ -386,16 +424,22 @@ func checkSegMaps(maps []segMap, old *gobin.Bin, funcs []*gobin.Func, m *match) 
 }
 
 // segsByIdx is the decoded list in the form the mapper asks it: the pieces
-// of the 0.6 % of functions that have any, by new function index.
-func segsByIdx(maps []segMap) map[int][]segPiece {
+// of the 0.6 % of functions that have any, by new function index, and the
+// local subset the offset map goes through.
+func segsByIdx(maps []segMap, old, new *gobin.Bin, m *match) (all, local map[int][]segPiece) {
 	if len(maps) == 0 {
-		return nil
+		return nil, nil
 	}
-	byIdx := make(map[int][]segPiece, len(maps))
+	all, local = make(map[int][]segPiece, len(maps)), make(map[int][]segPiece, len(maps))
 	for _, sm := range maps {
-		byIdx[sm.Idx] = sm.Segs
+		all[sm.Idx] = sm.Segs
+		if i := m.NewToOld[sm.Idx]; i >= 0 {
+			if l := localPieces(sm.Segs, int64(old.Funcs[i].Size())); len(l) > 0 {
+				local[sm.Idx] = l
+			}
+		}
 	}
-	return byIdx
+	return all, local
 }
 
 // mapSegOff turns an offset into a resized function's old body into an
@@ -432,7 +476,10 @@ func coversNew(segs []segPiece, o uint64) bool {
 // is the transmitted pieces plus an implicit shift-0 piece over every new
 // byte they do not cover, and each piece is one Relocate at its own PC --
 // the call predictText makes for an unmapped function, once per piece.
-func relocatePieces(code, out []byte, srcPC, dstPC uint64, segs []segPiece,
+//
+// text is the whole old .text and base the function's offset in it, which
+// is where a far piece's bytes come from.
+func relocatePieces(text, code, out []byte, base, srcPC, dstPC uint64, segs []segPiece,
 	lookup func(uint64) x86.Target, st *x86.Stats) {
 	end := 0
 	fill := func(lo, hi int) {
@@ -444,7 +491,8 @@ func relocatePieces(code, out []byte, srcPC, dstPC uint64, segs []segPiece,
 	}
 	for _, s := range segs {
 		fill(end, int(s.New))
-		x86.Relocate(code[s.Old:s.Old+s.N], out[s.New:s.New+s.N],
+		o := int64(base) + int64(s.Old)
+		x86.Relocate(text[o:o+int64(s.N)], out[s.New:s.New+s.N],
 			srcPC+uint64(s.Old), dstPC+uint64(s.New), lookup, st, nil)
 		end = int(s.New + s.N)
 	}

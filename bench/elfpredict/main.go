@@ -26,23 +26,28 @@ import (
 )
 
 type stageReport struct {
-	CorrectBytes         int       `json:"correct_prediction_bytes"`
-	CorrectPercent       float64   `json:"correct_prediction_percent"`
-	CorrectionBytes      int       `json:"correction_bytes"`
-	CorrectionZstd       int       `json:"correction_zstd_bytes"`
-	PlanBytes            int       `json:"plan_bytes"`
-	PlanZstd             int       `json:"plan_zstd_bytes"`
-	TotalZstd            int       `json:"total_zstd_bytes"`
-	PlanXZ               int       `json:"plan_xz_bytes,omitempty"`
-	CorrectionXZ         int       `json:"correction_xz_bytes,omitempty"`
-	CorrectionLZXZ       int       `json:"correction_lz_xz,omitempty"`
-	CorrectionColumnarXZ int       `json:"correction_columnar_xz,omitempty"`
-	CorrectionSplitXZ    int       `json:"correction_split_xz,omitempty"`
-	CorrectionSplitPick  string    `json:"correction_split_pick,omitempty"`
-	TotalXZ              int       `json:"total_xz_bytes,omitempty"`
-	VersusReferenceXZ    float64   `json:"versus_reference_xz_percent,omitempty"`
-	VersusReferencePct   float64   `json:"versus_reference_percent,omitempty"`
-	Relocation           x86.Stats `json:"relocation"`
+	CorrectBytes         int     `json:"correct_prediction_bytes"`
+	CorrectPercent       float64 `json:"correct_prediction_percent"`
+	CorrectionBytes      int     `json:"correction_bytes"`
+	CorrectionZstd       int     `json:"correction_zstd_bytes"`
+	PlanBytes            int     `json:"plan_bytes"`
+	PlanZstd             int     `json:"plan_zstd_bytes"`
+	TotalZstd            int     `json:"total_zstd_bytes"`
+	PlanXZ               int     `json:"plan_xz_bytes,omitempty"`
+	CorrectionXZ         int     `json:"correction_xz_bytes,omitempty"`
+	CorrectionLZXZ       int     `json:"correction_lz_xz,omitempty"`
+	CorrectionColumnarXZ int     `json:"correction_columnar_xz,omitempty"`
+	CorrectionSplitXZ    int     `json:"correction_split_xz,omitempty"`
+	CorrectionSplitPick  string  `json:"correction_split_pick,omitempty"`
+	TotalXZ              int     `json:"total_xz_bytes,omitempty"`
+	// JointXZ and JointBrotli are plan and correction as one stream: what a
+	// patch of this prediction ships as, less a header, under xz and under
+	// the Go-aware codec's compressor.
+	JointXZ            int       `json:"joint_xz_bytes,omitempty"`
+	JointBrotli        int       `json:"joint_brotli_bytes,omitempty"`
+	VersusReferenceXZ  float64   `json:"versus_reference_xz_percent,omitempty"`
+	VersusReferencePct float64   `json:"versus_reference_percent,omitempty"`
+	Relocation         x86.Stats `json:"relocation"`
 }
 
 type oracleReport struct {
@@ -68,6 +73,7 @@ type wholeImageReport struct {
 	ProjectedRelocations        stageReport `json:"projected_relocations"`
 	ModelledEhFrame             stageReport `json:"modelled_eh_frame"`
 	ModelledRoData              stageReport `json:"modelled_rodata"`
+	GoTables                    stageReport `json:"go_tables"`
 	CorrectedFields             stageReport `json:"corrected_fields"`
 	CorrectedFieldsGated        stageReport `json:"corrected_fields_gated"`
 	SparsePlan                  stageReport `json:"sparse_plan"`
@@ -121,13 +127,28 @@ func correctCount(a, b []byte) int {
 	return n
 }
 
+// smallestCorrection writes the correction in both shapes the production
+// decoder reads and keeps the one that compresses smaller, as the Go-aware
+// codec does from transform 2 on.
+func smallestCorrection(pred, target []byte) ([]byte, error) {
+	a, b, err := delta.CorrectionShapes(pred, target)
+	if err != nil {
+		return nil, err
+	}
+	z := xzSizes(a, b)
+	if z[1] < z[0] {
+		return b, nil
+	}
+	return a, nil
+}
+
 func measure(pred, target, planBytes []byte, stats x86.Stats, reference int, withXZ bool, secs map[string]section) (stageReport, []byte, error) {
-	corr, err := delta.EncodeCorrection(pred, target)
+	corr, err := smallestCorrection(pred, target)
 	if err != nil {
 		return stageReport{}, nil, err
 	}
 	check := append([]byte(nil), pred...)
-	if err := delta.ApplyCorrection(check, corr); err != nil {
+	if err := delta.ApplyFlaggedCorrection(check, corr); err != nil {
 		return stageReport{}, nil, err
 	}
 	if !bytes.Equal(check, target) {
@@ -154,7 +175,10 @@ func measure(pred, target, planBytes []byte, stats x86.Stats, reference int, wit
 		var colErr, splitErr error
 		var split int
 		var pick string
-		wg.Add(4)
+		joint := append(append([]byte(nil), planBytes...), corr...)
+		wg.Add(6)
+		go func() { defer wg.Done(); r.JointXZ = xzSize(joint) }()
+		go func() { defer wg.Done(); r.JointBrotli = brotliSize(joint) }()
 		go func() { defer wg.Done(); r.PlanXZ = xzSize(planBytes) }()
 		go func() { defer wg.Done(); r.CorrectionLZXZ = xzSize(corr) }()
 		go func() { defer wg.Done(); r.CorrectionColumnarXZ, colErr = columnarXZ(pred, target) }()
@@ -181,12 +205,12 @@ func measure(pred, target, planBytes []byte, stats x86.Stats, reference int, wit
 }
 
 func measureOracle(pred, target []byte) (oracleReport, []byte, error) {
-	corr, err := delta.EncodeCorrection(pred, target)
+	corr, err := smallestCorrection(pred, target)
 	if err != nil {
 		return oracleReport{}, nil, err
 	}
 	check := append([]byte(nil), pred...)
-	if err := delta.ApplyCorrection(check, corr); err != nil {
+	if err := delta.ApplyFlaggedCorrection(check, corr); err != nil {
 		return oracleReport{}, nil, err
 	}
 	if !bytes.Equal(check, target) {
@@ -228,6 +252,16 @@ func runCombined(externalPath string, oldImage, newImage *image, structure predi
 	ep, err := parseExternalEquivalence(externalPath, oldImage, newImage)
 	if err != nil {
 		return nil, planArtifacts{}, err
+	}
+	if noEquivalences {
+		ep.Eqs, ep.SrcSkip, ep.SrcResidual, ep.DstSkip, ep.CopyLen = nil, nil, nil, nil, nil
+	}
+	if noTextEquivalences {
+		ep.Eqs = slices.DeleteFunc(ep.Eqs, func(e equivalence) bool {
+			return e.Dst < ep.NewText.Off+ep.NewText.Size && e.Dst+e.N > ep.NewText.Off
+		})
+		ep.SrcSkip, ep.DstSkip, ep.CopyLen = encodeColumns(ep.Eqs)
+		ep.SrcResidual = nil
 	}
 	epBytes, err := ep.marshal(nil)
 	if err != nil {
@@ -287,7 +321,7 @@ func runCombined(externalPath string, oldImage, newImage *image, structure predi
 	// Structural retargeting is not optional at any -rungs setting: its
 	// prediction is what the per-function selector scores the structural
 	// prediction against, and every later rung inherits the choice bits.
-	art.Retarget = combinedPlan{Equivalences: epBytes, Structure: structureBytes}.marshal()
+	art.Retarget = combinedPlan{Equivalences: epBytes, Structure: structureBytes, GoTables: goTablesPlan}.marshal()
 	t = startStage("predict text-retargeted")
 	retargetPred, retargetStats, err := predictCombined(oldImage.Data, art.Retarget)
 	if err != nil {
@@ -309,8 +343,20 @@ func runCombined(externalPath string, oldImage, newImage *image, structure predi
 
 	t = startStage("per-function selection")
 	choices, selectedFunctions, selectedBytes := chooseStructuralFunctions(retargetPred, structuralPred, newImage.textBytes(), structure)
-	art.Selected = combinedPlan{Equivalences: epBytes, Structure: structureBytes, Choices: choices}.marshal()
+	art.Selected = combinedPlan{Equivalences: epBytes, Structure: structureBytes, Choices: choices, GoTables: goTablesPlan}.marshal()
 	t.done("%d functions / %d bytes chosen", selectedFunctions, selectedBytes)
+	if onlyProbes["selscatter"] {
+		// One row per mapped function: wrong bytes under each prediction, and the size.
+		var b bytes.Buffer
+		tt := newImage.textBytes()
+		for _, m := range structure.Maps {
+			body := tt[m.Dst : m.Dst+m.DstSize]
+			fmt.Fprintf(&b, "%d\t%d\t%d\n", wrongCount(retargetPred[m.Dst:m.Dst+m.DstSize], body), wrongCount(structuralPred[m.Dst:m.Dst+m.DstSize], body), m.DstSize)
+		}
+		if err := writeFile(dumpDir, "selection.tsv", b.Bytes()); err != nil {
+			return nil, planArtifacts{}, err
+		}
+	}
 
 	if wantRung("text-ladder") {
 		// The replay check on the choice bits lives here. Without this rung the
@@ -398,32 +444,68 @@ func buildRungPlans(oldImage, newImage *image, ep equivalencePlan, structure pre
 		{"structurally-retargeted", withEquivalences(retargetPlan, epMapped)},
 		{"per-function-selection", withEquivalences(selectedPlan, epMapped)},
 	}
-	oldRela, okOld := oldImage.Sections[".rela.dyn"]
-	newRela, okNew := newImage.Sections[".rela.dyn"]
-	if okOld && okNew && wantLateRungs() {
-		base := relocPlan{
-			OldSecs: newSectionMap(oldImage.Sections), NewSecs: newSectionMap(newImage.Sections),
-			OldOff: oldRela.Off, OldSize: oldRela.Size,
-			NewOff: newRela.Off, NewSize: newRela.Size,
+	// Each structural layer below is built only when the sections it models
+	// exist in both images; a Go binary has no .rela.dyn or .eh_frame, and its
+	// rungs simply carry no plan for them. The decoder treats every sub-plan
+	// as optional.
+	if wantLateRungs() {
+		base := relocPlan{OldSecs: newSectionMap(oldImage.Sections), NewSecs: newSectionMap(newImage.Sections)}
+		if goTablesPlan != nil {
+			// The Go-table plan describes both images' sections already.
+			o, n, err := goGeometry(oldImage.Data, goTablesPlan)
+			if err != nil {
+				return nil, "", err
+			}
+			base.OldSecs, base.NewSecs, base.DerivedGeometry = o, n, true
 		}
-		t := startStage("relocation plan")
-		notes.printf("relocation oracle: structural (reference points, function map, then equivalences)\n")
-		rp, err := buildRelocPlan(oldImage.Data, newImage.Data, base, newPointerOracle(ep, structure, &base))
-		if err != nil {
-			return nil, "", err
+		oldRela, okOld := relaSection(oldImage.Sections)
+		newRela, okNew := relaSection(newImage.Sections)
+		haveRela := okOld && okNew
+		if haveRela {
+			// A table with no relative entries (a static Go binary's PLT
+			// relocations) has nothing for the layer to rebuild.
+			rel, _, _ := parseRela(newImage.Data[newRela.Off : newRela.Off+newRela.Size])
+			haveRela = len(rel) != 0
 		}
-		t.done("")
-		notes.printf("relocation columns: gap correction %d B, addend correction %d B, tail correction %d B\n",
-			len(rp.GapCorrection), len(rp.AddendCorrection), len(rp.TailCorrection))
+		rp := base
+		var relocBytes []byte
+		if haveRela {
+			base.OldOff, base.OldSize, base.NewOff, base.NewSize = oldRela.Off, oldRela.Size, newRela.Off, newRela.Size
+			t := startStage("relocation plan")
+			notes.printf("relocation oracle: structural (reference points, function map, then equivalences)\n")
+			var err error
+			rp, err = buildRelocPlan(oldImage.Data, newImage.Data, base, newPointerOracle(ep, structure, &base))
+			if err != nil {
+				return nil, "", err
+			}
+			t.done("")
+			notes.printf("relocation columns: gap correction %d B, addend correction %d B, tail correction %d B\n",
+				len(rp.GapCorrection), len(rp.AddendCorrection), len(rp.TailCorrection))
+			relocBytes = rp.marshal()
+		} else {
+			// No table to rebuild, but the later layers still need the section
+			// geometry this plan carries.
+			notes.printf("no .rela.dyn in both images: relocation plan carries section geometry only\n")
+			relocBytes = base.marshal()
+		}
 		// The rung between the two: everything the projected-relocation rung
 		// has except the per-function choice. An empty choice stream leaves
 		// the decoder's selection loop unreached, so every mapped function
 		// keeps its structurally retargeted body.
 		rungs = append(rungs, rung{"structural-relocations", combinedPlan{
-			Equivalences: epMapped, Structure: structureBytes, Reloc: rp.marshal(),
-		}.marshal()})
+			Equivalences: epMapped, Structure: structureBytes, Reloc: relocBytes, GoTables: goTablesPlan}.marshal()})
 		rungs = append(rungs, rung{"projected-relocations", combinedPlan{
-			Equivalences: epMapped, Structure: structureBytes, Choices: choices, Reloc: rp.marshal(),
+			Equivalences: epMapped, Structure: structureBytes, Choices: choices, Reloc: relocBytes, GoTables: goTablesPlan}.marshal()})
+
+		// The Go-table module: the Go-aware codec's metadata regeneration
+		// (pclntab, type descriptors, data maps) as one layer. Absent for
+		// anything that is not a Go binary it understands.
+		goTables := goTablesPlan
+		if goTables != nil {
+			notes.printf("go tables: plan %d B\n", len(goTables))
+		}
+		rungs = append(rungs, rung{"go-tables", combinedPlan{
+			Equivalences: epMapped, Structure: structureBytes, Choices: choices, Reloc: relocBytes, GoTables: goTables,
 		}.marshal()})
 
 		// The fair fight: Zucchini's method assembled from this project's
@@ -447,7 +529,7 @@ func buildRungPlans(oldImage, newImage *image, ep equivalencePlan, structure pre
 			if err != nil {
 				return nil, "", err
 			}
-			slim, err := unmarshalPlan(derived.Structure, oldImage.textBytes())
+			slim, err := unmarshalPlan(derived.Structure, oldImage.textBytes(), goMapDeriver(oldImage.Data, goTablesPlan, oldImage.Text, newImage.Text))
 			if err != nil {
 				return nil, "", err
 			}
@@ -465,137 +547,164 @@ func buildRungPlans(oldImage, newImage *image, ep equivalencePlan, structure pre
 				if !wantRung(v.name) {
 					continue
 				}
-				eb := base
-				eb.PairByRow, eb.NoAddends = v.pairByRow, v.noAddends
-				t = startStage("relocation plan (equivalence oracle, " + v.pairing + ")")
-				notes.printf("relocation oracle: equivalence map only (no function map, no reference points); %s\n", v.note)
-				erp, err := buildRelocPlan(oldImage.Data, newImage.Data, eb, newPointerOracle(ep, slim, &eb))
-				if err != nil {
-					return nil, "", err
+				var eqReloc []byte
+				if haveRela {
+					eb := base
+					eb.PairByRow, eb.NoAddends = v.pairByRow, v.noAddends
+					t := startStage("relocation plan (equivalence oracle, " + v.pairing + ")")
+					notes.printf("relocation oracle: equivalence map only (no function map, no reference points); %s\n", v.note)
+					erp, err := buildRelocPlan(oldImage.Data, newImage.Data, eb, newPointerOracle(ep, slim, &eb))
+					if err != nil {
+						return nil, "", err
+					}
+					t.done("")
+					notes.printf("%s columns: gap correction %d B, addend correction %d B, tail correction %d B; reloc plan xz %d\n",
+						v.name, len(erp.GapCorrection), len(erp.AddendCorrection), len(erp.TailCorrection), xzSize(erp.marshal()))
+					eqReloc = erp.marshal()
 				}
-				t.done("")
-				notes.printf("%s columns: gap correction %d B, addend correction %d B, tail correction %d B; reloc plan xz %d\n",
-					v.name, len(erp.GapCorrection), len(erp.AddendCorrection), len(erp.TailCorrection), xzSize(erp.marshal()))
 				rungs = append(rungs, rung{v.name, combinedPlan{
-					Equivalences: derived.Equivalences, Structure: derived.Structure, Reloc: erp.marshal(),
+					Equivalences: derived.Equivalences, Structure: derived.Structure, Reloc: eqReloc,
 				}.marshal()})
 			}
 		}
 
-		var sparseRo []byte
+		var dwarfBytes []byte
+		pointer := newPointerOracle(ep, structure, &rp)
+		addrMap := func(addr uint64) (uint64, bool) {
+			t := pointer(addr)
+			return t.Addr, t.Known
+		}
+		// Fixed-record sections keep their tables beside equivalences: an
+		// inserted symbol or address puts every later field between two
+		// equivalences, where only the table says which row it is.
+		withRecords := func(k int) bool {
+			s, ok := newImage.Debug[dwarfSecNames[k]]
+			return ok && (!eqCovers(ep, s.Off, s.Size) || k == dwSymtab || k == dwAddr || k == dwStrtab || k == dwFrame)
+		}
+		if dp, ok := buildDwarfPlan(oldImage, newImage, withRecords, addrMap); ok && !noDwarf {
+			dwarfBytes = dp.marshal()
+			paired := 0
+			for _, u := range dp.Records[dwInfo] {
+				if u.NewLen != 0 {
+					paired++
+				}
+			}
+			notes.printf("dwarf: %d of %d old units paired, plan %d B\n", paired, len(dp.Records[dwInfo]), len(dwarfBytes))
+		}
+
+		var ehBytes []byte
 		oldEh, okOldEh := oldImage.Sections[".eh_frame"]
 		newEh, okNewEh := newImage.Sections[".eh_frame"]
 		newHdr, okHdr := newImage.Sections[".eh_frame_hdr"]
 		if okOldEh && okNewEh && okHdr {
-			fp := ehFramePlan{
+			ehBytes = ehFramePlan{
 				OldOff: oldEh.Off, OldSize: oldEh.Size, NewOff: newEh.Off, NewSize: newEh.Size,
 				OldAddr: oldEh.Addr, NewAddr: newEh.Addr,
 				HdrOff: newHdr.Off, HdrSize: newHdr.Size, HdrAddr: newHdr.Addr,
-			}
-			rungs = append(rungs, rung{"modelled-eh-frame", combinedPlan{
-				Equivalences: epMapped, Structure: structureBytes, Choices: choices,
-				Reloc: rp.marshal(), EhFrame: fp.marshal(),
-			}.marshal()})
+			}.marshal()
+		} else {
+			notes.printf("no .eh_frame/.eh_frame_hdr in both images: unwind layer omitted\n")
+		}
+		ehPlan := combinedPlan{
+			Equivalences: epMapped, Structure: structureBytes, Choices: choices,
+			Reloc: relocBytes, EhFrame: ehBytes, GoTables: goTables, Dwarf: dwarfBytes,
+		}.marshal()
+		rungs = append(rungs, rung{"modelled-eh-frame", ehPlan})
 
-			oldRo, okOldRo := oldImage.Sections[".rodata"]
-			newRo, okNewRo := newImage.Sections[".rodata"]
-			if okOldRo && okNewRo {
-				rd := roDataPlan{
-					OldOff: oldRo.Off, OldSize: oldRo.Size, NewOff: newRo.Off, NewSize: newRo.Size,
-					OldAddr: oldRo.Addr, NewAddr: newRo.Addr,
-					TextLo: oldImage.Text.Addr, TextHi: oldImage.Text.Addr + oldImage.Text.Size,
+		var roBytes []byte
+		oldRo, okOldRo := oldImage.Sections[".rodata"]
+		newRo, okNewRo := newImage.Sections[".rodata"]
+		// The .rodata layer models what the equivalences got wrong there; on
+		// a Go binary the module wrote the section and the layer has nothing
+		// to select (0 of 0 spans on every pair measured).
+		if okOldRo && okNewRo && goTablesPlan == nil {
+			rd := roDataPlan{
+				OldOff: oldRo.Off, OldSize: oldRo.Size, NewOff: newRo.Off, NewSize: newRo.Size,
+				OldAddr: oldRo.Addr, NewAddr: newRo.Addr,
+				TextLo: oldImage.Text.Addr, TextHi: oldImage.Text.Addr + oldImage.Text.Size,
+			}
+			// The short candidates need the target to decide, so the
+			// encoder predicts once without them and asks which help.
+			t := startStage("rodata selection")
+			if pred, _, err := predictImage(oldImage.Data, ehPlan); err != nil {
+				fmt.Fprintf(os.Stderr, "rodata selection FAILED: %v\n", err)
+			} else {
+				var sel roDataStats
+				rd.Keep, sel = selectRoDataTables(pred, oldImage.Data, newImage.Data, rd,
+					newSourceEquivalenceMapper(ep), newPointerOracle(ep, structure, &rp))
+				notes.printf("rodata selection: %d of %d spans kept (%d self-relative, %d rebased), bitmap %d B\n",
+					sel.Tables, sel.Candidates, sel.SelfRel, sel.Rebased, len(rd.Keep))
+			}
+			t.done("")
+			roBytes = rd.marshal()
+		}
+		roPlan := combinedPlan{
+			Equivalences: epMapped, Structure: structureBytes, Choices: choices,
+			Reloc: relocBytes, EhFrame: ehBytes, RoData: roBytes, GoTables: goTables, Dwarf: dwarfBytes,
+		}.marshal()
+		rungs = append(rungs, rung{"modelled-rodata", roPlan})
+
+		// The field layers need the finished prediction to score
+		// against, so the encoder predicts the rung above and then
+		// corrects it.
+		if !wantRung("corrected-fields") && !wantRung("corrected-fields-gated") {
+			// Both the extra prediction and the two walks of 8.7
+			// million field sites below exist only for these rungs.
+		} else if pred, _, err := timedPredictImage("predict for field fix", oldImage.Data, roPlan); err != nil {
+			fmt.Fprintf(os.Stderr, "field fix FAILED: %v\n", err)
+		} else {
+			nt := newImage.Text
+			for _, v := range []struct {
+				name string
+				gate bool
+			}{{"corrected-fields", false}, {"corrected-fields-gated", true}} {
+				if !wantRung(v.name) {
+					continue
 				}
-				// The short candidates need the target to decide, so the
-				// encoder predicts once without them and asks which help.
-				ehOnly := combinedPlan{
+				t := startStage("field fix " + v.name)
+				fx, fst := encodeFieldFix(pred[nt.Off:nt.Off+nt.Size], target[nt.Off:nt.Off+nt.Size], nt.Addr, structure.Maps, v.gate)
+				t.done("%d sites", fst.Sites)
+				notes.printf("field fix (%s): %d sites, domain %d; %d remaps kept (%d rejected) rewriting %d fields, %d field deltas, %d declined\n",
+					v.name, fst.Sites, fst.Domain, fst.Remaps, fst.Skipped, fst.Remade, fst.Deltas, fst.Ungated)
+				rungs = append(rungs, rung{v.name, combinedPlan{
 					Equivalences: epMapped, Structure: structureBytes, Choices: choices,
-					Reloc: rp.marshal(), EhFrame: fp.marshal(),
-				}.marshal()
-				t := startStage("rodata selection")
-				if pred, _, err := predictImage(oldImage.Data, ehOnly); err != nil {
-					fmt.Fprintf(os.Stderr, "rodata selection FAILED: %v\n", err)
-				} else {
-					var sel roDataStats
-					rd.Keep, sel = selectRoDataTables(pred, oldImage.Data, newImage.Data, rd,
-						newSourceEquivalenceMapper(ep), newPointerOracle(ep, structure, &rp))
-					notes.printf("rodata selection: %d of %d spans kept (%d self-relative, %d rebased), bitmap %d B\n",
-						sel.Tables, sel.Candidates, sel.SelfRel, sel.Rebased, len(rd.Keep))
-				}
-				t.done("")
-				rungs = append(rungs, rung{"modelled-rodata", combinedPlan{
-					Equivalences: epMapped, Structure: structureBytes, Choices: choices,
-					Reloc: rp.marshal(), EhFrame: fp.marshal(), RoData: rd.marshal(),
+					Reloc: relocBytes, EhFrame: ehBytes, RoData: roBytes, GoTables: goTables, Dwarf: dwarfBytes,
+					Fields: fx.marshal(),
 				}.marshal()})
-
-				sparseRo = rd.marshal()
-
-				// The field layers need the finished prediction to score
-				// against, so the encoder predicts the rung above and then
-				// corrects it.
-				roPlan := combinedPlan{
-					Equivalences: epMapped, Structure: structureBytes, Choices: choices,
-					Reloc: rp.marshal(), EhFrame: fp.marshal(), RoData: rd.marshal(),
-				}.marshal()
-				if !wantRung("corrected-fields") && !wantRung("corrected-fields-gated") {
-					// Both the extra prediction and the two walks of 8.7
-					// million field sites below exist only for these rungs.
-				} else if pred, _, err := timedPredictImage("predict for field fix", oldImage.Data, roPlan); err != nil {
-					fmt.Fprintf(os.Stderr, "field fix FAILED: %v\n", err)
-				} else {
-					nt := newImage.Text
-					for _, v := range []struct {
-						name string
-						gate bool
-					}{{"corrected-fields", false}, {"corrected-fields-gated", true}} {
-						if !wantRung(v.name) {
-							continue
-						}
-						t := startStage("field fix " + v.name)
-						fx, fst := encodeFieldFix(pred[nt.Off:nt.Off+nt.Size], target[nt.Off:nt.Off+nt.Size], nt.Addr, structure.Maps, v.gate)
-						t.done("%d sites", fst.Sites)
-						notes.printf("field fix (%s): %d sites, domain %d; %d remaps kept (%d rejected) rewriting %d fields, %d field deltas, %d declined\n",
-							v.name, fst.Sites, fst.Domain, fst.Remaps, fst.Skipped, fst.Remade, fst.Deltas, fst.Ungated)
-						rungs = append(rungs, rung{v.name, combinedPlan{
-							Equivalences: epMapped, Structure: structureBytes, Choices: choices,
-							Reloc: rp.marshal(), EhFrame: fp.marshal(), RoData: rd.marshal(),
-							Fields: fx.marshal(),
-						}.marshal()})
-					}
-				}
 			}
+		}
 
-			if wantRung("sparse-plan") {
-				sparse := sparseStructure(structure, choices, oldImage.Text.Size)
-				sparseBytes, err := sparse.marshal(oldImage.textBytes())
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "sparse plan FAILED to serialize: %v\n", err)
-					sparseBytes = nil
-				}
-				// Every mapping the sparse plan retains is one the selector chose.
-				sparseChoices := make([]byte, (len(sparse.Maps)+7)/8)
-				for i := range sparse.Maps {
-					sparseChoices[i/8] |= 1 << (i % 8)
-				}
-				notes.printf("sparse plan: %d shift ranges, %d retained mappings (from %d), structure %d -> %d B\n",
-					len(sparse.Ranges), len(sparse.Maps), len(structure.Maps), len(structureBytes), len(sparseBytes))
-				if sparseBytes != nil {
-					// The equivalence sources are written against the function map
-					// in the same plan, and this plan's map is a different, smaller
-					// one -- so it needs its own encoding, not the dense rung's.
-					epSparse := epBytes
-					if len(sparse.Maps) != 0 {
-						sp := &srcPredictor{maps: sparse.Maps, oldOff: ep.OldText.Off, newOff: ep.NewText.Off, newSize: ep.NewText.Size}
-						if b, err := ep.marshal(sp); err != nil {
-							fmt.Fprintf(os.Stderr, "sparse equivalence sources FAILED: %v\n", err)
-						} else {
-							epSparse = b
-						}
+		if wantRung("sparse-plan") {
+			sparse := sparseStructure(structure, choices, oldImage.Text.Size)
+			sparseBytes, err := sparse.marshal(oldImage.textBytes())
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "sparse plan FAILED to serialize: %v\n", err)
+				sparseBytes = nil
+			}
+			// Every mapping the sparse plan retains is one the selector chose.
+			sparseChoices := make([]byte, (len(sparse.Maps)+7)/8)
+			for i := range sparse.Maps {
+				sparseChoices[i/8] |= 1 << (i % 8)
+			}
+			notes.printf("sparse plan: %d shift ranges, %d retained mappings (from %d), structure %d -> %d B\n",
+				len(sparse.Ranges), len(sparse.Maps), len(structure.Maps), len(structureBytes), len(sparseBytes))
+			if sparseBytes != nil {
+				// The equivalence sources are written against the function map
+				// in the same plan, and this plan's map is a different, smaller
+				// one -- so it needs its own encoding, not the dense rung's.
+				epSparse := epBytes
+				if len(sparse.Maps) != 0 {
+					sp := &srcPredictor{maps: sparse.Maps, oldOff: ep.OldText.Off, newOff: ep.NewText.Off, newSize: ep.NewText.Size}
+					if b, err := ep.marshal(sp); err != nil {
+						fmt.Fprintf(os.Stderr, "sparse equivalence sources FAILED: %v\n", err)
+					} else {
+						epSparse = b
 					}
-					rungs = append(rungs, rung{"sparse-plan", combinedPlan{
-						Equivalences: epSparse, Structure: sparseBytes, Choices: sparseChoices,
-						Reloc: rp.marshal(), EhFrame: fp.marshal(), RoData: sparseRo,
-					}.marshal()})
 				}
+				rungs = append(rungs, rung{"sparse-plan", combinedPlan{
+					Equivalences: epSparse, Structure: sparseBytes, Choices: sparseChoices,
+					Reloc: relocBytes, EhFrame: ehBytes, RoData: roBytes, GoTables: goTables, Dwarf: dwarfBytes,
+				}.marshal()})
 			}
 		}
 	}
@@ -612,7 +721,7 @@ func memoRungPlans(oldImage, newImage *image, ep equivalencePlan, structure pred
 		rungNames = strings.Join(slices.Sorted(maps.Keys(onlyRungs)), ",")
 	}
 	h := sha256.New()
-	for _, b := range [][]byte{epBytes, structureBytes, choices, derivedPlan, retargetPlan, selectedPlan} {
+	for _, b := range [][]byte{epBytes, structureBytes, choices, derivedPlan, retargetPlan, selectedPlan, goTablesPlan} {
 		binary.Write(h, binary.LittleEndian, uint64(len(b)))
 		h.Write(b)
 	}
@@ -687,7 +796,7 @@ func runWholeImage(oldImage, newImage *image, epBytes, structureBytes, choices, 
 	// The function map is decoded once: it now walks the old image to build
 	// the reference-target domain of §9.12, which is not something to repeat.
 	t := startStage("decode function map")
-	structure, err := unmarshalPlan(structureBytes, oldImage.textBytes())
+	structure, err := unmarshalPlan(structureBytes, oldImage.textBytes(), goMapDeriver(oldImage.Data, goTablesPlan, oldImage.Text, newImage.Text))
 	if err != nil {
 		return nil, err
 	}
@@ -720,7 +829,7 @@ func runWholeImage(oldImage, newImage *image, epBytes, structureBytes, choices, 
 		"equivalence-relocations-slots": &out.EquivalenceRelocationsSlots,
 		"structural-relocations":        &out.StructuralRelocations,
 		"projected-relocations":         &out.ProjectedRelocations, "modelled-eh-frame": &out.ModelledEhFrame,
-		"modelled-rodata": &out.ModelledRoData, "corrected-fields": &out.CorrectedFields,
+		"modelled-rodata": &out.ModelledRoData, "go-tables": &out.GoTables, "corrected-fields": &out.CorrectedFields,
 		"corrected-fields-gated": &out.CorrectedFieldsGated, "sparse-plan": &out.SparsePlan,
 	}
 	for _, r := range rungs {
@@ -766,8 +875,9 @@ func runWholeImage(oldImage, newImage *image, epBytes, structureBytes, choices, 
 			attributeCorrection(pred, target, newImage.Sections, newImage.Text, attributionMaps)
 			t.done("")
 		}
-		fmt.Fprintf(os.Stderr, "whole image %-24s %.3f%% correct, plan %d + correction %d = %d XZ bytes (%.2f%% of reference); correction lz %d, columnar %d, split %d (%s); refs %d, unknown %d, nofit %d\n",
+		fmt.Fprintf(os.Stderr, "whole image %-24s %.3f%% correct, plan %d + correction %d = %d XZ bytes (%.2f%% of reference); joint xz %d, brotli %d; correction lz %d, columnar %d, split %d (%s); refs %d, unknown %d, nofit %d\n",
 			r.name, rep.CorrectPercent, rep.PlanXZ, rep.CorrectionXZ, rep.TotalXZ, rep.VersusReferenceXZ,
+			rep.JointXZ, rep.JointBrotli,
 			rep.CorrectionLZXZ, rep.CorrectionColumnarXZ, rep.CorrectionSplitXZ, rep.CorrectionSplitPick,
 			stats.Relocation.Refs, stats.Relocation.Unknown, stats.Relocation.NoFit)
 	}
@@ -844,6 +954,31 @@ func timedPredictImage(name string, old, plan []byte) ([]byte, combinedStats, er
 // difference between a three-minute answer and a half-hour one.
 var onlyRungs, onlyProbes map[string]bool
 
+// goTablesPlan is the Go-table module's plan for the pair, nil when the
+// module does not apply. Built once, before matching, because the function
+// map is derived from it.
+var goTablesPlan []byte
+
+// noEquivalences keeps the equivalence plan's geometry and drops its
+// equivalences, to price what the map layer adds over the other layers.
+var noEquivalences bool
+
+// noDwarf keeps the DWARF layer out, to price it.
+var noDwarf bool
+
+// noTextEquivalences drops the equivalences that write into .text and
+// keeps the rest: the Go code model owns .text, the stream owns the data
+// and debug sections.
+var noTextEquivalences bool
+
+// noGoText keeps the Go-table module out of .text even when there are no
+// equivalences, to price its code model against the structural one.
+var noGoText bool
+
+// noPoints drops the inferred reference points from a Go-derived plan, to
+// price them against the module's address prior.
+var noPoints bool
+
 var dictProbeWindow int
 
 // dumpDir receives each rung's whole-image prediction under the "dump"
@@ -858,7 +993,7 @@ func wantRung(name string) bool { return onlyRungs == nil || onlyRungs[name] }
 func wantLateRungs() bool {
 	for _, n := range []string{"projected-relocations", "equivalence-relocations", "equivalence-relocations-byrow",
 		"equivalence-relocations-slots", "structural-relocations",
-		"modelled-eh-frame", "modelled-rodata", "corrected-fields", "corrected-fields-gated", "sparse-plan"} {
+		"go-tables", "modelled-eh-frame", "modelled-rodata", "corrected-fields", "corrected-fields-gated", "sparse-plan"} {
 		if wantRung(n) {
 			return true
 		}
@@ -923,6 +1058,13 @@ func run() error {
 	newPath := flag.String("new", "", "new ELF release binary")
 	oldDebug := flag.String("old-debug", "", "unstripped old ELF with symbols")
 	newDebug := flag.String("new-debug", "", "unstripped new ELF with symbols")
+	flag.BoolVar(&noDwarf, "no-dwarf", false, "leave the DWARF layer out")
+	flag.BoolVar(&noTextEquivalences, "no-text-equivalences", false, "drop the equivalences that write into .text, keeping the rest")
+	flag.BoolVar(&noEquivalences, "no-equivalences", false, "drop the equivalences, keeping the section geometry they carry")
+	flag.BoolVar(&noPoints, "no-points", false, "drop the inferred reference points from a Go-derived plan")
+	flag.BoolVar(&noGoText, "no-go-text", false, "keep the Go-table module out of .text when there are no equivalences")
+	noGoTables := flag.Bool("no-go-tables", false, "leave the Go-table module out even for a Go binary")
+	ownMap := flag.Bool("own-map", false, "transmit the symbol-built function map even when the Go-table module could derive one")
 	outDir := flag.String("out", "", "optional artifact directory")
 	reference := flag.Int("reference", 0, "reference whole-patch byte count")
 	equivalencePatch := flag.String("equivalence-patch", "", "optional raw patch supplying whole-file equivalences")
@@ -932,7 +1074,14 @@ func run() error {
 	dictWindow := flag.Int("dict-window", 16<<20, "bytes of prediction the dict probe uses as a dictionary")
 	memoFlag := flag.String("memo", memoDir, "directory for the stage memo; empty disables it")
 	jobs := flag.Int("xz-jobs", xzJobs, "concurrent xz processes")
+	selector := flag.String("select", selectStrategy, "per-function selection score: bytes, corr, or fields")
 	flag.Parse()
+	switch *selector {
+	case "bytes", "corr", "fields":
+		selectStrategy = *selector
+	default:
+		return fmt.Errorf("-select must be bytes, corr, or fields")
+	}
 	if *rungs == "all" {
 		onlyRungs = nil
 	} else {
@@ -964,13 +1113,29 @@ func run() error {
 		return err
 	}
 
+	// The Go-table module: the Go-aware codec's metadata regeneration
+	// (pclntab, type descriptors, data maps) as one layer, and the source of
+	// the function map when it applies. Absent for anything that is not a
+	// Go binary it understands.
+	if wantLateRungs() && !*noGoTables {
+		t := startStage("go tables")
+		b, err := delta.EncodeGoTables(oldImage.Data, newImage.Data)
+		if err != nil {
+			t.done("not applicable: %v", err)
+		} else {
+			goTablesPlan = b
+			t.done("plan %d B", len(b))
+		}
+	}
+
 	// Without a scoreboard rung, nothing between here and the whole-image
 	// rungs is read for anything but the five serialized plans, so a memo hit
 	// skips the lot: two DWARF symbol parses, the matcher, the reference-point
 	// oracle and four .text predictions.
 	var plansKey string
 	if *equivalencePatch != "" && !wantHistory() {
-		plansKey = plansMemoKey(*oldPath, *newPath, *oldDebug, *newDebug, *equivalencePatch)
+		variant := fmt.Sprintf("go=%d own=%v noeq=%v nopoints=%v nogotext=%v notexteq=%v nodwarf=%v", len(goTablesPlan), *ownMap, noEquivalences, noPoints, noGoText, noTextEquivalences, noDwarf)
+		plansKey = plansMemoKey(selectStrategy+" "+variant, *oldPath, *newPath, *oldDebug, *newDebug, *equivalencePatch)
 		if art, ok := loadPlansMemo(plansKey); ok {
 			startStage("plan construction").done("memo hit")
 			if err := art.write(*outDir); err != nil {
@@ -1006,9 +1171,33 @@ func run() error {
 	t := startStage("structural matching")
 	plan, matches := constructPlan(oldUnits, newUnits, oldText, newText, oldImage.Text.Addr, newImage.Text.Addr, sectionRanges(oldImage, newImage))
 	t.done("%d mappings, %d name-mapped, %d content-mapped", len(plan.Maps), matches.NameMapped, matches.ContentMapped)
+	goDerived := false
+	if goTablesPlan != nil && !*ownMap {
+		t = startStage("go-derived map")
+		derived, err := goMapDeriver(oldImage.Data, goTablesPlan, oldImage.Text, newImage.Text)()
+		if err != nil {
+			return err
+		}
+		own := make(map[mapping]bool, len(plan.Maps))
+		for _, m := range plan.Maps {
+			m.Copy = true
+			own[m] = true
+		}
+		same := 0
+		for _, m := range derived.maps {
+			if own[m] {
+				same++
+			}
+		}
+		plan.Maps, plan.Prior, goDerived = derived.maps, derived.prior, true
+		t.done("%d mappings, %d shared with the symbol map's %d", len(derived.maps), same, len(own))
+	}
 
 	t = startStage("reference points")
 	plan.Points = inferReferencePoints(plan, oldText, newText)
+	if goDerived && noPoints {
+		plan.Points = nil
+	}
 	t.done("%d exact points", len(plan.Points))
 
 	// plan.bin is read by nothing else: it exists for the two stable rungs and
@@ -1030,7 +1219,7 @@ func run() error {
 	var stableRawReport, stableRelocReport, mappedRawReport, mappedRelocReport stageReport
 	if wantRung("stable-raw") {
 		t = startStage("rung stable-raw")
-		pred, reloc, err := predict(oldText, planBytes, false)
+		pred, reloc, err := predict(oldText, planBytes, false, nil)
 		if err != nil {
 			return err
 		}
@@ -1045,7 +1234,7 @@ func run() error {
 	}
 	if wantRung("stable-relocated") {
 		t = startStage("rung stable-relocated")
-		pred, reloc, err := predict(oldText, planBytes, true)
+		pred, reloc, err := predict(oldText, planBytes, true, nil)
 		if err != nil {
 			return err
 		}
@@ -1060,6 +1249,10 @@ func run() error {
 	}
 
 	mappedPlan := allMappedPlan(plan)
+	if goDerived {
+		mappedPlan.Mode = planGoDerived
+	}
+	deriveMap := goMapDeriver(oldImage.Data, goTablesPlan, oldImage.Text, newImage.Text)
 	t = startStage("mapped plan serialisation")
 	mappedPlanBytes, err := mappedPlan.marshal(oldText)
 	if err != nil {
@@ -1071,7 +1264,7 @@ func run() error {
 	}
 	if wantRung("all-mapped-raw") {
 		t = startStage("rung all-mapped-raw")
-		pred, stats, err := predict(oldText, mappedPlanBytes, false)
+		pred, stats, err := predict(oldText, mappedPlanBytes, false, deriveMap)
 		if err != nil {
 			return err
 		}
@@ -1088,7 +1281,7 @@ func run() error {
 	// The relocated all-mapped prediction is not optional: it is the
 	// structural candidate the per-function selector chooses against.
 	t = startStage("predict all-mapped-relocated")
-	mappedRelocPred, mappedRelocStats, err := predict(oldText, mappedPlanBytes, true)
+	mappedRelocPred, mappedRelocStats, err := predict(oldText, mappedPlanBytes, true, deriveMap)
 	if err != nil {
 		return err
 	}
@@ -1240,14 +1433,20 @@ func runProbes(name string, planBytes, pred, target []byte, oldImage, newImage *
 		if err := writeFile(dumpDir, "whole-image-"+name+".prediction", pred); err != nil {
 			fmt.Fprintf(os.Stderr, "probe dump FAILED: %v\n", err)
 		}
+		if err := writeFile(dumpDir, "whole-image-"+name+".plan", planBytes); err != nil {
+			fmt.Fprintf(os.Stderr, "probe dump FAILED: %v\n", err)
+		}
 	}
 	if onlyProbes["chunks"] && name == "structurally-retargeted" {
-		sp, _, err := predict(oldImage.textBytes(), structureBytes, true)
+		sp, _, err := predict(oldImage.textBytes(), structureBytes, true, goMapDeriver(oldImage.Data, goTablesPlan, oldImage.Text, newImage.Text))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "probe chunks FAILED: %v\n", err)
 		} else {
 			probeChunkChoices(predText, sp, targetText, structure)
 		}
+	}
+	if onlyProbes["whychosen"] && name == "per-function-selection" {
+		probeWhyChosen(planBytes, structure)
 	}
 	if onlyProbes["cond"] && name == "corrected-fields" {
 		c, err := encodeColumnar(predText, targetText)

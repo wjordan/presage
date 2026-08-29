@@ -34,6 +34,7 @@ type layout struct {
 	// the sub-function segment maps, by new function index (segmap.go);
 	// transform 2 and above only
 	Segs []segMap
+	Far  bool // transform 3: pieces may reach outside their old body
 
 	NFiles  uint64
 	PclnLen uint64
@@ -263,7 +264,8 @@ func decodeLayout(b []byte, old *gobin.Bin, tf byte) (*layout, error) {
 	l.NFunc = int(r.un(maxFuncs, "function count"))
 	l.Funcs = r.bytes()
 	if tf >= TransformGoSegmap {
-		l.Segs = decodeSegMaps(r, l.NFunc)
+		l.Far = tf >= TransformGoFar
+		l.Segs = decodeSegMaps(r, l.NFunc, l.Far)
 	}
 	l.NFiles = uint64(int64(old.Pcln.NFiles) + r.s())
 	l.PclnLen = uint64(int64(len(old.Pcln.Data)) + r.s())
@@ -586,7 +588,7 @@ func skeleton(old *gobin.Bin, l *layout) (*gobin.Bin, *match, error) {
 		return nil, nil, fmt.Errorf("%w: layout has no functions", errCorrupt)
 	}
 	b.Funcs = funcs
-	if err := checkSegMaps(l.Segs, old, funcs, m); err != nil {
+	if err := checkSegMaps(l.Segs, old, funcs, m, l.Far); err != nil {
 		return nil, nil, err
 	}
 	if err := checkPcReplay(old, l, m); err != nil {

@@ -97,7 +97,7 @@ func TestSegmapResizedRoundTrip(t *testing.T) {
 	}
 	var st x86.Stats
 	out := make([]byte, len(newBody))
-	relocatePieces(oldBody, out, oldEntry, newEntry, segs, lookup, &st)
+	relocatePieces(oldBody, oldBody, out, 0, oldEntry, newEntry, segs, lookup, &st)
 
 	p := int(segs[0].New)
 	if string(out[:head]) != string(newBody[:head]) {
@@ -129,7 +129,7 @@ func TestSegmapWireRoundTrip(t *testing.T) {
 	w := &wbuf{}
 	encodeSegMaps(w, maps)
 	r := &rbuf{b: w.b}
-	got := decodeSegMaps(r, 9)
+	got := decodeSegMaps(r, 9, false)
 	if err := r.done(); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestSegmapWireRoundTrip(t *testing.T) {
 			}
 		}
 	}
-	if n := decodeSegMaps(&rbuf{b: (&wbuf{}).b}, 9); n != nil {
+	if n := decodeSegMaps(&rbuf{b: (&wbuf{}).b}, 9, false); n != nil {
 		t.Errorf("an empty stream decoded to %v", n)
 	}
 }
@@ -197,7 +197,7 @@ func TestSegmapCorrupt(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &rbuf{b: tc.b}
-			maps := decodeSegMaps(r, tc.nfunc)
+			maps := decodeSegMaps(r, tc.nfunc, false)
 			if err := r.done(); err == nil {
 				t.Fatalf("decoded %v, want a corrupt-patch error", maps)
 			} else if !errors.Is(err, errCorrupt) {
@@ -231,12 +231,12 @@ func TestSegmapCheck(t *testing.T) {
 		{"function is unmatched", []segMap{{0, []segPiece{{0, 0, 16}}}}, &match{NewToOld: []int{-1}, OldToNew: []int{-1}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := checkSegMaps(tc.maps, old, dst.Funcs, tc.m); !errors.Is(err, errCorrupt) {
+			if err := checkSegMaps(tc.maps, old, dst.Funcs, tc.m, false); !errors.Is(err, errCorrupt) {
 				t.Fatalf("error %v, want a corrupt-patch error", err)
 			}
 		})
 	}
-	if err := checkSegMaps([]segMap{{0, []segPiece{{0x40, 0x40, 0x40}}}}, old, dst.Funcs, m); err != nil {
+	if err := checkSegMaps([]segMap{{0, []segPiece{{0x40, 0x40, 0x40}}}}, old, dst.Funcs, m, false); err != nil {
 		t.Fatalf("a piece that fits both bodies was rejected: %v", err)
 	}
 }
@@ -249,7 +249,7 @@ func TestMapperSegLookup(t *testing.T) {
 	newMap := func(segs []segPiece, oldSize, newSize uint64) *mapper {
 		src, dst := textBin(oldAddr, oldAddr, oldSize), textBin(newAddr, newAddr, newSize)
 		return &mapper{src: src, dst: dst, srcToDst: []int{0}, dstToSrc: []int{0},
-			segs: map[int][]segPiece{0: segs}}
+			segs: map[int][]segPiece{0: segs}, segLocal: map[int][]segPiece{0: segs}}
 	}
 	grew := newMap([]segPiece{{Old: 100, New: 150, N: 50}}, 300, 350)
 	shrank := newMap([]segPiece{{Old: 200, New: 50, N: 50}}, 400, 100)

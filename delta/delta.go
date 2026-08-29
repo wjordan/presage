@@ -141,7 +141,7 @@ func Apply(old, patch []byte, w io.Writer) error {
 	switch h.Transform {
 	case TransformPlain:
 		out, err = applyPlain(old, body, h)
-	case TransformGoAMD64, TransformGoSegmap:
+	case TransformGoAMD64, TransformGoSegmap, TransformGoFar:
 		out, err = applyGoAMD64(old, body, h)
 	default:
 		return &ErrUnsupportedTransform{h.Transform}

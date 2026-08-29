@@ -313,8 +313,9 @@ func planComponents(planBytes []byte) {
 	// printed afterwards: serially this was a couple of dozen one-core xz runs
 	// on every measured rung.
 	streams := []stream{{"", planBytes}, {"equivalences", cp.Equivalences}, {"structure", cp.Structure},
-		{"choices", cp.Choices}, {"reloc", cp.Reloc}, {"eh_frame", cp.EhFrame}, {"rodata", cp.RoData}}
-	const planStreams = 7
+		{"choices", cp.Choices}, {"reloc", cp.Reloc}, {"eh_frame", cp.EhFrame}, {"rodata", cp.RoData},
+		{"go_tables", cp.GoTables}}
+	const planStreams = 8
 	ep, epErr := parseEquivalencePlan(cp.Equivalences)
 	if epErr == nil {
 		streams = append(streams, stream{"dst", ep.DstSkip}, stream{"len", ep.CopyLen},

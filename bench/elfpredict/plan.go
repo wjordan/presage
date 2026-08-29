@@ -55,6 +55,9 @@ type planMode byte
 const (
 	planDense planMode = iota
 	planSparse
+	// planGoDerived transmits no map: the decoder derives it from the Go-table
+	// plan carried beside the structural plan (see delta.GoFunctionMap).
+	planGoDerived
 )
 
 type mapping struct {
@@ -85,6 +88,17 @@ type predictionPlan struct {
 	Maps   []mapping // canonical serialization order is destination order
 	Points []addressPoint
 	Ranges []addressRange
+	// Prior answers before the plan's own evidence: the Go-table module's
+	// address map for a planGoDerived plan. Never serialized; both sides
+	// derive it.
+	Prior func(uint64) x86.Target
+}
+
+// derivedMap is what a planGoDerived plan takes from the Go-table plan
+// beside it: the function map and the address map.
+type derivedMap struct {
+	maps  []mapping
+	prior func(uint64) x86.Target
 }
 
 func appendU(b []byte, v uint64) []byte {
@@ -227,15 +241,23 @@ func (p predictionPlan) marshal(oldText []byte) ([]byte, error) {
 	b = appendU(b, p.NewAddr)
 	b = appendU(b, p.TargetLen)
 	b = append(b, byte(p.Mode))
-	b = appendU(b, uint64(len(maps)))
+	sent := maps
+	if p.Mode == planGoDerived {
+		sent = nil
+	}
+	b = appendU(b, uint64(len(sent)))
 	detected := detectBoundaries(oldText)
 	var srcIndexDeltas, srcOffsets, extentResiduals, sizeDeltas, startResiduals []byte
-	copyBits := make([]byte, (len(maps)+7)/8)
+	copyBits := make([]byte, (len(sent)+7)/8)
 	var prevDstEnd uint64
 	var prevIdx int
 	for i, m := range maps {
 		if m.Dst < prevDstEnd || m.DstSize > p.TargetLen-m.Dst {
 			return nil, fmt.Errorf("map %d has overlapping or invalid destination", i)
+		}
+		if p.Mode == planGoDerived {
+			prevDstEnd = m.Dst + m.DstSize
+			continue
 		}
 		idx := boundaryIndex(detected, m.Src)
 		srcIndexDeltas = appendS(srcIndexDeltas, int64(idx-prevIdx))
@@ -349,13 +371,16 @@ func (r *planReader) byteAt() byte {
 	return v
 }
 
-func unmarshalPlan(b, oldText []byte) (predictionPlan, error) {
+// unmarshalPlan decodes a structural plan. derive supplies the function map
+// of a planGoDerived plan, which carries none of its own; it is called only
+// for that mode.
+func unmarshalPlan(b, oldText []byte, derive func() (derivedMap, error)) (predictionPlan, error) {
 	if len(b) < len(planMagic) || !bytes.Equal(b[:4], planMagic[:]) {
 		return predictionPlan{}, errors.New("invalid prediction plan magic")
 	}
 	r := &planReader{b: b[4:]}
 	p := predictionPlan{OldAddr: r.u(), NewAddr: r.u(), TargetLen: r.u()}
-	if flag := r.byteAt(); flag > byte(planSparse) {
+	if flag := r.byteAt(); flag > byte(planGoDerived) {
 		return predictionPlan{}, errors.New("invalid map mode in prediction plan")
 	} else {
 		p.Mode = planMode(flag)
@@ -366,6 +391,19 @@ func unmarshalPlan(b, oldText []byte) (predictionPlan, error) {
 	}
 	if err := readDenseMaps(r, &p, n, oldText); err != nil {
 		return predictionPlan{}, err
+	}
+	if p.Mode == planGoDerived {
+		if n != 0 {
+			return predictionPlan{}, errors.New("derived-map plan carries a map")
+		}
+		if derive == nil {
+			return predictionPlan{}, errors.New("derived-map plan without a Go-table plan to derive from")
+		}
+		d, err := derive()
+		if err != nil {
+			return predictionPlan{}, err
+		}
+		p.Maps, p.Prior = d.maps, d.prior
 	}
 	if err := readPointsAndRanges(r, &p, len(b), oldText); err != nil {
 		return predictionPlan{}, err
@@ -570,6 +608,11 @@ func (l *addressLookup) target(addr uint64) x86.Target {
 	if t := l.pointTarget(addr); t.Known {
 		return t
 	}
+	if p.Prior != nil {
+		if t := p.Prior(addr); t.Known {
+			return t
+		}
+	}
 	if t := l.mapTarget(addr); t.Known {
 		return t
 	}
@@ -591,8 +634,8 @@ func (l *addressLookup) target(addr uint64) x86.Target {
 
 // predict is decoder-faithful: its only inputs are old code, a serialized
 // plan, and the choice of whether to retarget PC-relative operands.
-func predict(old, encodedPlan []byte, relocate bool) ([]byte, x86.Stats, error) {
-	return predictWith(old, encodedPlan, relocate, nil)
+func predict(old, encodedPlan []byte, relocate bool, derive func() (derivedMap, error)) ([]byte, x86.Stats, error) {
+	return predictWith(old, encodedPlan, relocate, nil, derive)
 }
 
 // predictWith is predict with the caller's address oracle. The structural map
@@ -601,8 +644,8 @@ func predict(old, encodedPlan []byte, relocate bool) ([]byte, x86.Stats, error) 
 // holds the section geometry and the equivalence projection -- and passing
 // that in costs no plan bytes, because both sides build the oracle from
 // streams they already hold.
-func predictWith(old, encodedPlan []byte, relocate bool, lookupFn func(uint64) x86.Target) ([]byte, x86.Stats, error) {
-	p, err := unmarshalPlan(encodedPlan, old)
+func predictWith(old, encodedPlan []byte, relocate bool, lookupFn func(uint64) x86.Target, derive func() (derivedMap, error)) ([]byte, x86.Stats, error) {
+	p, err := unmarshalPlan(encodedPlan, old, derive)
 	if err != nil {
 		return nil, x86.Stats{}, err
 	}

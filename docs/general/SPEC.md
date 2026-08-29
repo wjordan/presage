@@ -158,6 +158,188 @@ native and wasm builds must agree on the prediction hash across the corpus.
 This gate is what caught binsync's silent 8-byte `textStart` bug
 (`binsync-lessons.md` §4) and is a required test for every module.
 
+### 4.4 Built-in module: Go tables
+
+The Go-aware codec's metadata regeneration, offered as one layer of the
+ELF predictor rather than a separate codec (`delta/gotables.go`,
+`bench/elfpredict`). The two tools had become complementary: the generic
+predictor's `.text` model (Zucchini equivalences, structural map, field
+correction) beats the Go codec's on real releases, while the Go codec
+regenerates `.gopclntab`, the type descriptors and the data sections the
+generic predictor can only copy. Results in `go-module-results.md`.
+
+**Plan.** One stream, `GoTables`, carried beside the structural plan: a
+transform byte, then the Go layout (section table, moduledata, function
+list with segment maps, data maps, shift tables, overrides) and the stage-1
+streams (funcnametab/filetab delta; cutab/pctab/`go:func.*` correction),
+byte-identical to what the Go codec writes at its current transform. The
+module's prediction is the codec's, byte for byte (checked on the
+prometheus minor release: 0 differing bytes); the transform byte is what
+makes that hold, a plan written at transform 1 lacks the segment maps and
+mispredicts 700 KB more of `.text`.
+
+**What it writes.** Every section of the new image except those the caller
+keeps: `.text` when there are equivalences to copy it from, and the
+relocation table when the relocation layer has rebuilt it. Data sections go
+through the content maps and pointer rewriting; sections the module has no
+model for are copied by name. It runs after the equivalence copy and the
+relocation layer, before `.eh_frame` and the field layers. The `.rodata`
+layer is skipped on a Go binary (it selected 0 of 0 spans on every pair).
+
+**What it lends the other layers,** all derived by both sides from the plan
+alone, so they cost no bytes:
+
+- the **function map** (`planGoDerived`): a structural plan in this mode
+  carries no map columns; `delta.GoFunctionMap` (pclntab entries, paired by
+  the layout's match) is the map, every unit copied. On the synthetic pair
+  this removed 18.5 KB of a 19.3 KB plan; the derived map shares 99.8 % of
+  its entries with the symbol-built one.
+- an **address prior** (`delta.GoAddressLookup`): the module's data maps
+  answer for data addresses after the plan's exact reference points and
+  before its section geometry. Restricted to addresses outside `.text`, and
+  placed after the points: letting it answer first cost 5–11 % on the
+  prometheus patch release either way.
+- the **section geometry** (`delta.GoSectionGeometry`): the relocation plan
+  carries a flag instead of its two section maps (76 B instead of 284 B on
+  the synthetic pair).
+- the **code model** as the `.text` base when there are no equivalences:
+  the module predicts `.text` (segment maps make it better than the
+  structural copy on a minor release, 1.78 MB wrong against 2.23 MB) and
+  the per-function choice refines it with the structural prediction. This
+  is where the minor release's gain comes from: 1,371 KB → 1,274 KB.
+
+**Equivalences are optional.** With the derived map and the code model in
+place, Zucchini's equivalence stream is worth its cost only when the change
+is tiny (one-line synthetic: 1,844 B with, 2,444 B without). On a real
+release it is not (prometheus patch: 165,840 B with, 72,192 B without; the
+stream alone is 94.9 KB). The harness takes `-no-equivalences`; a codec
+would encode both and keep the smaller, as the Go codec already does for
+its correction shape.
+
+**PIE.** Go PIE binaries are ET_DYN with `.data.rel.ro*` sections and a
+`.rela` whose GLOB_DAT entries precede the RELATIVE block (ld and lld sort
+them after it). `gobin` accepts ET_DYN, the data maps cover the
+`.data.rel.ro*` names, and the relocation plan carries a head count. The
+synthetic PIE pair patches to 1,828 B against 1,844 B for its non-PIE twin;
+the Go codec alone handles it too now (1,277 B, where it used to fall back
+to the plain delta at 72,681 B).
+
+**Self-prediction gate.** `TestGoTablesSelfPredict` (corpus-gated) applies
+the module to a binary against itself: every written section byte-exact,
+the derived map and address prior identities.
+
+**Follow-up (2026-08-29).** The module lays down the file's holes and
+headers as the codec does (`predictHoles`, `predictHeaders`), so the
+no-equivalence path starts from the old file's leading bytes rather than
+zeros; headers are recomputed from the layout's section table (DESIGN.md
+§3.2.2); and the codec's transform 3 lets a resized function's segment
+map borrow code from anywhere in old `.text` (far pieces, DESIGN.md
+§3.2.1), which the module inherits through `maxTransform`. Synthetic pair,
+no equivalences: 2,356 → 1,536 xz, joint brotli 1,314 against the codec's
+1,184. Numbers and the DWARF findings in `go-module-results.md`.
+
+### 4.5 Built-in module: DWARF
+
+Status: layer (b) built in the harness (`bench/elfpredict/dwarf.go`) and
+measured; layer (a) verified as an exact transform, not yet plumbed.
+Research: `dwarf-research.md`; measurements: `go-module-results.md` "DWARF
+builds". The problem it answers: a default `go build` keeps DWARF — 13 MB
+of zlib-compressed sections on the 43 MB synthetic, 75 MB plaintext in
+26 MB on prometheus — and on a one-line change every byte-level tool, this
+codec included, ships ~9.3 MB, because a recompressed stream whose input
+changed anywhere is a different stream throughout.
+
+**Two layers.**
+
+*(a) Transparent decompression* is a core region transform, not a Go
+concern: any `SHF_COMPRESSED` section (and `.zdebug_*`) becomes a child
+region holding the decompressed bytes, whose parent plan is
+`recompress(codec, child)` (§5.3). Every existing layer then works on the
+plaintext. `codec` names a pinned, versioned encoder from a registry —
+`go-flate-1@go1.27` today; Go 1.27 replaced flate's fast encoders and a
+1.25-linked binary recompresses under no 1.27 level, so the id carries the
+toolchain version read from the binary's build info, and the encoder stores
+the id that round-tripped, never an assumption. cgo builds are compressed by
+GNU ld (`zlib-6`), which Go's flate matches at no level; those take the
+fallback ladder — preflate-style reconstruction, then a Puffin-style
+Huffman-only re-encode (deterministic, pure Go, ~320 B per 32 KB block),
+then opaque bytes. A mismatch is a size cost, never a correctness one: the
+region hash (§4.3) catches it before a byte ships. Verified
+(`bench/dwarfprobe`): `zlib.BestSpeed` reproduces every section byte for
+byte on the synthetic and on the prometheus build, so the layer's cost is
+one codec id per section; the harness measures the plaintext pair
+(`objcopy --decompress-debug-sections`) and the compressed number follows.
+
+*(b) The DWARF layer* is a field locator over a record map, not a DWARF
+model. The decoder walks the *old* `.debug_info` against the old
+`.debug_abbrev`, and for every reference field projects its position and its
+value into the new image and writes the projected value; the section is
+otherwise copied. Fields and what projects them:
+
+| form | count (synthetic) | projected through |
+|---|---:|---|
+| `DW_FORM_ref_addr` (`DW_AT_type`, `abstract_origin`) | 480,828 | `.debug_info`'s own record map |
+| `DW_FORM_sec_offset` (`location`, `ranges`, `stmt_list`, `addr_base`) | 305,740 | the named section's record map |
+| `DW_FORM_addr` (CU/lexical-block pc, `DW_AT_go_runtime_type`) | 17,902 | the address oracle (function map, then section geometry) |
+| `DW_FORM_addrx` | 32,610 | unchanged: an index; `.debug_addr` carries the address |
+
+The same walk-and-project handles `.debug_addr` entries, `.debug_frame` FDE
+addresses and sizes, `DW_LNE_set_address` in every `.debug_line` program,
+and `.symtab` values and sizes (sizes as old size plus the function map's
+delta; `.strtab` is copied). The forms make this cheap for a DWARF-5-specific
+reason: a subprogram's `low_pc` is `addrx` and `high_pc` a length, and Go
+pads addrx indices to a fixed width, so moving or resizing functions does
+not resize DIEs.
+
+**The record map.** Each debug section is a sequence of records the decoder
+can delimit from the old bytes alone: compilation units, line programs and
+call-frame entries by their length prefix, location and range lists by their
+end-of-list entries. The plan is one table per section: per old record, no
+counterpart / counterpart (with an optional gap before it) and its length
+change; new offsets follow. A compilation unit whose length changed is
+*split* (table code 3) into its header and one record per DIE — a DIE's
+trailing null entries belong to it — and the sub-table takes its place, so
+references into the unit's tail still project. Pairing at the encoder: units
+by `DW_AT_name` in order; line programs through each paired unit's
+`stmt_list`; FDEs by function address through the address oracle; DIEs and
+lists by key (abbreviation code and tag mixed with the name; a list's
+content hash) with an anchored diff — keys unique on both sides give the
+longest increasing chain, and equal keys pair in order between anchors.
+Linear space: the Myers diff it replaced reached 30 GB on prometheus's
+million list records. Position projection: where equivalences write into a
+section they carry both the bytes and the projection (the Zucchini stream is
+a finer map than any table), and the table is not shipped; elsewhere the
+table places the bytes, rewrites each unit's length prefix, and projects.
+
+**Region DAG.** `.debug_line`, `.debug_loclists`, `.debug_rnglists`,
+`.debug_addr` are produced first; `.debug_info` names them as inputs because
+its `sec_offset` map is their record map. All of them name `.text` through
+the Go module's function map.
+
+**Measured** (harness, plaintext pairs; details in `go-module-results.md`):
+synthetic one-line pair (59 MB) 2,708 B with the equivalence stream, 3,036
+with none, against Zucchini's 597,596 and 1,458,732 before the layer;
+prometheus 3.13.1 → 3.13.2 default build (181 MB) 650,040 with the stream
+kept out of `.text`, 2,325,468 with none, against Zucchini's 5,596,196
+(28,963,240 on the compressed files as shipped). Two harness bugs the
+unstripped pairs exposed, both fixed in `delta` so the codec has them too:
+the Go module's tail copy (`.shstrtab` aligned at the end of the file) was
+applied to the whole post-section tail, shifting 13 MB of debug sections;
+and `.bss`/`.noptrbss` share a file offset, so an address in the second
+projected into the first (118 KB of `.text` wrong on every unstripped pair;
+1 KB on the stripped prometheus patch). Three rules the real pair taught:
+positions project through the equivalence that copied them, else through a
+table, else with their neighbours (Zucchini's matches stop at exactly the
+fields to rewrite); fixed-row tables (`.symtab`, `.debug_addr`, `.strtab`,
+`.debug_frame`) ship beside the stream and own their sections, because byte
+matching aligns rows by chance once every value changes; and pairing is
+never in-order name matching (383 of 1,263 units) but the anchored diff
+(1,045). Caveats: DWARF 4 (Go ≤ 1.24) uses absolute `DW_FORM_addr` for
+subprogram bounds and is unmeasured; a unit that changed content without
+changing length is not split, and unpaired units, changed lists and line
+programs are left to the correction — that is the 2.3 MB of the no-stream
+path on prometheus, and the reason the stream still wins there.
+
 ## 5. Regions and plans
 
 ### 5.1 Region tree

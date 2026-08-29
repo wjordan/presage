@@ -85,3 +85,17 @@ func xzSizes(bs ...[]byte) []int {
 	wg.Wait()
 	return out
 }
+
+// brotliSize is xzSize under the Go-aware codec's compressor, at the
+// quality and window its container uses, so the two can be compared in the
+// same coder. It returns 0 when brotli is absent.
+func brotliSize(b []byte) int {
+	cmd := exec.Command("brotli", "-q", "11", "-w", "24", "-c")
+	cmd.Stdin = bytes.NewReader(b)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if cmd.Run() != nil {
+		return 0
+	}
+	return out.Len()
+}

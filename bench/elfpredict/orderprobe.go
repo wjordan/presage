@@ -105,17 +105,18 @@ func probeOrdering(old, target, planBytes []byte, structure predictionPlan) {
 	}
 
 	oldText := old[ep.OldText.Off : ep.OldText.Off+ep.OldText.Size]
-	narrow, _, err := predict(oldText, cp.Structure, true)
+	derive := goMapDeriver(old, cp.GoTables, ep.OldText, ep.NewText)
+	narrow, _, err := predict(oldText, cp.Structure, true, derive)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "probe order FAILED (narrow): %v\n", err)
 		return
 	}
-	wide, _, err := predictWith(oldText, cp.Structure, true, oracle)
+	wide, _, err := predictWith(oldText, cp.Structure, true, oracle, derive)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "probe order FAILED (wide): %v\n", err)
 		return
 	}
-	sect, _, err := predictWith(oldText, cp.Structure, true, sectionOracle)
+	sect, _, err := predictWith(oldText, cp.Structure, true, sectionOracle, derive)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "probe order FAILED (sect): %v\n", err)
 		return

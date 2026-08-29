@@ -5,8 +5,6 @@ import (
 	"errors"
 	"slices"
 	"sync"
-
-	"github.com/wjordan/go-binsync/delta"
 )
 
 // The production correction codec is a matcher: it searches the prediction for
@@ -166,7 +164,7 @@ func bestCorrectionXZ(pred, target []byte, secs map[string]section) (int, string
 		go func() {
 			defer wg.Done()
 			p, t := pred[c[0]:c[1]], target[c[0]:c[1]]
-			corr, err := delta.EncodeCorrection(p, t)
+			corr, err := smallestCorrection(p, t)
 			if err != nil {
 				out[i].err = err
 				return

@@ -42,6 +42,11 @@ type sectionMap []addressRange // Old holds the address, New holds the file offs
 func newSectionMap(secs map[string]section) sectionMap {
 	m := make(sectionMap, 0, len(secs))
 	for _, s := range secs {
+		if s.NoBits {
+			// No file bytes: .bss and .noptrbss share an offset, and an
+			// address in one would project into the other.
+			continue
+		}
 		m = append(m, addressRange{Old: s.Addr, New: s.Off, Size: s.Size})
 	}
 	slices.SortFunc(m, func(a, b addressRange) int { return cmpU(a.Old, b.Old) })
@@ -146,6 +151,14 @@ type relocPlan struct {
 	// reference and never looks at r_addend -- so the addends it gets wrong
 	// are paid for by the ordinary byte correction instead.
 	NoAddends bool
+	// HeadCount is how many of the other-type entries precede the relative
+	// block: zero for ld.bfd and lld, which sort them after it, but Go's
+	// linker writes its GLOB_DAT entries first. Carried behind a flag so a
+	// plan without a head is byte-identical to one from before it existed.
+	HeadCount uint64
+	// DerivedGeometry says the section maps are not transmitted: both sides
+	// take them from the Go-table plan beside this one (goGeometry).
+	DerivedGeometry bool
 }
 
 // flags packs the optional trailing flag word. Zero means the word is absent,
@@ -159,6 +172,12 @@ func (p relocPlan) flags() uint64 {
 	if p.NoAddends {
 		f |= relocFlagNoAddends
 	}
+	if p.HeadCount != 0 {
+		f |= relocFlagHead
+	}
+	if p.DerivedGeometry {
+		f |= relocFlagDerivedGeometry
+	}
 	return f
 }
 
@@ -167,21 +186,31 @@ func (p relocPlan) marshal() []byte {
 	for _, v := range []uint64{p.OldOff, p.OldSize, p.NewOff, p.NewSize, p.RelCount, p.TailCount, p.Anchor} {
 		b = appendU(b, v)
 	}
-	b = p.OldSecs.marshal(b)
-	b = p.NewSecs.marshal(b)
+	if p.DerivedGeometry {
+		b = sectionMap(nil).marshal(b)
+		b = sectionMap(nil).marshal(b)
+	} else {
+		b = p.OldSecs.marshal(b)
+		b = p.NewSecs.marshal(b)
+	}
 	b = appendStream(b, p.GapCorrection)
 	b = appendStream(b, p.AddendCorrection)
 	b = appendStream(b, p.TailCorrection)
 	if f := p.flags(); f != 0 {
 		b = appendU(b, f)
+		if p.HeadCount != 0 {
+			b = appendU(b, p.HeadCount)
+		}
 	}
 	return b
 }
 
 const (
-	relocFlagPairByRow = 1
-	relocFlagNoAddends = 2
-	relocFlagsKnown    = relocFlagPairByRow | relocFlagNoAddends
+	relocFlagPairByRow       = 1
+	relocFlagNoAddends       = 2
+	relocFlagHead            = 4
+	relocFlagDerivedGeometry = 8
+	relocFlagsKnown          = relocFlagPairByRow | relocFlagNoAddends | relocFlagHead | relocFlagDerivedGeometry
 )
 
 func unmarshalRelocPlan(b []byte) (relocPlan, error) {
@@ -203,6 +232,13 @@ func unmarshalRelocPlan(b []byte) (relocPlan, error) {
 		}
 		p.PairByRow = flags&relocFlagPairByRow != 0
 		p.NoAddends = flags&relocFlagNoAddends != 0
+		if flags&relocFlagHead != 0 {
+			p.HeadCount = r.u()
+		}
+		p.DerivedGeometry = flags&relocFlagDerivedGeometry != 0
+	}
+	if p.HeadCount > p.TailCount {
+		return relocPlan{}, errors.New("relocation head exceeds the other-type entries")
 	}
 	if r.err != nil || len(r.b) != 0 {
 		return relocPlan{}, errors.New("trailing or invalid relocation plan data")
@@ -222,7 +258,10 @@ type relocStats struct {
 
 type relaEntry struct{ slot, info, addend uint64 }
 
-func parseRela(b []byte) (rel, tail []relaEntry) {
+// parseRela splits a table into its R_X86_64_RELATIVE entries and the rest,
+// each in table order, and counts how many of the rest come before the
+// first relative entry.
+func parseRela(b []byte) (rel, tail []relaEntry, head int) {
 	for i := 0; i+relaEntrySize <= len(b); i += relaEntrySize {
 		e := relaEntry{
 			slot:   binary.LittleEndian.Uint64(b[i:]),
@@ -232,10 +271,13 @@ func parseRela(b []byte) (rel, tail []relaEntry) {
 		if e.info&0xffffffff == relTypeRelative {
 			rel = append(rel, e)
 		} else {
+			if len(rel) == 0 {
+				head++
+			}
 			tail = append(tail, e)
 		}
 	}
-	return rel, tail
+	return rel, tail, head
 }
 
 func putU64Col(col []byte, i int, v uint64) {
@@ -255,7 +297,7 @@ func putU64Col(col []byte, i int, v uint64) {
 // nothing to gain and loses on ties. Measured, it costs 718,543 B against
 // 644,075 B for old order.
 func relocGapColumn(old []byte, p relocPlan, lookup func(uint64) x86.Target) (gap []byte, proj []relaEntry, projected int) {
-	oldRel, _ := parseRela(old[p.OldOff : p.OldOff+p.OldSize])
+	oldRel, _, _ := parseRela(old[p.OldOff : p.OldOff+p.OldSize])
 	gap = make([]byte, p.RelCount*8)
 	project := func(v uint64) uint64 {
 		if v == 0 {
@@ -347,7 +389,7 @@ func relocAddendPrediction(p relocPlan, proj []relaEntry, gap []byte) []byte {
 }
 
 func relocTailColumn(old []byte, p relocPlan, lookup func(uint64) x86.Target) []byte {
-	_, oldTail := parseRela(old[p.OldOff : p.OldOff+p.OldSize])
+	_, oldTail, _ := parseRela(old[p.OldOff : p.OldOff+p.OldSize])
 	project := func(v uint64) uint64 {
 		if v == 0 {
 			return 0
@@ -419,7 +461,11 @@ func relocCodecStats(name string, got, want, correction []byte) {
 	}
 }
 
-func assembleRela(dst, gap, addend, tail []byte, anchor uint64, relCount uint64) {
+func assembleRela(dst, gap, addend, tail []byte, anchor uint64, relCount, headCount uint64) {
+	head := headCount * relaEntrySize
+	copy(dst, tail[:head])
+	tail = tail[head:]
+	dst = dst[head:]
 	slot := anchor
 	for i := uint64(0); i < relCount; i++ {
 		if i > 0 {
@@ -459,7 +505,7 @@ func applyReloc(out, old []byte, p relocPlan, lookup func(uint64) x86.Target) (r
 	if (p.RelCount+p.TailCount)*relaEntrySize > p.NewSize {
 		return relocStats{}, errors.New("relocation counts exceed the new section")
 	}
-	assembleRela(out[p.NewOff:p.NewOff+p.NewSize], gap, addend, tail, p.Anchor, p.RelCount)
+	assembleRela(out[p.NewOff:p.NewOff+p.NewSize], gap, addend, tail, p.Anchor, p.RelCount, p.HeadCount)
 	return relocStats{
 		Entries: int(p.RelCount + p.TailCount), RelativeEntries: int(p.RelCount),
 		AddendsProjected: projected,
@@ -471,12 +517,12 @@ func applyReloc(out, old []byte, p relocPlan, lookup func(uint64) x86.Target) (r
 // buildRelocPlan is the encoder side. It sees the new table, derives the three
 // column corrections, and returns a plan the decoder can replay.
 func buildRelocPlan(old, target []byte, base relocPlan, lookup func(uint64) x86.Target) (relocPlan, error) {
-	newRel, newTail := parseRela(target[base.NewOff : base.NewOff+base.NewSize])
+	newRel, newTail, head := parseRela(target[base.NewOff : base.NewOff+base.NewSize])
 	if len(newRel) == 0 {
 		return relocPlan{}, errors.New("new relocation table has no relative entries")
 	}
 	p := base
-	p.RelCount, p.TailCount, p.Anchor = uint64(len(newRel)), uint64(len(newTail)), newRel[0].slot
+	p.RelCount, p.TailCount, p.Anchor, p.HeadCount = uint64(len(newRel)), uint64(len(newTail)), newRel[0].slot, uint64(head)
 
 	wantGap := make([]byte, p.RelCount*8)
 	wantAddend := make([]byte, p.RelCount*8)

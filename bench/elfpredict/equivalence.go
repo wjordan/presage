@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 
+	"github.com/wjordan/go-binsync/delta"
 	"github.com/wjordan/go-binsync/delta/x86"
 )
 
@@ -92,18 +93,22 @@ type combinedPlan struct {
 	EhFrame      []byte
 	RoData       []byte
 	Fields       []byte
+	GoTables     []byte
+	Dwarf        []byte
 }
 
 type combinedStats struct {
-	Equivalences         int          `json:"equivalences"`
-	EquivalenceTextBytes int          `json:"equivalence_text_bytes"`
-	SelectedFunctions    int          `json:"selected_functions"`
-	SelectedBytes        int          `json:"selected_function_bytes"`
-	Relocation           x86.Stats    `json:"relocation"`
-	Reloc                relocStats   `json:"reloc_table,omitempty"`
-	EhFrame              ehFrameStats `json:"eh_frame,omitempty"`
-	RoData               roDataStats  `json:"rodata,omitempty"`
-	Fields               fieldStats   `json:"fields,omitempty"`
+	GoTables             delta.GoTablesStats `json:"go_tables"`
+	Dwarf                dwarfStats          `json:"dwarf"`
+	Equivalences         int                 `json:"equivalences"`
+	EquivalenceTextBytes int                 `json:"equivalence_text_bytes"`
+	SelectedFunctions    int                 `json:"selected_functions"`
+	SelectedBytes        int                 `json:"selected_function_bytes"`
+	Relocation           x86.Stats           `json:"relocation"`
+	Reloc                relocStats          `json:"reloc_table,omitempty"`
+	EhFrame              ehFrameStats        `json:"eh_frame,omitempty"`
+	RoData               roDataStats         `json:"rodata,omitempty"`
+	Fields               fieldStats          `json:"fields,omitempty"`
 }
 
 type sourceEquivalenceMapper struct {
@@ -156,6 +161,16 @@ func newSourceEquivalenceMapper(p equivalencePlan) sourceEquivalenceMapper {
 	}
 	eqs = slices.DeleteFunc(eqs, func(eq equivalence) bool { return eq.N == 0 })
 	return sourceEquivalenceMapper{eqs: eqs, oldLen: p.OldLen, newLen: p.NewLen}
+}
+
+// within projects an old offset through the equivalence that copies it,
+// or reports false: unlike project it never extrapolates.
+func (m sourceEquivalenceMapper) within(off uint64) (uint64, bool) {
+	i := sort.Search(len(m.eqs), func(i int) bool { return m.eqs[i].Src > off })
+	if i == 0 || off >= m.eqs[i-1].Src+m.eqs[i-1].N {
+		return 0, false
+	}
+	return off - m.eqs[i-1].Src + m.eqs[i-1].Dst, true
 }
 
 func (m sourceEquivalenceMapper) project(off uint64) (uint64, bool) {
@@ -236,6 +251,19 @@ func parseExternalEquivalence(path string, oldImage, newImage *image) (equivalen
 		return equivalencePlan{}, err
 	}
 	return p, nil
+}
+
+// encodeColumns is decodeEquivalences' inverse for unpredicted sources:
+// it rebuilds the three columns from the equivalences, in order.
+func encodeColumns(eqs []equivalence) (srcSkip, dstSkip, copyLen []byte) {
+	var prevSrcEnd, prevDstEnd uint64
+	for _, e := range eqs {
+		srcSkip = appendS(srcSkip, int64(e.Src)-int64(prevSrcEnd))
+		dstSkip = appendU(dstSkip, e.Dst-prevDstEnd)
+		copyLen = appendU(copyLen, e.N)
+		prevSrcEnd, prevDstEnd = e.Src+e.N, e.Dst+e.N
+	}
+	return srcSkip, dstSkip, copyLen
 }
 
 func decodeEquivalences(p equivalencePlan, pred *srcPredictor) ([]equivalence, error) {
@@ -636,19 +664,18 @@ func (p combinedPlan) marshal() []byte {
 	b = appendStream(b, p.Equivalences)
 	b = appendStream(b, p.Structure)
 	b = appendStream(b, p.Choices)
-	// The relocation stream is optional so that plans predating it serialize
-	// to exactly the same bytes and their measurements stay comparable.
-	if len(p.Reloc) != 0 || len(p.EhFrame) != 0 {
-		b = appendStream(b, p.Reloc)
+	// The later streams are optional so that plans predating each serialize
+	// to exactly the same bytes and their measurements stay comparable: a
+	// stream is written when it, or any stream after it, is present.
+	tail := [][]byte{p.Reloc, p.EhFrame, p.RoData, p.Fields, p.GoTables, p.Dwarf}
+	last := -1
+	for i, s := range tail {
+		if len(s) != 0 {
+			last = i
+		}
 	}
-	if len(p.EhFrame) != 0 || len(p.RoData) != 0 {
-		b = appendStream(b, p.EhFrame)
-	}
-	if len(p.RoData) != 0 || len(p.Fields) != 0 {
-		b = appendStream(b, p.RoData)
-	}
-	if len(p.Fields) != 0 {
-		b = appendStream(b, p.Fields)
+	for _, s := range tail[:last+1] {
+		b = appendStream(b, s)
 	}
 	return b
 }
@@ -692,6 +719,20 @@ func unmarshalCombinedPlan(b []byte) (combinedPlan, error) {
 		cp.Fields = slices.Clone(fields.b)
 	}
 	if len(r.b) != 0 {
+		gt := r.stream()
+		if r.err != nil {
+			return combinedPlan{}, errors.New("invalid combined plan streams")
+		}
+		cp.GoTables = slices.Clone(gt.b)
+	}
+	if len(r.b) != 0 {
+		dw := r.stream()
+		if r.err != nil {
+			return combinedPlan{}, errors.New("invalid combined plan streams")
+		}
+		cp.Dwarf = slices.Clone(dw.b)
+	}
+	if len(r.b) != 0 {
 		return combinedPlan{}, errors.New("invalid combined plan streams")
 	}
 	return cp, nil
@@ -706,7 +747,7 @@ func predictCombined(old []byte, encoded []byte) ([]byte, combinedStats, error) 
 	if err != nil {
 		return nil, combinedStats{}, err
 	}
-	structure, err := unmarshalPlan(cp.Structure, old[ep.OldText.Off:ep.OldText.Off+ep.OldText.Size])
+	structure, err := unmarshalPlan(cp.Structure, old[ep.OldText.Off:ep.OldText.Off+ep.OldText.Size], goMapDeriver(old, cp.GoTables, ep.OldText, ep.NewText))
 	if err != nil {
 		return nil, combinedStats{}, err
 	}
@@ -714,6 +755,15 @@ func predictCombined(old []byte, encoded []byte) ([]byte, combinedStats, error) 
 		return nil, combinedStats{}, errors.New("combined structural and equivalence plans describe different text sections")
 	}
 	stats := combinedStats{Equivalences: len(ep.Eqs), EquivalenceTextBytes: copied}
+	// With no equivalences to copy .text from, the Go-table module's code
+	// model is the base, as in the whole-image decoder.
+	if len(cp.GoTables) != 0 && textEquivalences(ep) == 0 && !noGoText {
+		whole := make([]byte, ep.NewLen)
+		if _, err := delta.ApplyGoTables(old, cp.GoTables, whole, func(name string) bool { return name != ".text" }); err != nil {
+			return nil, combinedStats{}, err
+		}
+		copy(out, whole[ep.NewText.Off:ep.NewText.Off+ep.NewText.Size])
+	}
 	stats.Relocation = retargetEquivalencePrediction(out, ep, structure, newImageOracle(ep, structure, nil))
 	if len(cp.Choices) == 0 {
 		return out, stats, nil
@@ -722,7 +772,7 @@ func predictCombined(old []byte, encoded []byte) ([]byte, combinedStats, error) 
 		return nil, combinedStats{}, errors.New("combined choice stream has the wrong size")
 	}
 	oldText := old[ep.OldText.Off : ep.OldText.Off+ep.OldText.Size]
-	structural, _, err := predict(oldText, cp.Structure, true)
+	structural, _, err := predict(oldText, cp.Structure, true, goMapDeriver(old, cp.GoTables, ep.OldText, ep.NewText))
 	if err != nil {
 		return nil, combinedStats{}, err
 	}
@@ -747,14 +797,59 @@ func wrongCount(a, b []byte) int {
 	return n
 }
 
+// fieldCount prices a body as fields rather than bytes: one maximal run of
+// mismatch, clipped to four bytes, is one wrong field.
+func fieldCount(a, b []byte) int {
+	n, run := 0, 0
+	for i := range a {
+		if a[i] == b[i] {
+			run = 0
+			continue
+		}
+		if run == 0 {
+			n++
+		}
+		if run++; run == 4 {
+			run = 0
+		}
+	}
+	return n
+}
+
+// corrCount prices a body through the correction encoder that actually ships
+// it, so a run of mismatch costs what its copies and literals cost.
+func corrCount(a, b []byte) int {
+	c, err := delta.EncodeCorrection(a, b)
+	if err != nil {
+		return len(b)
+	}
+	return len(c)
+}
+
+// selectStrategy names how per-function selection scores the two predictions.
+var selectStrategy = "bytes"
+
 func chooseStructuralFunctions(equivalencePred, structuralPred, target []byte, structure predictionPlan) ([]byte, int, int) {
+	score := wrongCount
+	switch selectStrategy {
+	case "corr":
+		score = corrCount
+	case "fields":
+		score = fieldCount
+	}
+	win := make([]bool, len(structure.Maps))
+	const shard = 4096
+	parallelFor((len(structure.Maps)+shard-1)/shard, func(s int) {
+		for i := s * shard; i < min((s+1)*shard, len(structure.Maps)); i++ {
+			m := structure.Maps[i]
+			targetBody := target[m.Dst : m.Dst+m.DstSize]
+			win[i] = score(structuralPred[m.Dst:m.Dst+m.DstSize], targetBody) < score(equivalencePred[m.Dst:m.Dst+m.DstSize], targetBody)
+		}
+	})
 	choices := make([]byte, (len(structure.Maps)+7)/8)
 	var functions, selectedBytes int
 	for i, m := range structure.Maps {
-		eqBody := equivalencePred[m.Dst : m.Dst+m.DstSize]
-		structBody := structuralPred[m.Dst : m.Dst+m.DstSize]
-		targetBody := target[m.Dst : m.Dst+m.DstSize]
-		if wrongCount(structBody, targetBody) >= wrongCount(eqBody, targetBody) {
+		if !win[i] {
 			continue
 		}
 		choices[i/8] |= 1 << (i % 8)
@@ -870,4 +965,98 @@ func probeEquivalenceSources(p equivalencePlan, pred *srcPredictor) {
 	}
 	fmt.Fprintf(os.Stderr, "  probe equivalence lengths: %d of %d run to the end of their function (residual xz %d); %d abut the next run (residual xz %d)\n",
 		byExtent, len(p.Eqs), xzSize(extentResid), byNext, xzSize(nextResid))
+}
+
+// probeWhyChosen asks why the per-function selector prefers the function map
+// over the equivalence copy. Each mapped function is classified by how many
+// equivalence runs cover its destination and, for the run covering its start,
+// whether the implied old offset lands inside the function's own old body.
+func probeWhyChosen(planBytes []byte, structure predictionPlan) {
+	cp, err := unmarshalCombinedPlan(planBytes)
+	if err == nil && len(cp.Choices) != (len(structure.Maps)+7)/8 {
+		err = errors.New("plan carries no per-function choice stream")
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "probe whychosen FAILED: %v\n", err)
+		return
+	}
+	ep, err := parseEquivalencePlan(cp.Equivalences)
+	if err == nil {
+		var pred *srcPredictor
+		if len(structure.Maps) != 0 {
+			pred = &srcPredictor{maps: structure.Maps, oldOff: ep.OldText.Off, newOff: ep.NewText.Off, newSize: ep.NewText.Size}
+		}
+		ep.Eqs, err = decodeEquivalences(ep, pred)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "probe whychosen FAILED: %v\n", err)
+		return
+	}
+	// [chosen][pieces 0/1/2+][source none/same body/different body]
+	var count, byteSum [2][3][3]int64
+	for i, m := range structure.Maps {
+		// Maps are in .text offsets; equivalences are whole-image offsets.
+		lo, hi := ep.NewText.Off+m.Dst, ep.NewText.Off+m.Dst+m.DstSize
+		j, _ := slices.BinarySearchFunc(ep.Eqs, lo, func(e equivalence, lo uint64) int {
+			if e.Dst+e.N <= lo {
+				return -1
+			}
+			return 1
+		})
+		pieces, widest := 0, uint64(0)
+		var pick equivalence
+		covered := false
+		for k := j; k < len(ep.Eqs) && ep.Eqs[k].Dst < hi; k++ {
+			e := ep.Eqs[k]
+			s, t := max(e.Dst, lo), min(e.Dst+e.N, hi)
+			if s >= t {
+				continue
+			}
+			pieces++
+			if !covered && e.Dst <= lo && lo < e.Dst+e.N {
+				pick, covered = e, true
+			} else if !covered && t-s > widest {
+				pick, widest = e, t-s
+			}
+		}
+		source := 0
+		if pieces > 0 {
+			implied := int64(pick.Src) + int64(lo) - int64(pick.Dst) - int64(ep.OldText.Off)
+			source = 2
+			if implied >= int64(m.Src) && implied < int64(m.Src+m.SrcSize) {
+				source = 1
+			}
+		}
+		chosen := 0
+		if cp.Choices[i/8]&(1<<(i%8)) != 0 {
+			chosen = 1
+		}
+		count[chosen][min(pieces, 2)][source]++
+		byteSum[chosen][min(pieces, 2)][source] += int64(m.DstSize)
+	}
+	pieceName := [3]string{"0 (uncovered)", "1", "2+"}
+	sourceName := [3]string{"none", "same body", "different body"}
+	fmt.Fprintf(os.Stderr, "  probe whychosen: %d mapped functions\n", len(structure.Maps))
+	fmt.Fprintf(os.Stderr, "    %-13s %-15s %12s %14s %12s %14s\n", "pieces", "source", "chosen", "chosen B", "not-chosen", "not-chosen B")
+	for p := range 3 {
+		for s := range 3 {
+			if count[0][p][s] == 0 && count[1][p][s] == 0 {
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "    %-13s %-15s %12d %14d %12d %14d\n",
+				pieceName[p], sourceName[s], count[1][p][s], byteSum[1][p][s], count[0][p][s], byteSum[0][p][s])
+		}
+	}
+	var tc, tb [2]int64
+	for c := range 2 {
+		for p := range 3 {
+			for s := range 3 {
+				tc[c] += count[c][p][s]
+				tb[c] += byteSum[c][p][s]
+			}
+		}
+	}
+	fmt.Fprintf(os.Stderr, "    %-13s %-15s %12d %14d %12d %14d\n", "total", "", tc[1], tb[1], tc[0], tb[0])
+	fmt.Fprintf(os.Stderr, "  probe whychosen residual (chosen, pieces==1, same body): %d functions / %d bytes\n",
+		count[1][1][1], byteSum[1][1][1])
 }

@@ -297,9 +297,6 @@ func inspect(bin []byte) (version string, warnings []string) {
 				break
 			}
 		}
-		if f.Type == elf.ET_DYN {
-			warnings = append(warnings, "this binary is position-independent; rebuild with -buildmode=exe for a smaller binary and smaller patches")
-		}
 	}
 	bi, err := buildinfo.Read(bytes.NewReader(bin))
 	if err != nil {

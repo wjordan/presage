@@ -453,10 +453,10 @@ func readPlanArtifacts(dir string) (planArtifacts, error) {
 	return a, nil
 }
 
-func plansMemoKey(inputs ...string) string {
-	parts := make([]string, len(inputs))
-	for i, p := range inputs {
-		parts[i] = fileID(p)
+func plansMemoKey(strategy string, inputs ...string) string {
+	parts := []string{"select=" + strategy}
+	for _, p := range inputs {
+		parts = append(parts, fileID(p))
 	}
 	return memoKey("plans", codecCode(), parts...)
 }

@@ -16,7 +16,7 @@ Go 1.27.0 for the codec prototype's final pass, §3.2) unless marked *estimate*.
 
 | Assumption | Value used for design | Source |
 |---|---|---|
-| Binary | Go, linux/amd64, stripped (`-s -w`), non-PIE; 30 MB typical, 100–250 MB common, up to 1 GB | user; corpus in `benchmark-scale.md` |
+| Binary | Go, linux/amd64, stripped (`-s -w`), exe or PIE; 30 MB typical, 100–250 MB common, up to 1 GB | user; corpus in `benchmark-scale.md` |
 | Change per release | *not* one line: several lines across several packages (a normal patch release); sometimes a minor release with dependency bumps | user |
 | Release cadence | many per day; targets are usually one release behind, occasionally several | user |
 | WAN | 5–100 Mbit/s, 100–300 ms RTT, 0–2 % packet loss | user; netem profiles A–D in `benchmark-scale.md` |
@@ -117,7 +117,7 @@ real new file and emits the correction.
 
 ```
 parse(old)            ELF sections; pclntab (funcs: name, entry, size, pc tables); moduledata
-                      ─ unsupported (non-Go, non-amd64, PIE, not the supported Go release — D14): plain codec §3.8
+                      ─ unsupported (non-Go, non-amd64, not the supported Go release — D14): plain codec §3.8
 match(old, new)       new function j ↔ old function i by name (exact; then normalised for
                       closure/deferwrap/generic-instantiation numbering; then by content hash)
 layout table          for each new function in order: {same-as-next-old | old index | new name}, Δsize
@@ -298,6 +298,51 @@ segmap := uvarint nmapped                 functions carrying a map
           varint  shift  × Σnseg          (oldOff−newOff) − the previous piece's,
                                           per function, starting from 0
 ```
+
+**Far pieces (transform 3).** The aligner above only looks inside the
+function's own old body, so the code an edit *added* is left to the
+correction. It is rarely new to the binary: the compiler emits the same
+sequences for the same constructs, and on the one-line synthetic pair the
+inserted code was found elsewhere in old `.text` by Zucchini's whole-file
+search but not by the codec (372 wrong bytes in the function against 79).
+From transform 3 a piece's old offset may fall outside the old body — before
+it or after it, relative to the old entry — and the decoder copies those
+bytes from wherever in old `.text` they are and relocates them at their true
+old PC, exactly as it would a local piece. The old-body monotonicity check
+is dropped for such pieces; new-body monotonicity stays, and the offset map
+for branches into the function uses only the local, monotone subset
+(`segfar.go`).
+
+The encoder runs local alignment for every resized function first, installs
+those pieces in a provisional mapper, then lays each body down as the
+decoder would and, wherever that fill has an instruction wrong, looks the
+new body's 12-byte canonical window up in an index of every instruction
+boundary of old `.text` (sorted `(hash, offset)` pairs, ≤ 256 hits per
+window). The four longest canonical extensions are *scored by relocating
+them*: a candidate is priced as the correction would price the result (a
+wrong run costs its bytes plus a two-byte header) and kept only when it
+beats the fill by 20. An unscored version — canonical match, no relocation
+check — lost 19 KB on the minor release, because a sequence with the wrong
+call targets is worse than the positional fill. Measured: synthetic 1,275 →
+1,184, PIE 1,229 → 1,140, patch release 74,500 → 74,126, minor release
+1,352,085 → 1,350,486 (threshold 20 chosen by a sweep over all three; 32
+takes 1.4 KB more off the minor release and gives 200 B back on the patch).
+
+#### 3.2.2 Headers from geometry
+
+The ELF header, program headers and section headers were copied from the
+old file and corrected: 44 wrong bytes on the synthetic pair, every
+`p_filesz`/`p_memsz` and `sh_addr`/`sh_offset`/`sh_size` a grown section
+touched, in 29 runs. The layout already carries the new section table, so
+`predictHeaders` recomputes them: each program header from the new extents
+of the sections its old extent covered, keeping whatever rounding the old
+value shows (the writable segment's file size is rounded to 16 — the
+self-prediction gate caught the first version, which was not); each section
+header's address, offset and size from the layout, and `.shstrtab`'s offset
+from the new file length. A header covering no section keeps its old
+bytes. 44 → 1 wrong bytes; 1,334 → 1,275 on the synthetic, 74,550 → 74,500
+on the patch release, 1,353,084 → 1,352,085 on the minor.
+
 
 Measured on probe A's lists, before shift-0 pieces are dropped: 720 functions
 / 13,709 pieces = 23,176 B under `xz -9e`, 23,869 B under the codec's own
@@ -648,6 +693,9 @@ the deployed agent). The publisher therefore chooses the transform per patch:
   chain's `from` hash.)
 - External: the agent version is not visible to the publisher; the current
   transform is used.
+- Transforms so far: 1 (Go-aware), 2 (+ segment maps, adaptive correction
+  shape), 3 (+ far pieces, §3.2.1). Header prediction (§3.2.2) changed no
+  format: it is a better prediction of bytes every transform corrected.
 - A decoder that meets a transform it does not support **falls back to the
   blob** — a full download, never a failure. Same for a Go version whose
   pclntab format the decoder does not know.
@@ -699,7 +747,7 @@ that pins an older Go still updates correctly, just with larger patches.
 
 ### 3.8 Plain codec (transform 0)
 
-For non-Go, non-amd64, PIE, or otherwise unparseable inputs: a bsdiff-class
+For non-Go, non-amd64, or otherwise unparseable inputs: a bsdiff-class
 encoder over the whole file — an approximate match extended over the bytes
 around it, so a shifted region costs a control triple and a difference
 stream that is zero wherever the two agree — in the same container and
@@ -723,8 +771,10 @@ the speed and a third of the memory is the right trade for a fallback; the
 Go-aware codec is what the bytes are supposed to come from.
 
 It is capped at 256 MB old-file size; above that `publish` publishes the blob
-only and says so. The PIE build of the same pair, which the Go-aware codec
-declines, takes this path and lands at 72,681 B.
+only and says so. (The PIE build of the same pair used to take this path,
+at 72,681 B; the Go-aware codec now reads ET_DYN, maps the `.data.rel.ro*`
+sections and carries the GLOB_DAT head of Go's `.rela`, and patches it at
+1,277 B.)
 
 Not doing: zstd `--patch-from` as a codec (3.5× worse than bsdiff on
 one-line and on kube-apiserver), HDiffPatch (C, cgo), xdelta3 (worst sizes,
@@ -794,7 +844,7 @@ scheme inside the container (§3.4).
 
 ```
 go-binsync publish <bin> <store>:
-  hash bin; warn (or refuse without --force) on DWARF/symtab/PIE/modified VCS tree
+  hash bin; warn (or refuse without --force) on DWARF/symtab/modified VCS tree
   read store pointer (or none) → prev = head
   if prev == hash: exit 0 ("already published")
   old = cache[prev] (fetched from the store's blob if the cache lacks it; skip patch if absent)

@@ -229,3 +229,57 @@ func TestRelocNoAddends(t *testing.T) {
 		t.Error("an unknown relocation plan flag was accepted")
 	}
 }
+
+// Go's linker writes its GLOB_DAT entries before the relative block; the
+// plan has to carry them as a head, not shift the block over them.
+func TestRelocHeadEntries(t *testing.T) {
+	const rel = relTypeRelative
+	const globDat = 0xc00000006
+	oldTable := rela(
+		relaEntry{slot: 0x2000, info: globDat, addend: 0},
+		relaEntry{slot: 0x1000, info: rel, addend: 0x9000},
+		relaEntry{slot: 0x1010, info: rel, addend: 0x9010},
+	)
+	newTable := rela(
+		relaEntry{slot: 0x2008, info: globDat, addend: 0},
+		relaEntry{slot: 0x1000, info: rel, addend: 0x8000},
+		relaEntry{slot: 0x1010, info: rel, addend: 0x8010},
+		relaEntry{slot: 0x1018, info: rel, addend: 0x8018},
+	)
+	move := map[uint64]uint64{0x2000: 0x2008, 0x1000: 0x1000, 0x1010: 0x1010, 0x9000: 0x8000, 0x9010: 0x8010}
+	lookup := func(a uint64) x86.Target {
+		if v, ok := move[a]; ok {
+			return x86.Target{Addr: v, Known: true}
+		}
+		return x86.Target{}
+	}
+	old := make([]byte, 256)
+	copy(old[64:], oldTable)
+	target := make([]byte, 256)
+	copy(target[64:], newTable)
+	base := relocPlan{OldOff: 64, OldSize: uint64(len(oldTable)), NewOff: 64, NewSize: uint64(len(newTable))}
+	p, err := buildRelocPlan(old, target, base, lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.HeadCount != 1 || p.TailCount != 1 {
+		t.Fatalf("head %d tail %d, want 1 and 1", p.HeadCount, p.TailCount)
+	}
+	rt, err := unmarshalRelocPlan(p.marshal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt.HeadCount != 1 {
+		t.Fatalf("round trip lost the head count: %d", rt.HeadCount)
+	}
+	out := make([]byte, 256)
+	if _, err := applyReloc(out, old, rt, lookup); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out[64:64+len(newTable)], newTable) {
+		t.Fatalf("replayed table = %x, want %x", out[64:64+len(newTable)], newTable)
+	}
+	if len(p.TailCorrection) > 32 {
+		t.Errorf("tail correction is %d bytes for one projected entry", len(p.TailCorrection))
+	}
+}

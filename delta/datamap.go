@@ -34,7 +34,8 @@ type dataMapStats struct{ Blocks, Matched, Ambiguous, Unmatched, ShiftChanges in
 // Sections predicted through a content map, and sections that are merely
 // copied with their absolute pointers re-targeted.
 var (
-	dataMapSects    = []string{".rodata", ".go.type", ".go.func", ".noptrdata", ".data"}
+	dataMapSects = []string{".rodata", ".go.type", ".go.func", ".noptrdata", ".data",
+		".data.rel.ro", ".data.rel.ro.go.type", ".data.rel.ro.go.func"} // the last three are the PIE names
 	ptrRewriteSects = []string{".go.module", ".dynamic", ".got", ".got.plt", ".rela", ".rela.plt", ".go.fipsinfo", ".dynsym"}
 )
 

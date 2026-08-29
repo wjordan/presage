@@ -92,15 +92,43 @@ func predictHoles(pred []byte, old, new *gobin.Bin) {
 	// The tail is padding then .shstrtab, and it is the section names that
 	// are worth predicting, so the two tails are aligned at the end of the
 	// file rather than at the start of the padding.
+	// Only the section-name table is moved with the end of the file: an
+	// unstripped binary's tail is megabytes of debug sections that other
+	// layers place, and a shifted copy of those is worse than none.
 	tail := pred[sp[len(sp)-1].end:]
-	clear(tail)
 	if oldEnd < len(old.File) {
-		src := old.File[oldEnd:]
-		if len(src) > len(tail) {
-			src = src[len(src)-len(tail):]
+		n := len(old.File) - oldEnd
+		if names := shstrtabLen(old.File); names > 0 && names < n {
+			n = names
 		}
-		copy(tail[len(tail)-len(src):], src)
+		if n > len(tail) {
+			n = len(tail)
+		}
+		if allZero(old.File[oldEnd : len(old.File)-n]) {
+			clear(tail[:len(tail)-n])
+		}
+		copy(tail[len(tail)-n:], old.File[len(old.File)-n:])
 	}
+}
+
+// shstrtabLen is the length of the file from the section-name table to the
+// end, when only the section header table follows it, else 0.
+func shstrtabLen(file []byte) int {
+	le := binary.LittleEndian
+	if len(file) < 64 {
+		return 0
+	}
+	shoff, shnum, strndx := le.Uint64(file[40:]), int(le.Uint16(file[60:])), int(le.Uint16(file[62:]))
+	if strndx >= shnum || shoff+uint64(shnum)*64 > uint64(len(file)) {
+		return 0
+	}
+	sh := file[shoff+uint64(strndx)*64:]
+	off, size := le.Uint64(sh[24:]), le.Uint64(sh[32:])
+	// The header table may follow after alignment padding.
+	if off+size != uint64(len(file)) && (off+size > shoff || shoff-(off+size) >= 16) {
+		return 0
+	}
+	return len(file) - int(off)
 }
 
 // predictWhole builds the predicted new file. new is the skeleton -- the
@@ -114,6 +142,14 @@ func predictWhole(old, new *gobin.Bin, l *layout, mp *mapper, st *x86.Stats) []b
 	pred := make([]byte, l.NewLen)
 	copy(pred, old.File)
 	predictHoles(pred, old, new)
+	predictHeaders(pred, old, new, mp.entryLookup())
+	predictSections(pred, old, new, l, mp, st, nil)
+	return pred
+}
+
+// predictSections overwrites every allocated section of pred with its
+// prediction, except those skip declines. pred is the new file's length.
+func predictSections(pred []byte, old, new *gobin.Bin, l *layout, mp *mapper, st *x86.Stats, skip func(name string) bool) {
 	ptrOnly := map[string]bool{}
 	for _, n := range ptrRewriteSects {
 		ptrOnly[n] = true
@@ -124,7 +160,7 @@ func predictWhole(old, new *gobin.Bin, l *layout, mp *mapper, st *x86.Stats) []b
 	}
 	var wg sync.WaitGroup
 	for _, ns := range new.Order {
-		if ns.NoBits || ns.Off+ns.Size > uint64(len(pred)) {
+		if ns.NoBits || ns.Off+ns.Size > uint64(len(pred)) || skip != nil && skip(ns.Name) {
 			continue
 		}
 		dst := pred[ns.Off : ns.Off+ns.Size]
@@ -156,7 +192,6 @@ func predictWhole(old, new *gobin.Bin, l *layout, mp *mapper, st *x86.Stats) []b
 		}(ns, dst)
 	}
 	wg.Wait()
-	return pred
 }
 
 // buildMaps is the encoder side of the content maps and the shift tables.
@@ -304,7 +339,8 @@ func majorities(votes []vote) []majority {
 
 func deriveOverrides(old, new *gobin.Bin, m *match, dmaps map[string]*dataMap, shifts map[string]*shiftTable, segs []segMap) []addrOverride {
 	mp := &mapper{src: old, dst: new, srcToDst: m.OldToNew, dstToSrc: m.NewToOld,
-		m: m, dataMaps: dmaps, shifts: shifts, segs: segsByIdx(segs)}
+		m: m, dataMaps: dmaps, shifts: shifts}
+	mp.segs, mp.segLocal = segsByIdx(segs, old, new, m)
 	var maj []majority
 	for range ovRounds {
 		maj = majorities(collectVotes(old, new, dmaps, mp))
@@ -388,4 +424,13 @@ func fixBlocks(old, new *gobin.Bin, dmaps map[string]*dataMap, maj []majority) {
 			}
 		}
 	}
+}
+
+func allZero(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
 }
