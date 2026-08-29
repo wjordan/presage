@@ -196,6 +196,13 @@ func EncodeCorrection(pred, want []byte) ([]byte, error) {
 	return encodeCorrection(pred, want, false)
 }
 
+// EncodeCorrectionAdaptive writes the correction in whichever of the two
+// transform-2 shapes compresses smaller, for a codec built on top of this
+// package; the stream is applied with ApplyFlaggedCorrection.
+func EncodeCorrectionAdaptive(pred, want []byte) ([]byte, error) {
+	return encodeCorrection(pred, want, true)
+}
+
 // CorrectionShapes writes the correction in both shapes a transform-2
 // decoder reads, the shipped default and the near-miss form, so an
 // experimental predictor can price them with its own compressor. Either is

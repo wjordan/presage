@@ -231,6 +231,9 @@ func PackDebug(plain, ref []byte) ([]byte, error) {
 	})
 }
 
+// ExpandPair is expandPair for a codec built on top of this package.
+func ExpandPair(old, new []byte) (pOld, pNew []byte, ok bool) { return expandPair(old, new) }
+
 // expandPair expands old and new for the encoder. It commits to the
 // transform only when the new file rebuilds exactly from its expansion
 // with the old file as reference, which is what the decoder will do;

@@ -1,7 +1,8 @@
 # presage — a general predictive codec with pluggable structure models
 
-*Working name; provisional.* Design specification, round 1. Status: design
-only, nothing implemented. Every number below is either measured in this
+Design specification, round 1. Status: milestone 1 (§10) is built as the
+`presage` package with the Go module (`presage-core.md` is its
+implementation spec); the rest is design. Every number below is either measured in this
 repository's research corpus (`docs/research/`, `docs/general/research/`)
 or marked *estimate*.
 
@@ -561,14 +562,17 @@ small steps — is where every domain's number is large.
 
 ## 10. Milestones
 
-1. **Core extraction.** Lift go-binsync's container, frames, positional
-   corrector, `lz` engine and compression tier into the core with the
-   region tree and plan interpreter; re-express the Go codec as a module
-   whose ops are `map`/`relocate(x86-64)`/`go:pclntab`/`go:type`. Exit:
-   every pair in `docs/DESIGN.md` §3.2 within 2 % of its v1 size, the
-   self-prediction gate green. Adds modes 2–3 to the corrector and measures
-   them on the prometheus pair (the `.text` residual is 63 KB; *estimate*
-   10–20 % of that recoverable).
+1. **Core extraction.** *Built* (`presage/`, `presage-core.md`): the
+   container with multiple references, regions, prediction chunk hashes,
+   the module registry with lowering, `lz`/`copy` core modules and the Go
+   module as one coarse op over go-binsync's transform (open question 2
+   answered "coarse first"; `map`/`relocate`/`go:pclntab` as separate ops
+   are deferred to the module that needs them). Exit met: the corpus gate
+   (`presage/gomod/corpus_test.go`) holds every pair within 2 % of
+   `delta.Encode` and the self-prediction gate green; prometheus 3.13.1 →
+   3.13.2 is 74,135 vs 74,126; the unstripped pair 8,712,789 vs 8,714,361.
+   Corrector modes 2–3 are still open (the `.text` residual is 63 KB;
+   *estimate* 10–20 % of that recoverable).
 2. **Portable path.** Build the `go:pclntab` op to wasm from the same
    source; run under wazero compiler and interpreter on the 30 MB and 94 MB
    pairs; publish ns/function. Exit: identical `H_pred` native vs wasm on

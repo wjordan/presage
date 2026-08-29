@@ -7,6 +7,8 @@ design; `research/` holds what it rests on. Written 2026-08-27.
 | document | what it is |
 |---|---|
 | [`SPEC.md`](SPEC.md) | the design: core / modules / distribution, plan language, residual coding, selection, verification, wasm profile, ranked domains, milestones, decisions |
+| [`presage-core.md`](presage-core.md) | **implementation spec for milestone 1**, the `presage` package as built: container, coarse modules, residual, what is deferred |
+| [`go-module-results.md`](go-module-results.md) | measured: the Go module on presage against the Go codec, Zucchini and bsdiff; DWARF builds end to end |
 | [`research/binsync-lessons.md`](research/binsync-lessons.md) | the ten measured insights from go-binsync the general design must keep, and what it got wrong |
 | [`research/percival-thesis.md`](research/percival-thesis.md) | Percival 2006: the three-orders taxonomy, FFT block alignment, difference-string modes, universal (syndrome) deltas |
 | [`research/wasm-throughput-probe.md`](research/wasm-throughput-probe.md) | measured: native 98 MB/s vs wazero AOT 37 MB/s vs interpreter 1 MB/s on a relocation kernel; identical hashes |

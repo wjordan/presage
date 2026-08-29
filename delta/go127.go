@@ -98,9 +98,32 @@ func predictGoAMD64(old, new []byte, tf byte) (*goPred, error) {
 // 32-byte hash and a table entry each and buys nothing -- compressed
 // separately they come to within 0.1 % of the same total.
 func encodeGoAMD64(old, new []byte, tf byte, o Options, st *Stats) ([]byte, error) {
-	g, err := predictGoAMD64(old, new, tf)
+	g, plan, err := goAnalyse(old, new, tf, st)
 	if err != nil {
 		return nil, err
+	}
+	s2, err := encodeCorrection(g.pred, new, tf >= TransformGoSegmap)
+	if err != nil {
+		return nil, err
+	}
+	st.Stage2 = len(s2)
+	w := &wbuf{b: plan}
+	sum := hashOf(g.pred)
+	w.raw(sum[:])
+	w.raw(s2)
+	return w.b, nil
+}
+
+// goAnalyse runs the transform to its prediction and serialises what the
+// decoder needs to reproduce it: the layout, then the stage-1a and 1b
+// streams, each preceded by the length of the table it rebuilds. The
+// predicted 1b blobs are padded to the new tables' lengths but never
+// truncated, so a release that shrank a table leaves the prediction longer
+// than the truth; the decoder is told what to expect.
+func goAnalyse(old, new []byte, tf byte, st *Stats) (*goPred, []byte, error) {
+	g, err := predictGoAMD64(old, new, tf)
+	if err != nil {
+		return nil, nil, err
 	}
 	st.Funcs = len(g.nb.Funcs)
 	st.Matched = g.m.Exact + g.m.Norm + g.m.Content
@@ -125,81 +148,112 @@ func encodeGoAMD64(old, new []byte, tf byte, o Options, st *Stats) ([]byte, erro
 		st.Notes = append(st.Notes, fmt.Sprintf("%d invented pctab slots, %d fresh, %d gaps",
 			g.lay.NPcFresh, fresh, len(g.lay.PcGaps)))
 	}
-	s2, err := encodeCorrection(g.pred, new, tf >= TransformGoSegmap)
-	if err != nil {
-		return nil, err
-	}
-
-	st.Layout, st.Stage1a, st.Stage1b, st.Stage2 = len(g.layRaw), len(g.s1a), len(g.s1b), len(s2)
+	st.Layout, st.Stage1a, st.Stage1b = len(g.layRaw), len(g.s1a), len(g.s1b)
 	w := &wbuf{}
 	w.bytes(g.layRaw)
 	w.u(uint64(len(g.s1aNew)))
 	w.bytes(g.s1a)
-	// The predicted 1b blobs are padded to the new tables' lengths but never
-	// truncated, so a release that shrank a table leaves the prediction
-	// longer than the truth; the decoder is told what to expect.
 	w.u(uint64(len(g.s1bNew)))
 	w.bytes(g.s1b)
-	sum := hashOf(g.pred)
-	w.raw(sum[:])
-	w.raw(s2)
-	return w.b, nil
+	return g, w.b, nil
 }
 
-func applyGoAMD64(old, body []byte, h *Header) ([]byte, error) {
-	ob, err := gobin.Parse(old)
-	if err != nil {
-		return nil, fmt.Errorf("delta: this patch needs a Go binary the codec understands: %w", err)
+// GoAnalyse is the Go transform as a module for a codec built on top of
+// this package: it returns the plan a decoder expands with GoPredict, the
+// prediction it yields, and the transform's statistics. A binary the
+// transform declines is an unsupported input (IsUnsupported).
+func GoAnalyse(old, new []byte, st *Stats) (plan, pred []byte, err error) {
+	if st == nil {
+		st = &Stats{}
 	}
-	r := &rbuf{b: body}
-	layRaw := r.bytes()
-	s1aLen := r.un(uint64(h.NewSize), "stage 1a table length")
-	s1a := r.bytes()
-	s1bLen := r.un(uint64(h.NewSize), "stage 1b table length")
-	s1b := r.bytes()
+	g, plan, err := goAnalyse(old, new, maxTransform, st)
+	if err != nil {
+		return nil, nil, err
+	}
+	return plan, g.pred, nil
+}
+
+// GoPredict expands a GoAnalyse plan against the old binary. maxLen bounds
+// the tables the plan may ask for, so a corrupt plan cannot become an
+// allocation; it is the target's declared size.
+func GoPredict(old, plan []byte, maxLen int64) ([]byte, error) {
+	pred, rest, err := goPredict(old, plan, maxTransform, maxLen)
+	if err != nil {
+		return nil, err
+	}
+	if len(rest) != 0 {
+		return nil, fmt.Errorf("%w: %d trailing plan bytes", errCorrupt, len(rest))
+	}
+	return pred, nil
+}
+
+// IsUnsupported reports whether err is the transform declining an input,
+// which is never a failure: the caller codes the bytes another way.
+func IsUnsupported(err error) bool { return isUnsupported(err) }
+
+func applyGoAMD64(old, body []byte, h *Header) ([]byte, error) {
+	pred, rest, err := goPredict(old, body, h.Transform, h.NewSize)
+	if err != nil {
+		return nil, err
+	}
+	r := &rbuf{b: rest}
 	var sum Hash
 	copy(sum[:], r.take(32))
 	if r.err != nil {
 		return nil, r.err
 	}
-	s2 := r.b
-
-	skel, m, err := skeletonFrom(ob, layRaw, h.Transform)
-	if err != nil {
-		return nil, err
-	}
-	lay, err := decodeLayout(layRaw, ob, h.Transform)
-	if err != nil {
-		return nil, err
-	}
-	s1aNew, err := plainPatch(stage1aBlobs(ob), s1a, int64(s1aLen))
-	if err != nil {
-		return nil, err
-	}
-	if err := fillTables(skel, stage1aRanges(skel.Pcln), s1aNew); err != nil {
-		return nil, err
-	}
-
-	mp := newMapper(ob, skel, m, lay)
-	bp := predictBlobs(ob, skel, m, mp)
-	s1bNew, err := plainPatch(bp.concat(), s1b, int64(s1bLen))
-	if err != nil {
-		return nil, err
-	}
-	if err := fillTables(skel, stage1bRanges(skel.Pcln), s1bNew); err != nil {
-		return nil, err
-	}
-	mp.blobs = bp
-
-	pred := predictWhole(ob, skel, lay, mp, nil)
 	if hashOf(pred) != sum {
 		return nil, fmt.Errorf("delta: the predicted base does not match the encoder's; " +
 			"encoder and decoder disagree, fetch the blob")
 	}
-	if err := applyCorrection(pred, s2, h.Transform >= TransformGoSegmap); err != nil {
+	if err := applyCorrection(pred, r.b, h.Transform >= TransformGoSegmap); err != nil {
 		return nil, err
 	}
 	return pred, nil
+}
+
+// goPredict reads a goAnalyse plan from the front of body and returns the
+// prediction and what follows the plan.
+func goPredict(old, body []byte, tf byte, maxLen int64) (pred, rest []byte, err error) {
+	ob, err := gobin.Parse(old)
+	if err != nil {
+		return nil, nil, fmt.Errorf("delta: this patch needs a Go binary the codec understands: %w", err)
+	}
+	r := &rbuf{b: body}
+	layRaw := r.bytes()
+	s1aLen := r.un(uint64(maxLen), "stage 1a table length")
+	s1a := r.bytes()
+	s1bLen := r.un(uint64(maxLen), "stage 1b table length")
+	s1b := r.bytes()
+	if r.err != nil {
+		return nil, nil, r.err
+	}
+	skel, m, err := skeletonFrom(ob, layRaw, tf)
+	if err != nil {
+		return nil, nil, err
+	}
+	lay, err := decodeLayout(layRaw, ob, tf)
+	if err != nil {
+		return nil, nil, err
+	}
+	s1aNew, err := plainPatch(stage1aBlobs(ob), s1a, int64(s1aLen))
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := fillTables(skel, stage1aRanges(skel.Pcln), s1aNew); err != nil {
+		return nil, nil, err
+	}
+	mp := newMapper(ob, skel, m, lay)
+	bp := predictBlobs(ob, skel, m, mp)
+	s1bNew, err := plainPatch(bp.concat(), s1b, int64(s1bLen))
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := fillTables(skel, stage1bRanges(skel.Pcln), s1bNew); err != nil {
+		return nil, nil, err
+	}
+	mp.blobs = bp
+	return predictWhole(ob, skel, lay, mp, nil), r.b, nil
 }
 
 // skeletonFrom decodes a layout and builds the decoder's view of the new

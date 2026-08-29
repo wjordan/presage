@@ -266,6 +266,16 @@ func packPlain(ntriples int, ctrl, diff, extra *wbuf) []byte {
 	return w.b
 }
 
+// DiffLZ writes the shifted-delta stream that rebuilds new from old, for a
+// codec built on top of this package; PatchLZ replays it.
+func DiffLZ(old, new []byte) []byte { return plainDiff(old, new) }
+
+// PatchLZ rebuilds a DiffLZ target of newLen bytes. newLen comes from the
+// caller's container, never from the stream.
+func PatchLZ(old, stream []byte, newLen int64) ([]byte, error) {
+	return plainPatch(old, stream, newLen)
+}
+
 func applyPlain(old, body []byte, h *Header) ([]byte, error) {
 	return plainPatch(old, body, h.NewSize)
 }
