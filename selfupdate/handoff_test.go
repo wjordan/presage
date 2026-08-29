@@ -101,8 +101,15 @@ func TestStartExecRetriesWhileTheFileIsBusy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("startExec after %d attempts: %v", attempts, err)
 	}
-	if attempts != 3 {
-		t.Errorf("started on attempt %d, want the third", attempts)
+	// The file cannot be exec'd before attempt 3 releases it, so anything
+	// earlier would mean the retry loop is not gated on ETXTBSY at all. It can
+	// legitimately take longer: a parallel test that forks between this
+	// test's open and close holds a writable copy of the descriptor until its
+	// child execs, because fork copies the descriptor table and O_CLOEXEC
+	// only takes effect at exec. Under load that window is wide enough to
+	// cost an attempt or two.
+	if attempts < 3 {
+		t.Errorf("started on attempt %d, before the file was released", attempts)
 	}
 	cmd.Wait()
 }
