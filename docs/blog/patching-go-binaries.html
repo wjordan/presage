@@ -73,7 +73,7 @@ hr{border:0;border-top:1px solid var(--rule);margin:56px 0}
 <p>A Go program is a statically linked executable with everything it needs inside it: the code, the runtime, and the metadata the runtime uses to run it. That metadata is large. Prometheus 3.13.2 is 94 MB, and less than half of it is machine code.</p>
 
 <figure><div id="sections"></div>
-<figcaption>Prometheus 3.13.2 by section, in file order.</figcaption></figure>
+</figure>
 
 <p><code>.gopclntab</code> alone is 35 MB: for every function, a record saying where it starts, which file and line each instruction came from, how deep its stack frame is at each point, and which words on the stack are pointers. <code>.go.type</code> is 12 MB of descriptors the runtime consults for reflection, interfaces and garbage collection. These tables are what make a Go binary hard to patch. They are not written by hand and not preserved between builds: the linker regenerates them from scratch, sorted by address, packed tightly, with offsets pointing at one another. Add one line to one function and that function grows by a few dozen bytes, every function after it moves, and every table entry that names an address moves with it. Every branch that crosses the edit gets a new displacement, and the tables change everywhere. A byte-level differ finds the moved code well enough; it has no way to know that a 35 MB table is a deterministic function of the function list, so it ships the differences.</p>
 
@@ -89,7 +89,7 @@ hr{border:0;border-top:1px solid var(--rule);margin:56px 0}
 <tr><td>generic delta, no codec</td><td class="n">2,604,181</td><td><span class="bar" style="width:100%"></span></td></tr>
 <tr class="total"><td>Go codec</td><td class="n">74,112</td><td><span class="bar" style="width:2.8%"></span></td></tr>
 </tbody></table></div>
-<figcaption>The same pair, presage with and without the Go codec.</figcaption></figure>
+</figure>
 
 <p>On this pair the codec's prediction is wrong in 54,520 of 93.8 million bytes. The rest of the patch is the plan and the container. Encoding takes 6 s and applying 1 s; both sides verify the result against the release hash before it is used, so a wrong prediction costs bytes, never correctness. On a 30 MB program rebuilt after adding one <code>if</code> statement — the change that moves 13 % of the file's bytes and nothing else — the patch is 1,201 bytes; bsdiff's is 150,475.</p>
 
@@ -115,7 +115,7 @@ hr{border:0;border-top:1px solid var(--rule);margin:56px 0}
 <tr><td>Go codec + exact decompression</td><td class="n">8,716,505</td><td><span class="bar" style="width:100%"></span></td></tr>
 <tr class="total"><td>+ DWARF reference fields</td><td class="n">335,235</td><td><span class="bar" style="width:3.8%"></span></td></tr>
 </tbody></table></div>
-<figcaption>The default-build pair as the layers land.</figcaption></figure>
+</figure>
 
 <p>Two things the measurement taught. The matcher that finds the runs of unchanged bytes is worthless on its own: as a whole-file predictor it produces patches 2.5× larger than a plain delta, because a plain delta is the same fuzzy matching with a literal stream, and it earns its place only under a layer that fixes what the runs stop at. And the layer has to be priced: on builds whose debug sections barely changed, the record tables cost more than the correction of a positional copy, so the encoder predicts both ways and ships the smaller. On the 30 MB program with debug information, the one-line change costs 2,002 bytes against 1,201 stripped.</p>
 
