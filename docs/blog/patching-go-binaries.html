@@ -73,7 +73,7 @@ hr{border:0;border-top:1px solid var(--rule);margin:56px 0}
 <p>A Go program is a statically linked executable with everything it needs inside it: the code, the runtime, and the metadata the runtime uses to run it. That metadata is large. Prometheus 3.13.2 is 94 MB, and less than half of it is machine code.</p>
 
 <figure><div id="sections"></div>
-<figcaption>Prometheus 3.13.2 by section.</figcaption></figure>
+<figcaption>Prometheus 3.13.2 by section, in file order.</figcaption></figure>
 
 <p><code>.gopclntab</code> alone is 35 MB: for every function, a record saying where it starts, which file and line each instruction came from, how deep its stack frame is at each point, and which words on the stack are pointers. <code>.go.type</code> is 12 MB of descriptors the runtime consults for reflection, interfaces and garbage collection. These tables are what make a Go binary hard to patch. They are not written by hand and not preserved between builds: the linker regenerates them from scratch, sorted by address, packed tightly, with offsets pointing at one another. Add one line to one function and that function grows by a few dozen bytes, every function after it moves, and every table entry that names an address moves with it. Every branch that crosses the edit gets a new displacement, and the tables change everywhere. A byte-level differ finds the moved code well enough; it has no way to know that a 35 MB table is a deterministic function of the function list, so it ships the differences.</p>
 
@@ -136,7 +136,7 @@ const mb=n=>n<1e5?(n/1e6).toFixed(3):n<1e6?(n/1e6).toFixed(2):(n/1e6).toFixed(1)
 function drawSections(){
   const host=document.getElementById('sections');host.innerHTML='';
   const W=840,H=100,ink2=css('--ink2'),muted=css('--muted'),plan=css('--plan'),fix=css('--fix'),go=css('--go');
-  const parts=[['.text','machine code',42116561,ink2],['.gopclntab','function table, pc/line tables, stack maps',35205370,go],['.go.type','type descriptors',11770480,plan],['.rodata','constants and strings',3678233,fix],['other','ELF headers, typelinks, data',998910,muted]];
+  const parts=[['.text','machine code',42116561,ink2],['.rodata','constants and strings',3678233,fix],['.gopclntab','function table, pc/line tables, stack maps',35205370,go],['.go.type','type descriptors',11770480,plan],['other','.noptrdata, .data and the small sections',998910,muted]];
   const tot=parts.reduce((a,p)=>a+p[2],0);
   const s=el('svg',{viewBox:`0 0 ${W} ${H}`,class:'strip',role:'img','aria-label':'Prometheus 3.13.2 by section'},host);
   let x=0;
