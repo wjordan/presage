@@ -612,6 +612,11 @@ prometheus, encoding stage 1b positionally costs 66,372 B compressed against
 
 ### 3.5 Compression, and the patch container (`.bsz`)
 
+*Status: this container is frozen. `publish` writes the presage container
+(`docs/general/presage-core.md`) unless told `-legacy`; the agent applies
+either, dispatching on the magic (`codec` package), and treats a magic it
+does not know as an unsupported patch — it fetches the blob.*
+
 Payload streams are compressed with the smallest of the candidates the
 encoder is willing to spend time on, and the choice is recorded per frame.
 Measured on the prometheus/1.27 patch's own streams (pure-Go encoders,

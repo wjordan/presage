@@ -3,7 +3,7 @@
 // It is a normal go-binsync target with a browser attached: the assets it serves
 // are real stores built by `go-binsync publish` (bench/demo/build-assets.sh), the
 // objects the page fetches are the objects an agent fetches, and the apply is
-// delta.Apply against the same old binary. Nothing about the demo is a
+// codec.Apply against the same old binary. Nothing about the demo is a
 // re-implementation of the product for demonstration purposes; if the page
 // says the new binary verifies, a target would have installed it.
 package main

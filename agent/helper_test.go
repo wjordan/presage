@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wjordan/go-binsync/delta"
+	"github.com/wjordan/go-binsync/codec"
 	"github.com/wjordan/go-binsync/release"
 	"github.com/wjordan/go-binsync/store"
 )
@@ -103,7 +103,7 @@ func (f *fixture) publish(data []byte) release.Hash {
 	}
 	var chain []release.Edge
 	if f.prev != nil {
-		patch, err := delta.Encode(f.prev, data, delta.Options{})
+		patch, err := codec.Encode(f.prev, data, codec.Options{})
 		if err != nil {
 			f.t.Fatal(err)
 		}

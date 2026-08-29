@@ -288,7 +288,9 @@ Module path `github.com/wjordan/go-binsync`. Pure Go, no cgo.
 
 | Package | Role |
 |---|---|
-| `delta` | The codec: `Encode(old, new) → patch`, `Apply(old, patch) → new`, bounds-checked, hash-verified per frame. Go-aware transform for stripped linux/amd64 Go binaries; generic delta for anything else (see §9). |
+| `codec` | The seam to the patcher: `Encode(old, new) → patch`, `Apply(old, patch) → new`, `Unsupported(err)`. Patches are `presage` containers; the `delta` container earlier releases published is still applied, and `-legacy` still writes it. |
+| `presage` | The patcher (`docs/general/SPEC.md`, `presage-core.md`): a container of regions, each predicted by a module and corrected; `presage/gomod` is the Go linux/amd64 module over `delta`'s transform. |
+| `delta` | The Go-aware transform and the stream codecs presage's modules run on; its own container is frozen (see §9). |
 | `release` | Pointer/manifest types, chain planning, hash cache, atomic install and revert. |
 | `store` | `Get` (with range and conditional headers), `Put` (with CAS) for `s3://`, `https://`, `file://`, `ssh://`. |
 | `selfupdate` | Embedded lifecycle: `Start`, `Listen`, `OnShutdown`, `Ready`, `Done`; the `.pending` self-check runs inside `Start`. |
@@ -338,7 +340,9 @@ CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o s
 - The Go-aware codec supports stripped linux/amd64 binaries, exe or PIE, built by
   the current stable Go release (1.27); each Go release is validated against a
   self-prediction check before it is enabled, and the publisher picks the
-  transform the *deployed* decoder can read.
+  modules the *deployed* decoder can read. Agents built before the presage
+  container report one as a verification failure instead of fetching the
+  blob; publish with `-legacy` until such a fleet has moved.
 - Anything else — other toolchains, arm64, non-Go binaries, or an unknown
   layout — uses the generic delta (≤ 256 MB) and, beyond that, the blob.
 - A target that meets a patch it cannot read fetches the blob. Every path

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wjordan/go-binsync/delta"
+	"github.com/wjordan/go-binsync/codec"
 	"github.com/wjordan/go-binsync/release"
 )
 
@@ -29,7 +29,7 @@ func buildAssets(t *testing.T) (string, *pair) {
 	}
 	next := append(append([]byte{}, old[:20000]...), append([]byte("inserted"), old[20000:]...)...)
 
-	patch, err := delta.Encode(old, next, delta.Options{})
+	patch, err := codec.Encode(old, next, codec.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

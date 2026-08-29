@@ -12,7 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wjordan/go-binsync/delta"
+	"github.com/wjordan/go-binsync/codec"
+	"github.com/wjordan/go-binsync/presage"
 	"github.com/wjordan/go-binsync/release"
 	"github.com/wjordan/go-binsync/store"
 )
@@ -25,6 +26,7 @@ func publish(ctx context.Context, log *slog.Logger, args []string) error {
 	fs := newFlags("publish", "[--force] [--cache DIR] <binary> <store>")
 	force := fs.Bool("force", false, "publish a binary that is not delta-friendly anyway")
 	cacheDir := fs.String("cache", "", "release cache directory (default $XDG_CACHE_HOME/go-binsync)")
+	legacy := fs.Bool("legacy", false, "write the delta container, for a fleet whose agents predate presage")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -38,7 +40,7 @@ func publish(ctx context.Context, log *slog.Logger, args []string) error {
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", binPath, err)
 	}
-	p := &publisher{log: log, bin: bin, hash: release.HashBytes(bin)}
+	p := &publisher{log: log, bin: bin, hash: release.HashBytes(bin), legacy: *legacy}
 	var warnings []string
 	p.version, warnings = inspect(bin)
 	for _, w := range warnings {
@@ -70,6 +72,7 @@ type publisher struct {
 	bin     []byte
 	hash    release.Hash
 	version string
+	legacy  bool
 
 	blobObj []byte
 	blob    *release.Blob
@@ -188,13 +191,13 @@ func (p *publisher) putPatch(ctx context.Context, prev *release.Pointer) (*relea
 	from := prev.Head.Hash
 
 	start := time.Now()
-	var st delta.Stats
-	patch, err := delta.Encode(old, p.bin, delta.Options{Stats: &st})
+	var st presage.Stats
+	patch, err := codec.Encode(old, p.bin, codec.Options{Legacy: p.legacy, Stats: &st})
 	if err != nil {
 		return nil, fmt.Errorf("encoding the patch from %s: %w", from, err)
 	}
 	p.log.Info("go-binsync: encoded the patch", "size", hbytes(int64(len(patch))),
-		"transform", st.Transform, "took", hdur(time.Since(start)))
+		"modules", codec.Modules(&st), "took", hdur(time.Since(start)))
 	if int64(len(patch)) >= p.blob.Size {
 		p.log.Info("go-binsync: the patch is not smaller than the blob; publishing blob-only",
 			"patch", hbytes(int64(len(patch))), "blob", hbytes(p.blob.Size))

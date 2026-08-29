@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wjordan/go-binsync/delta"
+	"github.com/wjordan/go-binsync/codec"
 	"github.com/wjordan/go-binsync/release"
 )
 
@@ -174,7 +174,7 @@ func (s *server) apiApply(w http.ResponseWriter, r *http.Request) {
 	var buf bytes.Buffer
 	buf.Grow(int(p.NewSize))
 	start := time.Now()
-	if err := delta.Apply(old, patch, &buf); err != nil {
+	if err := codec.Apply(old, patch, &buf); err != nil {
 		s.fail(w, "applying the patch", err)
 		return
 	}

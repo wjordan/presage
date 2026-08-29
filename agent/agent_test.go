@@ -193,7 +193,7 @@ func TestOnceFallsBackToTheBlobOnAnUnreadablePatch(t *testing.T) {
 	f.install(r1)
 	to := f.publish(r2)
 
-	// Byte 4 of the container is the transform number (docs/DESIGN.md 3.5).
+	// Byte 4 of the container is its version.
 	key := release.PatchKey(from, to)
 	patch := f.get(key)
 	patch[4] = 99

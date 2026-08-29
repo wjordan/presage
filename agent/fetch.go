@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wjordan/go-binsync/delta"
+	"github.com/wjordan/go-binsync/codec"
 	"github.com/wjordan/go-binsync/release"
 	"github.com/wjordan/go-binsync/store"
 )
@@ -60,13 +60,10 @@ func outcomeFor(err error) Outcome {
 	return OutcomeError
 }
 
-func unsupportedTransform(err error) bool {
-	var u *delta.ErrUnsupportedTransform
-	return errors.As(err, &u)
-}
+func unsupportedTransform(err error) bool { return codec.Unsupported(err) }
 
 // applyChain walks the plan's edges oldest first, applying each patch to the
-// bytes the previous one produced. delta.Apply checks the patch against the
+// bytes the previous one produced. codec.Apply checks the patch against the
 // file it is given and its own output against the hash the patch promises,
 // so a chain that reaches the end has produced the head release.
 func (a *agent) applyChain(ctx context.Context, plan release.Plan) ([]byte, error) {
@@ -83,7 +80,7 @@ func (a *agent) applyChain(ctx context.Context, plan release.Plan) ([]byte, erro
 			return nil, fmt.Errorf("agent: patch %s hashes to %s, the pointer says %s: %w", e.Key, got, e.B3, errVerify)
 		}
 		out := bytes.NewBuffer(make([]byte, 0, len(cur)))
-		if err := delta.Apply(cur, patch, out); err != nil {
+		if err := codec.Apply(cur, patch, out); err != nil {
 			if unsupportedTransform(err) {
 				return nil, err
 			}

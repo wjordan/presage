@@ -2,12 +2,12 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"log/slog"
 	"os"
 	"time"
 
-	"github.com/wjordan/go-binsync/delta"
+	"github.com/wjordan/go-binsync/codec"
+	"github.com/wjordan/go-binsync/presage"
 	"github.com/wjordan/go-binsync/release"
 )
 
@@ -17,7 +17,8 @@ func diff(log *slog.Logger, args []string) error {
 	fs := newFlags("diff", "<old> <new> -o <patch>")
 	out := fs.String("o", "", "write the patch here (required)")
 	verbose := fs.Bool("v", false, "report where the patch bytes went")
-	plain := fs.Bool("plain", false, "skip the Go-aware codec")
+	plain := fs.Bool("plain", false, "skip the predictive modules")
+	legacy := fs.Bool("legacy", false, "write the delta container for agents that predate presage")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -35,8 +36,8 @@ func diff(log *slog.Logger, args []string) error {
 	}
 
 	start := time.Now()
-	var st delta.Stats
-	patch, err := delta.Encode(old, next, delta.Options{PlainOnly: *plain, Stats: &st})
+	var st presage.Stats
+	patch, err := codec.Encode(old, next, codec.Options{Plain: *plain, Legacy: *legacy, Stats: &st})
 	if err != nil {
 		return err
 	}
@@ -44,12 +45,12 @@ func diff(log *slog.Logger, args []string) error {
 		return err
 	}
 	log.Info("go-binsync: encoded", "patch", hbytes(int64(len(patch))), "of", hbytes(int64(len(next))),
-		"transform", st.Transform, "took", hdur(time.Since(start)))
+		"modules", codec.Modules(&st), "took", hdur(time.Since(start)))
 	if *verbose {
-		log.Info("go-binsync: patch bytes", "header", hbytes(int64(st.Header)), "layout", hbytes(int64(st.Layout)),
-			"stage1a", hbytes(int64(st.Stage1a)), "stage1b", hbytes(int64(st.Stage1b)), "stage2", hbytes(int64(st.Stage2)))
-		log.Info("go-binsync: functions", "total", st.Funcs, "matched", st.Matched, "new", st.NewFuncs,
-			"mispredicted", hbytes(int64(st.PredictErr)))
+		for i, r := range st.Regions {
+			log.Info("go-binsync: region", "n", i, "module", r.Module, "bytes", hbytes(r.Length),
+				"plan", hbytes(int64(r.Plan)), "residual", hbytes(int64(r.Residual)), "mispredicted", hbytes(int64(r.PredictErr)))
+		}
 		for _, n := range st.Notes {
 			log.Info("go-binsync: " + n)
 		}
@@ -79,9 +80,8 @@ func patchCmd(log *slog.Logger, args []string) error {
 	start := time.Now()
 	var buf bytes.Buffer
 	buf.Grow(len(old))
-	if err := delta.Apply(old, p, &buf); err != nil {
-		var ut *delta.ErrUnsupportedTransform
-		if errors.As(err, &ut) {
+	if err := codec.Apply(old, p, &buf); err != nil {
+		if codec.Unsupported(err) {
 			return err
 		}
 		// Everything else Apply refuses is the result not being what the
