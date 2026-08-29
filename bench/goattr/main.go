@@ -26,6 +26,8 @@
 //	   pc-table slots the codec has to invent
 //	b  level 12: aligning a descriptor's method table by name instead of
 //	   copying it positionally
+//	c  level 13: re-encoding the correction itself, to price how much of
+//	   its per-run cost is the encoding
 //
 // Levels 7-9 are the ceiling probes for the three candidate layers; 7 prices
 // itself with the yardstick level 1 fits, so run it with 1.
@@ -50,13 +52,15 @@ import (
 )
 
 var (
-	oldPath  = flag.String("old", "", "old binary")
-	newPath  = flag.String("new", "", "new binary")
-	label    = flag.String("label", "", "name for this pair in the report")
-	cacheDir = flag.String("cache", "", "directory for the cached prediction")
-	jobs     = flag.Int("jobs", 4, "concurrent marginal-cost measurements")
-	levels   = flag.String("levels", "123456789", "which ladders to print")
-	dictWin  = flag.Int("dict-window", 0, "cap the level-6 dictionary at this many bytes (0 = whole .text)")
+	oldPath   = flag.String("old", "", "old binary")
+	newPath   = flag.String("new", "", "new binary")
+	label     = flag.String("label", "", "name for this pair in the report")
+	cacheDir  = flag.String("cache", "", "directory for the cached prediction")
+	jobs      = flag.Int("jobs", 4, "concurrent marginal-cost measurements")
+	levels    = flag.String("levels", "123456789", "which ladders to print")
+	dictWin   = flag.Int("dict-window", 0, "cap the level-6 dictionary at this many bytes (0 = whole .text)")
+	xzCtl     = flag.Bool("xz", false, "level c: also compress every candidate with xz -9e as a control")
+	mergeBest = flag.Int("merge", 32, "level c: the merge threshold whose per-section split is printed")
 )
 
 func main() {
@@ -113,6 +117,9 @@ func main() {
 	}
 	if has('b') {
 		c.typeAlign()
+	}
+	if has('c') {
+		c.corrCode()
 	}
 }
 

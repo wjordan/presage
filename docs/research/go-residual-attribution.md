@@ -931,6 +931,7 @@ thing to add at that point; on its own it does not pay.
 | closed: replaying `pctab` to predict invented `_func` slots | every rule tried is negative; ceiling +29,634 | best rule +155; ceiling +383 | no |
 | D. transmit the `pctab` fresh/dedup mask instead (§11) | **built: +18,674 (1.4%)** | **built: +241 (0.3%)** | done |
 | closed: per-descriptor method-table alignment (§12) | +6,497 realistic, +7,957 oracle (0.47–0.58%) | −260 | no |
+| closed: re-encoding the correction itself (§14) | best +10,131 (0.75%), best pair-safe +4,735 (0.35%) | −2,104 under the minor pair's best; +3,884 under its own | no |
 
 Three of the four remaining sources are worth building and one is a bug. Their
 sum on the minor pair, if each is independent, is 150,816 to 167,266 of the
@@ -939,6 +940,229 @@ genuinely new code inside resized functions, the 1,254,656 bytes of genuinely
 new functions, or the 178,934 bytes of genuinely new struct descriptors, which
 together are the change the release actually made.
 
+## 14. Probe F — is the correction's *encoding* costing anything?
+
+Ladder 1 fits the correction at 0.606 B per run plus 0.244 B per wrong byte,
+and the minor pair pays the per-run term 163,010 times. That invites a
+question the ladders cannot answer: how much of the per-run term is
+*information* — where the runs are and how long they are — and how much is
+the shape the encoder writes it in?
+
+`bench/goattr -levels c` answers it by re-encoding **exactly the same
+regions** — the same merge loop, the same lz-or-literal decision, priced
+identically — in eighty other shapes, compressing each with the codec's own
+compressor at the codec's settings and with `xz -9e` as a control. The
+shipped format is the baseline, and the probe checks byte-for-byte that its
+replay of it is what `delta.EncodeCorrection` writes; every other candidate
+is decoded back and compared with the new file, so nothing can win by
+carrying less. Two measurement-only functions and two constants
+(`delta.EmitLZ`, `delta.ApplyLZ`, `delta.MergeGap`, `delta.SrcSlack`) make
+the codec's match engine and its two parameters reachable from the probe; no
+patch byte changes.
+
+Measured on the codec as it ships today (segment map and `pctab` mask
+landed): minor release 3.13.2→3.14.0, patch **1,352,768 B**, correction
+3,400,362 raw → **890,321 compressed** (65.8% of the patch), 2,866,792 wrong
+bytes in 163,010 runs; patch release 3.13.1→3.13.2, patch **78,462 B**,
+correction 82,593 raw → **49,133 compressed** (62.6%), 57,566 wrong bytes in
+11,081 runs. The correction is compressed alone here, not inside the body it
+shares with the layout, so a delta below is the sign and the order of what
+the patch would move, not the patch's exact arithmetic.
+
+### 14.1 Where the correction's compressed bytes are
+
+The shipped stream is two pieces, `ctrl` and `lit`. Splitting `ctrl` into
+what it actually holds — a gap varint and a span varint per region, plus the
+op triples of the regions written as lz — and compressing each piece alone:
+
+| stream | minor raw | minor cz | patch raw | patch cz |
+|---|---:|---:|---:|---:|
+| gaps | 183,693 | 67,725 | 16,223 | 10,721 |
+| spans | 169,858 | 34,917 | 11,192 | 2,832 |
+| lz ops | 132,856 | 58,162 | 3,555 | 2,276 |
+| literals | 2,913,941 | 734,693 | 51,611 | 32,681 |
+| shipped, as one stream | 3,400,362 | **890,321** | 82,593 | **49,133** |
+
+The region *headers* — everything the per-run term could possibly be — are
+102,642 compressed bytes on the minor pair: 11.5% of the correction, **7.6%
+of the whole patch**, and 5.04 bits per run. On the patch pair they are
+13,553 B, 27.6% of the correction and 9.79 bits per run. Those two numbers
+are 0.63 and 1.22 bytes per run against ladder 1's fitted 0.606 and 1.320 —
+fitted before the segment map landed, on a residual half again as large —
+which identifies what the yardstick's per-run term has been measuring all
+along: it is the gap and the span, and nothing else.
+
+Everything else is content. The literals are 82.5% of the minor pair's
+compressed correction and they are 2,913,941 raw bytes for 2,866,792 wrong
+bytes — only 47 K of merged-correct padding rides along. There is no
+encoding overhead hiding in them to remove.
+
+### 14.2 Two floors
+
+**The order-0 floor.** Coding each region's gap and span at their own
+empirical distribution, and exploiting nothing else, costs 5.92 + 3.98 =
+9.90 bits per run on the minor pair (201,768 B) and 8.23 + 2.42 = 10.65 bits
+on the patch pair (14,749 B). The shipped varints plus brotli achieve 5.04
+and 9.79. **The codec is already 49% below an order-0 entropy coder on the
+minor pair and 8% below on the patch pair**, because brotli models the
+correlation between one region's header and the last one's, which a symbol
+coder by construction cannot. A re-encoding does not start from a headroom
+of 100 K; it starts underwater.
+
+**The noise floor.** The same stream with 0–7 extra header bytes — the same
+information, byte for byte, only shifted — compresses to a range of 3,411 B
+on the minor pair and 280 B on the patch pair. brotli's block boundaries
+move. Any candidate below that spread has not been shown to differ from the
+baseline at all, which disposes of several of the small wins below.
+
+### 14.3 The shape of the runs
+
+Minor pair, regions by length and by the gap of correct bytes before them:
+
+| runs | 1 | 2 | 3 | 4 | 5–8 | 9–16 | 17–64 | >64 | total |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| all | 58,120 | 25,949 | 9,005 | 2,008 | 17,409 | 15,720 | 27,996 | 6,803 | 163,010 |
+| `.text` | 26,284 | 8,903 | 1,489 | 959 | 2,157 | 2,082 | 7,490 | 4,775 | 54,139 |
+| `.go.type` | 16,607 | 2,521 | 3,750 | 342 | 4,441 | 4,440 | 16,988 | 1,130 | 50,219 |
+| `.gopclntab` | 13,702 | 11,410 | 3,012 | 187 | 10,724 | 3,736 | 1,795 | 0 | 44,566 |
+| `.rodata` | 977 | 1,466 | 385 | 426 | 60 | 5,048 | 1,357 | 793 | 10,512 |
+
+| gaps | ≤8 | 9–32 | 33–128 | 129–512 | 513–4K | 4K–64K | >64K |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| all | 65,008 | 49,465 | 28,689 | 8,732 | 8,031 | 2,998 | 87 |
+| `.text` | 8,530 | 23,665 | 10,928 | 5,205 | 4,006 | 1,740 | 65 |
+| `.go.type` | 37,560 | 5,645 | 1,703 | 2,215 | 2,347 | 746 | 3 |
+| `.gopclntab` | 10,590 | 16,798 | 14,677 | 949 | 1,182 | 357 | 13 |
+| `.rodata` | 6,218 | 2,473 | 1,018 | 275 | 402 | 120 | 6 |
+
+Patch pair, the same, in miniature: 4,787 one-byte runs, 3,943 two-byte,
+819 three-byte of 11,081 total, and gaps that sit mostly in 33–512.
+
+The `.gopclntab` shape the brief expected is there — 44,566 runs, short, regular
+and four-byte-field-shaped — and
+it is the one place where a representation change does move bytes (14.5d):
+88% of its runs are ≤8 bytes and 61% of its gaps are under 33.
+
+### 14.4 The candidates
+
+Compressed bytes and the delta against the shipped format, cz first and
+`xz -9e` in the control column. Only the informative rows; the full grid is
+in the tool.
+
+| encoding | minor cz | Δ | minor xz Δ | patch cz | Δ | patch xz Δ |
+|---|---:|---:|---:|---:|---:|---:|
+| base (shipped) | 890,370 | 0 | 0 | 48,988 | 0 | 0 |
+| columnar (gaps / spans / ops / lits) | 891,105 | +735 | −1,624 | 48,557 | −431 | −812 |
+| per-section | 890,829 | +459 | +1,824 | 49,064 | +76 | +476 |
+| per-section + columnar | 891,644 | +1,274 | +572 | 48,873 | −115 | −260 |
+| per-section + columnar, stream-major | 891,867 | +1,497 | +400 | 48,682 | −306 | −652 |
+| xor literals everywhere | 976,991 | **+86,621** | +85,968 | 48,984 | −4 | −112 |
+| word mode (`.gopclntab`, `.go.type`) | 889,586 | −784 | −11,384 | 51,631 | +2,643 | +2,284 |
+| merge=1 (never merge) | 933,950 | +43,580 | +47,044 | 50,924 | +1,936 | +1,828 |
+| merge=4 | 887,847 | −2,523 | −1,704 | 49,118 | +130 | +124 |
+| merge=16 | 893,391 | +3,021 | +2,304 | 47,508 | −1,480 | −1,420 |
+| merge=32 | 906,318 | +15,948 | +13,452 | 47,816 | −1,172 | −1,300 |
+| merge=32 + xor | 916,866 | +26,496 | +25,452 | 45,972 | −3,016 | −3,172 |
+| merge=32 + xor + columnar | 914,781 | +24,411 | +18,648 | **45,104** | **−3,884** | −4,368 |
+| xor in `.gopclntab` only | 887,691 | −2,679 | −1,068 | 49,055 | +67 | +372 |
+| word mode + xor in `.gopclntab` | 886,247 | −4,123 | −13,956 | 51,119 | +2,131 | +1,916 |
+| word mode + xor in `.gopclntab` + merge=4 | **880,239** | **−10,131** | −21,668 | 51,092 | +2,104 | +1,964 |
+| per-section + xor in `.gopclntab` + merge=4 | 885,635 | −4,735 | −2,524 | 49,012 | +24 | +452 |
+| auto-xor per region (≥50% zeroed), merge=6 | 897,490 | +7,120 | +4,024 | 49,197 | +209 | +200 |
+| whole-file xor (the merge limit) | 1,265,246 | +374,876 | +295,048 | 71,370 | +22,382 | +27,412 |
+
+Noise floors: 3,411 (minor), 280 (patch). The baseline row is the probe's own
+replay, whose header is 8 bytes longer than the shipped stream's; deltas are
+against that row.
+
+### 14.5 What each idea did
+
+**(b) columnar.** De-interleaving gaps, spans, lz ops and literals into four
+streams is worth −431 on the patch pair and +735 on the minor one, and under
+`xz` it helps both (−812, −1,624). brotli is *using* the interleaving: a
+region's span sits next to its gap, and the pair predicts the next pair.
+Splitting them throws that context away and only pays where the streams are
+individually very regular. Both numbers are near their noise floors.
+
+**(c) per-section streams.** Costs bytes on both pairs (+459 minor, +76
+patch), and more when stacked with columnar. The hypothesis was that
+`.gopclntab`'s statistics pollute `.text`'s; the measurement says the
+compressor is already separating them — a section's regions are contiguous
+in the stream, so brotli's window has them together anyway — and grouping by
+section only loses the shared literal matches across sections.
+
+**(d) word mode and xor-vs-prediction literals.** This is the one place with
+a real effect, and it is entirely `.gopclntab`. Encoding gaps and spans in
+4-byte words for the pcln and type sections is −784 on the minor pair (noise)
+but −11,384 under `xz`; xor-ing the literals against the prediction *only in
+`.gopclntab`* is −2,679, and the two together −4,123, rising to −10,131 when
+combined with merge=4. Those fields are offsets that miss by a small amount,
+so `want^pred` is mostly zero bytes and a small residue.
+
+The same transform applied anywhere else is a disaster: xor-ing every literal
+costs **+86,621** on the minor pair, and xor in `.text` alone costs +79,405.
+The reason is worth recording, because it is the general rule: xor helps only
+where the prediction is *nearly* right; where the literals are genuinely new
+content — new functions, new descriptor names — the literal stream's value is
+that it matches *itself*, and xor-ing it against an unrelated prediction
+destroys those matches. The correction on a minor release is mostly new
+content, so the blanket transform loses 9.7%.
+
+An adaptive rule — xor a region only when that zeroes at least half of it,
+with the choice in a second span bit — captures neither side: +7,120 on the
+minor pair, +209 on the patch pair, and at merge=32 it recovers only 1,267 of
+the blanket rule's 3,016 on the patch pair. Most of the gain therefore comes
+from regions the zero-count rule rejects, which is what a field whose *high*
+bytes agree looks like: few bytes equal, but the xor is small and repetitive
+all the same. A rule that sees that would have to model the field, and
+modelling the field is the predictor's job, not the correction's.
+
+**(e) run merging.** The shipped threshold, 6, is close to optimal on the
+minor pair (merge=4 is −2,523, inside the noise floor; 3 and 5 are worse) and
+far from it on the patch pair, where merging up to 32 correct bytes into a
+run is −1,172 and, with xor, −3,016. The two pairs want opposite thresholds
+for the same reason as (d): the patch pair's runs are near-misses a few bytes
+apart, so merging them costs almost nothing (the swallowed bytes are correct,
+and under xor they are zeros) and saves a header each; the minor pair's runs
+are separated by real, unrelated content that merging forces into the literal
+stream at full price. The merge limit — one region over the whole file — is
++374,876 and +22,382, so the sparse structure is worth an order of magnitude
+more than anything gained by tuning inside it.
+
+### 14.6 Verdict
+
+**Do not change the correction's representation.** The gate for this probe
+was 1.5% of the total patch on the minor pair, which is 20,292 B. The best
+candidate found is 10,131 B (0.75%), and it regresses the patch pair by 2,104
+(+2.7% of a 78,462-byte patch); the best candidate that is safe on both is
+4,735 B (0.35%), which is only 1.4× the minor pair's noise floor. Nothing
+comes within a factor of two of the bar.
+
+The reason is structural, not a failure of imagination:
+
+- The per-run cost is 5.04 bits on the minor pair, already **49% below the
+  order-0 entropy of the gaps and spans themselves**. The remaining budget
+  for a smarter header coder is not 90 K, as the run count and the fitted
+  0.606 B/run suggested; it is at most 102 K *in total*, and the shipped
+  encoding is already beating the obvious information-theoretic reference on
+  it.
+- 82.5% of the compressed correction is literals, and those literals are the
+  wrong bytes themselves. They shrink when the *prediction* improves, not
+  when the stream around them is rearranged.
+
+Two things are worth keeping from the measurement. The first is that the
+yardstick's per-run term is now identified as the gap plus the span, at 0.63
+B/run (minor) and 1.22 B/run (patch), so any future proposal that trades runs
+for bytes can be priced without re-measuring. The second is that a
+*pair-adaptive* encoder — write both the shipped format and merge=32 + xor +
+columnar, keep the smaller, and say which in a transform flag — would take
+the patch pair from 78,462 to about 74,600 (−4.9%) and leave the minor pair
+where it is. That is the only live route the data supports, it costs one wire
+bit and a second encode pass over the correction, and it is a *release-shape*
+switch rather than a better encoding: the patch pair wins because its
+residual is near-misses, and the minor pair does not because its residual is
+new content.
+
 ## Reproducing
 
 ```
@@ -946,7 +1170,8 @@ go build -o goattr ./bench/goattr
 ./goattr -old OLD -new NEW -label NAME -cache DIR -levels 123456789 -jobs 6
 ```
 
-Levels 7–9 are the probes of §8–§10, level `a` is §11 and level `b` is §12; level 7 prices itself with the yardstick
+Levels 7–9 are the probes of §8–§10, level `a` is §11, level `b` is §12 and
+level `c` is §14 (add `-xz` for its control column); level 7 prices itself with the yardstick
 level 1 fits, so run it together with 1. The prediction is memoised on the two
 input files *and* on the contents of `delta/`, because a prediction memoised
 on its inputs alone is the spike's silent-fiction failure mode: a stale entry
