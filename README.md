@@ -1,42 +1,46 @@
 # presage
 
-A binary patcher that predicts the new file instead of searching for it.
+A structure-aware binary patcher.
 
-Two builds of the same program differ far less than their bytes do. A few
-functions change; the linker then moves everything after them and rewrites
-every reference that crosses the move. A byte-level differ has to encode all
-of that displacement. presage reconstructs it instead: a *structure module*
-reads the metadata the toolchain already left in the old file, predicts where
-each piece landed in the new one, and the patch carries only a compact plan
-plus the bytes the prediction got wrong.
+Add one line to a Go program and 13% of the bytes in the binary change. A real
+patch release changes 82%. Almost none of that is new code: the linker shifted
+everything after the edit and rewrote every address that crossed the shift,
+all of it computed from rules.
 
-The prediction is deterministic and the result is hash-verified, so a bad
-prediction costs patch bytes and nothing else.
+General-purpose differs handle this well. bsdiff, xdelta3 and zstd's
+`--patch-from` encode only what changed about the parts that survived, with no
+knowledge of the file format, which is why they are the default everywhere.
+But a patch may only say: copy these bytes, add these differences, seek
+forward. Nothing in that vocabulary names a relocation or a jump target, so
+the churn gets spelled out byte by byte.
+
+Chrome's Courgette, and its successor Zucchini, put architecture-specific
+structure into the patch itself: their format knows what a reference is, so a
+moved target becomes a symbol the decoder resolves. presage generalises that
+into a small core plus *structure modules*, each specific to one architecture
+and toolchain: x86-64 RIP-relative references, ELF relocations, the tables the
+Go linker leaves in a stripped binary, DWARF's compressed debug sections.
+
+A presage patch is therefore built around a *plan* in the toolchain's own
+terms, with a byte-level residual alongside it where the plan was wrong. On a
+291 MB Chrome image the plan is 99.377% byte-correct, so nearly all the churn
+is recomputed rather than sent.
 
 ## What it costs
 
-Go binaries, via the `go` module. Every row is encode → patch → decode →
-byte-exact compare, in bytes:
+Every row is `presage diff`, then `presage patch`, then a byte-exact compare.
+`docs/general/baselines.md` records the exact pairs and flags.
 
-| pair | presage | Zucchini | bsdiff |
-|---|---:|---:|---:|
-| prometheus 3.13.1 → 3.13.2, 94 MB (patch release) | **71,192** | 3,031,380 | 2,691,644 |
-| prometheus 3.13.2 → 3.14.0 (minor release) | **1,274,324** | 6,143,736 | 6,130,860 |
-| synthetic one-line change, 30 MB | **1,828** | 173,060 | 150,475 |
+| pair | presage | Zucchini | bsdiff | xdelta3 | zstd `--patch-from` |
+|---|---:|---:|---:|---:|---:|
+| one-line change, 30 MB Go binary | **1,202** | 173,060 | 150,475 | 1,390,889 | 538,493 |
+| prometheus 3.13.1 → 3.13.2, Go, 94 MB | **70,195** | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
 
-A patch release costs 38× less than the strongest general-purpose differ. A
-minor release, where thousands of functions are genuinely new, converges
-toward the cost of the new code — which is the expected result: prediction
-removes the layout shift, and new content still has to be sent.
-
-The approach is not Go-specific. On a whole-image C++ ELF pair — Chrome
-151.0.7922.169 → .173, a 291 MB Linux x86-64 image — a predict-then-correct
-codec costs **2,634,264 XZ bytes against a RELA-aware Zucchini's 5,263,732,
-50.05% smaller**, replaying byte-exactly. The prediction there is 99.377%
-byte-correct, and nearly all of the gain since the first working version came
-from *encoding* the same information differently rather than from predicting
-better. That result lives in the `bench/elfpredict` harness and is not yet a
-shipped module; see `docs/general/research/chrome-elf-handoff.md`.
+The one-line change is the extreme case and the clearest picture of what
+prediction buys: 125× smaller than bsdiff, because almost the whole patch is
+displacement that presage recomputes rather than sends. The ratio falls as the
+pair grows further apart, to 38× on a Go patch release. That is expected:
+prediction removes displacement, and genuinely new code still has to be sent.
 
 ## How it works
 
@@ -51,7 +55,7 @@ A patch is a sequence of **regions**, each claimed by one module:
   and models `.gopclntab`, type descriptors and `.rodata`. A DWARF layer
   handles unstripped builds, including compressed debug sections.
 
-Each module emits a **plan** — a small description of the change — and the
+Each module emits a **plan**, a small description of the change, and the
 core materialises the prediction natively from it, then codes the residual.
 The encoder scores candidate models per region by measured size and keeps the
 cheapest, so adding a module can only help. Because the predicted layout is
@@ -62,7 +66,7 @@ bsdiff need 9–12× the input in RAM.
 
 Milestone 1 of `docs/general/SPEC.md` is built: the container, the residual
 coder, the four modules above, and end-to-end verification. The rest of the
-SPEC — the portable wasm module profile, cross-file priors, further domains —
+SPEC (the portable wasm module profile, cross-file priors, further domains)
 is design.
 
 The open weakness is decoder memory: it peaks at several times the size of
@@ -96,5 +100,6 @@ benchmarks isolate one model's contribution.
 | [`docs/general/SPEC.md`](docs/general/SPEC.md) | the design: core, modules, plan language, residual coding, selection, verification, ranked domains |
 | [`docs/general/presage-core.md`](docs/general/presage-core.md) | implementation spec for what is built |
 | [`docs/general/go-module-results.md`](docs/general/go-module-results.md) | the Go module measured against Zucchini, bsdiff and the prior Go-aware codec |
-| [`docs/general/research/`](docs/general/research/) | the measurements the design rests on, including the Chrome ELF spike |
+| [`docs/general/baselines.md`](docs/general/baselines.md) | the pairs, tools and flags behind the table above |
+| [`docs/general/research/`](docs/general/research/) | the measurements the design rests on, including the Chrome ELF and Firefox MAR studies |
 | [`docs/research/`](docs/research/) | earlier research on Go binary layout and delta encoding |
