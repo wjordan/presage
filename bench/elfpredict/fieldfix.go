@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"slices"
 
 	"github.com/wjordan/go-binsync/delta/x86"
@@ -39,23 +40,33 @@ type fieldSite struct {
 // the displacement values, so this list is the same before and after either
 // layer rewrites a field.
 func fieldSites(text []byte, maps []mapping) []fieldSite {
-	var out []fieldSite
-	walk := func(body []byte, base int) {
-		x86.WalkReferences(body, 0, func(ref x86.Reference) {
+	keep := func(out []fieldSite, refs []x86.Reference, base int) []fieldSite {
+		for _, ref := range refs {
 			if ref.N == 4 && base+ref.Off+4 <= len(text) {
 				out = append(out, fieldSite{base + ref.Off, base + ref.Next})
 			}
-		})
-	}
-	if len(maps) == 0 {
-		walk(text, 0)
+		}
 		return out
 	}
+	if len(maps) == 0 {
+		return keep(nil, x86.References(text, 0), 0)
+	}
+	// One body per mapping, walked concurrently. WalkBodies returns the
+	// per-body references in map order, so concatenating them reproduces the
+	// exact site list -- and thus the exact plan basis -- a serial walk built.
+	bodies := make([]x86.Body, 0, len(maps))
+	bases := make([]int, 0, len(maps))
 	for _, m := range maps {
 		if m.Dst > uint64(len(text)) || m.DstSize > uint64(len(text))-m.Dst {
 			continue
 		}
-		walk(text[m.Dst:m.Dst+m.DstSize], int(m.Dst))
+		bodies = append(bodies, x86.Body{Code: text[m.Dst : m.Dst+m.DstSize]})
+		bases = append(bases, int(m.Dst))
+	}
+	res := x86.WalkBodies(bodies, runtime.GOMAXPROCS(0))
+	var out []fieldSite
+	for k, refs := range res {
+		out = keep(out, refs, bases[k])
 	}
 	return out
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
 
 	"github.com/wjordan/go-binsync/delta/x86"
@@ -190,7 +191,10 @@ func sourceExtents(srcs []uint64, oldText []byte) map[uint64]uint64 {
 func referenceTargets(oldText []byte, maps []mapping, oldAddr uint64) []uint64 {
 	bySrc := slices.Clone(maps)
 	slices.SortFunc(bySrc, func(a, b mapping) int { return cmpU(a.Src, b.Src) })
-	out := []uint64{0}
+	// One body per distinct source, walked concurrently. The result is sorted
+	// and deduplicated below, so the order bodies come back in does not matter.
+	var bodies []x86.Body
+	var bases []uint64
 	var prevSrc uint64
 	for i, m := range bySrc {
 		if i > 0 && m.Src == prevSrc {
@@ -200,15 +204,21 @@ func referenceTargets(oldText []byte, maps []mapping, oldAddr uint64) []uint64 {
 		if m.Src > uint64(len(oldText)) || m.SrcSize > uint64(len(oldText))-m.Src {
 			continue
 		}
-		body := oldText[m.Src : m.Src+m.SrcSize]
-		base := oldAddr + m.Src
-		x86.WalkReferences(body, 0, func(ref x86.Reference) {
+		bodies = append(bodies, x86.Body{Code: oldText[m.Src : m.Src+m.SrcSize]})
+		bases = append(bases, oldAddr+m.Src)
+	}
+	res := x86.WalkBodies(bodies, runtime.GOMAXPROCS(0))
+	out := []uint64{0}
+	for k, refs := range res {
+		body := bodies[k].Code
+		base := bases[k]
+		for _, ref := range refs {
 			disp, ok := readDisplacement(body, ref)
 			if !ok {
-				return
+				continue
 			}
 			out = append(out, uint64(int64(base+uint64(ref.Next))+disp))
-		})
+		}
 	}
 	slices.Sort(out)
 	return slices.Compact(out)

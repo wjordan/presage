@@ -11,6 +11,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/fnv"
+	"sync"
+	"sync/atomic"
 
 	"golang.org/x/arch/x86/x86asm"
 )
@@ -167,9 +169,32 @@ func References(code []byte, pc uint64) []Reference {
 
 // WalkReferences visits PC-relative operands without retaining a potentially
 // large reference table.
+//
+// The x86asm decoder can panic on a truncated or invalid sequence (a
+// structural boundary may legally leave one), which is correction data, not a
+// reason to fail. Rather than pay a deferred recover on every instruction --
+// tens of millions per sweep of a large .text -- one recover covers a whole
+// run and resumes one byte past the offending position, which is what the
+// per-instruction err path does too. Panics are rare, so the amortised cost is
+// a single defer per body plus one per actual panic.
 func WalkReferences(code []byte, pc uint64, visit func(Reference)) {
 	for i := 0; i < len(code); {
-		inst, err := decode(code[i:])
+		i = walkFrom(code, pc, i, visit)
+	}
+}
+
+// walkFrom walks from start to the end of code, or returns the byte after a
+// decoder panic so WalkReferences can resume. The deferred recover reads the
+// live loop index, so next names the position that failed plus one.
+func walkFrom(code []byte, pc uint64, start int, visit func(Reference)) (next int) {
+	i := start
+	defer func() {
+		if recover() != nil {
+			next = i + 1
+		}
+	}()
+	for i < len(code) {
+		inst, err := x86asm.Decode(code[i:], 64)
 		if err != nil || inst.Len == 0 {
 			i++
 			continue
@@ -183,6 +208,49 @@ func WalkReferences(code []byte, pc uint64, visit func(Reference)) {
 		}
 		i += inst.Len
 	}
+	return len(code)
+}
+
+// Body is one code region to walk: its bytes and the pc its first byte lives
+// at. The whole-image predictor already holds .text as a list of independent
+// function bodies, so a parallel walk needs no instruction-boundary guessing.
+type Body struct {
+	Code []byte
+	PC   uint64
+}
+
+// WalkBodies walks bodies concurrently and returns one reference slice per
+// body, in the same order as bodies. Concatenating the result reproduces, in
+// order, exactly what a serial WalkReferences over each body would visit, so
+// callers that index references by position (an address-field plan does) get
+// the identical basis. References are body-local: add the body's offset to
+// Start/Off/Next to place them in a larger image; Target is already absolute.
+func WalkBodies(bodies []Body, workers int) [][]Reference {
+	out := make([][]Reference, len(bodies))
+	if workers < 1 {
+		workers = 1
+	}
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				k := int(next.Add(1)) - 1
+				if k >= len(bodies) {
+					return
+				}
+				var refs []Reference
+				WalkReferences(bodies[k].Code, bodies[k].PC, func(r Reference) {
+					refs = append(refs, r)
+				})
+				out[k] = refs
+			}
+		}()
+	}
+	wg.Wait()
+	return out
 }
 
 // Relocate copies code (which lives at srcPC in the old binary) into out
