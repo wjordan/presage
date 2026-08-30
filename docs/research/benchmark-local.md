@@ -16,7 +16,6 @@ raw logs are in `bench/out/logs/`, JSON results in `bench/out/results/`.
 * Content-defined chunking does not help for code changes: with desync at 16:64:256 KiB, v1->v2c makes 273 of 386 chunks new (7.7 MB compressed = 92% of the full download); at 4:16:64 KiB 1,175 of 1,746 chunks (7.7 MB); at 64:256:1024 KiB 78 of 102 (7.9 MB). Only v2s (2 new chunks, 8-194 KB) and v2p (23-55% of chunks) benefit. casync default chunking: 273 new chunks, 7.6 MB. The FastCDC simulation agrees (62-78% of chunks new for v2c at every size; fixed 64 KiB blocks 79%).
 * Per-chunk compression penalty (simulation, v1->v2c): compressing new chunks individually costs +55% at 4 KiB (7.30 vs 4.69 MB concatenated), +29% at 16 KiB, +16% at 64 KiB, +9% at 256 KiB; a 1 MiB dictionary trained on OLD's chunks recovers 53-75% of that penalty (4-16 KiB) and 40% for fixed 64 KiB blocks.
 * Pure Go: `index/suffixarray` over the 29.6 MB binary takes 2.33 s and 148 MB RSS; gabstv/go-bsdiff produces a 69.6 KB patch in 9.0 s (553 MB RSS); klauspost zstd with OLD as a raw dictionary reaches 261 KB in 0.83-1.25 s but only at `SpeedBestCompression` (the other levels ignore the dictionary: 10.0-10.4 MB). SHA-256 2.56 GB/s, BLAKE3 9.66 GB/s (1.27 GB/s in 64 KiB calls), single goroutine.
-* Transfer model, 100 Mbit/s / 100 ms RTT, v1->v2c: hdiffz 1.3 s, xdelta3-lzma 1.1 s, bsdiff 6.3 s, zstd-19 15.9 s (all encode-dominated), full download 8.6 s (7.8 s of that is `zstd -19` encode), desync 16:64:256 4.9 s (274 objects), desync 4:16:64 18.4 s. At 20 Mbit/s / 200 ms: hdiffz 1.4 s, full download 11.4 s, desync 4:16:64 35.6 s.
 
 ## 0. Tools and versions
 
@@ -454,59 +453,10 @@ of all new chunks concatenated; per-chunk `zstd -19 -D dict` with a 1 MiB dictio
 | Hashing, single goroutine, v1-F2 | SHA-256 (crypto/sha256, SHA-NI) 2,558 MB/s; BLAKE3 (lukechampine.com/blake3, AVX-512 path) 9,659 MB/s on the whole 29.6 MB buffer; BLAKE3 over 64 KiB pieces 1,269 MB/s (per-call overhead dominates at that size) |
 | x86 BCJ (E8/E9 rel32 -> absolute, LZMA-SDK `x86_Convert` port, applied inside `.text` only; `bcj/main.go`) | Round-trip dec(enc(v1)) == v1 verified. Rewrites 931,563 bytes of v1-F2. v1->v2c: zstd-19 213,124 -> 212,995 B, bsdiff 60,478 -> 61,509 B, xdelta3 464,283 -> 466,051 B, hdiffz-m6 75,305 -> 76,513 B. v1->v2l: zstd-19 55,648 -> 55,689 B, bsdiff 24,322 -> 24,322 B. Differing bytes v1->v2c 4,000,728 -> 3,999,654. Net effect: within +-2%, no benefit, because (Section 2) the rel32 churn is in RIP-relative `lea`/`mov` operands that point into .rodata, which BCJ does not transform, while E8 call targets are stable. |
 
-## 6. Transfer-time model
-
-`bench/model.py`: `time = (RTT + 20 ms TTFB) * max(1, objects/8) + bytes / bandwidth
-+ encode_s + apply_s`, using the measured F2 numbers (subset of methods; the full set is in `bench/out/logs/06-model.log`) (single-threaded encode; desync
-"encode" = `desync make` of NEW, "apply" = `desync extract --seed`). Objects for a delta
-patch or a full download = 1; for CDC = new chunks + 1 index.
-
-### 100 Mbit/s, 100 ms RTT (TTFB 20 ms/object, 8 parallel fetches)
-
-| pair | method | bytes | objects | latency s | transfer s | encode s | apply s | total s |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| v1->v2c | full-zstd-19 (1 object) | 8,432,157 | 1 | 0.12 | 0.67 | 7.78 | 0.03 | 8.60 |
-| v1->v2c | zstd-19 (1 object) | 213,124 | 1 | 0.12 | 0.02 | 15.71 | 0.04 | 15.89 |
-| v1->v2c | xdelta3-9-lzma (1 object) | 343,972 | 1 | 0.12 | 0.03 | 0.93 | 0.05 | 1.13 |
-| v1->v2c | bsdiff (1 object) | 60,478 | 1 | 0.12 | 0.00 | 6.04 | 0.09 | 6.25 |
-| v1->v2c | hdiffz-m6-zstd21 (1 object) | 75,305 | 1 | 0.12 | 0.01 | 1.17 | 0.01 | 1.31 |
-| v1->v2c | desync CDC 4:16:64 (1176 objects) | 7,805,766 | 1176 | 17.64 | 0.62 | 0.12 | 0.05 | 18.43 |
-| v1->v2c | desync CDC 16:64:256 (274 objects) | 7,741,036 | 274 | 4.11 | 0.62 | 0.13 | 0.06 | 4.92 |
-| v1->v2c | desync CDC 64:256:1024 (79 objects) | 7,867,354 | 79 | 1.19 | 0.63 | 0.17 | 0.06 | 2.04 |
-| v1->v3 | full-zstd-19 (1 object) | 8,432,428 | 1 | 0.12 | 0.67 | 8.20 | 0.03 | 9.02 |
-| v1->v3 | zstd-19 (1 object) | 224,693 | 1 | 0.12 | 0.02 | 15.41 | 0.04 | 15.59 |
-| v1->v3 | xdelta3-9-lzma (1 object) | 355,317 | 1 | 0.12 | 0.03 | 0.94 | 0.06 | 1.15 |
-| v1->v3 | bsdiff (1 object) | 64,902 | 1 | 0.12 | 0.01 | 6.12 | 0.10 | 6.35 |
-| v1->v3 | hdiffz-m6-zstd21 (1 object) | 79,879 | 1 | 0.12 | 0.01 | 0.98 | 0.01 | 1.12 |
-| v1->v3 | desync CDC 4:16:64 (1191 objects) | 7,834,775 | 1191 | 17.87 | 0.63 | 0.11 | 0.05 | 18.65 |
-| v1->v3 | desync CDC 16:64:256 (283 objects) | 7,822,019 | 283 | 4.25 | 0.63 | 0.11 | 0.04 | 5.02 |
-| v1->v3 | desync CDC 64:256:1024 (78 objects) | 8,183,325 | 78 | 1.17 | 0.65 | 0.16 | 0.04 | 2.02 |
-
-### 20 Mbit/s, 200 ms RTT (TTFB 20 ms/object, 8 parallel fetches)
-
-| pair | method | bytes | objects | latency s | transfer s | encode s | apply s | total s |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| v1->v2c | full-zstd-19 (1 object) | 8,432,157 | 1 | 0.22 | 3.37 | 7.78 | 0.03 | 11.40 |
-| v1->v2c | zstd-19 (1 object) | 213,124 | 1 | 0.22 | 0.09 | 15.71 | 0.04 | 16.06 |
-| v1->v2c | xdelta3-9-lzma (1 object) | 343,972 | 1 | 0.22 | 0.14 | 0.93 | 0.05 | 1.34 |
-| v1->v2c | bsdiff (1 object) | 60,478 | 1 | 0.22 | 0.02 | 6.04 | 0.09 | 6.37 |
-| v1->v2c | hdiffz-m6-zstd21 (1 object) | 75,305 | 1 | 0.22 | 0.03 | 1.17 | 0.01 | 1.43 |
-| v1->v2c | desync CDC 4:16:64 (1176 objects) | 7,805,766 | 1176 | 32.34 | 3.12 | 0.12 | 0.05 | 35.63 |
-| v1->v2c | desync CDC 16:64:256 (274 objects) | 7,741,036 | 274 | 7.54 | 3.10 | 0.13 | 0.06 | 10.82 |
-| v1->v2c | desync CDC 64:256:1024 (79 objects) | 7,867,354 | 79 | 2.17 | 3.15 | 0.17 | 0.06 | 5.55 |
-| v1->v3 | full-zstd-19 (1 object) | 8,432,428 | 1 | 0.22 | 3.37 | 8.20 | 0.03 | 11.82 |
-| v1->v3 | zstd-19 (1 object) | 224,693 | 1 | 0.22 | 0.09 | 15.41 | 0.04 | 15.76 |
-| v1->v3 | xdelta3-9-lzma (1 object) | 355,317 | 1 | 0.22 | 0.14 | 0.94 | 0.06 | 1.36 |
-| v1->v3 | bsdiff (1 object) | 64,902 | 1 | 0.22 | 0.03 | 6.12 | 0.10 | 6.47 |
-| v1->v3 | hdiffz-m6-zstd21 (1 object) | 79,879 | 1 | 0.22 | 0.03 | 0.98 | 0.01 | 1.24 |
-| v1->v3 | desync CDC 4:16:64 (1191 objects) | 7,834,775 | 1191 | 32.75 | 3.13 | 0.11 | 0.05 | 36.05 |
-| v1->v3 | desync CDC 16:64:256 (283 objects) | 7,822,019 | 283 | 7.78 | 3.13 | 0.11 | 0.04 | 11.06 |
-| v1->v3 | desync CDC 64:256:1024 (78 objects) | 8,183,325 | 78 | 2.15 | 3.27 | 0.16 | 0.04 | 5.62 |
-
 ## Reproduce
 
 ```
-bench/run.sh                 # all steps: tools build diff delta cdc probes model
+bench/run.sh                 # all steps: tools build diff delta cdc probes
 bench/run.sh build diff      # subset
 ```
 
@@ -516,7 +466,6 @@ bench/run.sh build diff      # subset
 * `bench/delta_bench.py` / `bench/render_delta.py` - Section 3 (`bench/out/results/delta.json`).
 * `bench/cdc_desync.py`, `bench/cdc_sim.py` - Section 4 (`bench/out/results/cdc_*.json`).
 * `bench/goprobe.sh` - Section 5 (`bench/out/logs/05-*.log`).
-* `bench/model.py` - Section 6.
 
 Logs: `bench/out/logs/00-*` tools, `01-build.log`, `02-diff-*.log`, `03-delta-bench.log`,
-`04-cdc-*.log`, `05-*.log`, `06-model.log`. `bench/out/` is git-ignored.
+`04-cdc-*.log`, `05-*.log`. `bench/out/` is git-ignored.

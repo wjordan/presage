@@ -131,7 +131,7 @@ survives of the wasm profile, it is not the parser; it is the regenerators.
 
 The first is decisive and reproducible: on unstructured executable bytes
 **OpenZL is zstd** (92 bytes apart, 0.002%) and is 5.9% behind xz and 5.4%
-behind brotli — the coders binsync already uses (`internal/cz`, `docs/DESIGN.md`
+behind brotli — the coders binsync already uses (`internal/cz`, `docs/go-module-design.md`
 §D16). There is no generic-backend upgrade here; adopting OpenZL as a terminal
 stage would *cost* 5–6% before any re-basis gain, because `deps/` is
 `googletest, lz4, xgboost, zstd` — no brotli, no LZMA.

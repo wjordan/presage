@@ -1,7 +1,7 @@
 # The Go-table module on presage: results
 
 Measured 2026-08-29 with `bench/elfpredict` (harness) against the Go-aware
-codec (`go-binsync diff`, transform 2) and Zucchini. Design: `SPEC.md` §4.4.
+codec (`delta.Encode`, transform 2) and Zucchini. Design: `SPEC.md` §4.4.
 All sizes in bytes. "xz" is plan and correction as two `xz -9e` streams,
 the harness's convention; "joint" is both as one stream, which is what a
 patch would ship; the Go codec's patch is one brotli/zstd frame plus a
@@ -62,8 +62,8 @@ real file (`bench/secdiff`) gave the actual residual, in wrong bytes:
 | build IDs, FIPS hash | 132 | 132 | random |
 | everything else | 61 | 61 | |
 
-Fixes, all in `delta` so the native codec gets them too (DESIGN.md
-§3.2.1 far pieces, §3.2.2 headers): the module predicts holes and headers
+Fixes, all in `delta` so the native codec gets them too (go-module-design.md
+§2.2.1 far pieces, §2.2.2 headers): the module predicts holes and headers
 (`predictHoles`, `predictHeaders`) in the harness path as the codec does;
 headers are recomputed from the layout's section table; transform 3 lets a
 resized function's segment map borrow code from anywhere in old `.text`,
@@ -99,7 +99,7 @@ plaintext (SPEC §4.5 (a)): `bench/dwarfz plain` expands every
 old file, so the transform costs 0 plan bytes. Verified on both pairs:
 `pack(plain(f)) == f` for every file, and `pack(plain(new), old) == new`,
 which is the decoder's path. The same transform is wired into the codec
-(`delta/debugz.go`, header flag `debugz`): `go-binsync diff` on the shipped
+(`delta/debugz.go`, header flag `debugz`): the Go codec on the shipped
 files gives 1,408,107 on the synthetic pair (from 9,293,321) and 8,714,361
 on prometheus, both applied back to the exact shipped file. The codec has
 no DWARF field layer, so its debug sections go through the correction as

@@ -9,8 +9,8 @@ the narrowing is named.
 
 `presage` is the codec: it turns reference objects plus a target into a
 patch and back, with modules supplying predictions and the core doing all
-O(bytes) work. go-binsync keeps the lifecycle (publish, agent, self-update,
-stores) and calls `presage` for the bytes.
+O(bytes) work. Everything above it — where a patch is stored, how it reaches
+a target, what is done with the result — is a caller's problem.
 
 Exit for this milestone, tested in `presage/corpus_test.go` against the
 `BINSYNC_CORPUS` pairs: every pair round-trips; the self-prediction gate

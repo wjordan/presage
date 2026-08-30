@@ -12,10 +12,10 @@ Any serialised structure with internal offsets — an executable, an archive,
 a tensor file, a database page — turns a small *first-order* edit into a
 large *second-order* rewrite of addresses, sizes and tables (Percival 2006,
 `research/percival-thesis.md`). General compressors and byte-level delta
-coders pay for the rewrite; go-binsync showed that a model of the format can
-*regenerate* it from a compact description of the first-order change, for
-38–125× smaller patches than bsdiff on stripped Go binaries
-(`research/binsync-lessons.md`). presage makes that architecture generic: a
+coders pay for the rewrite; the Go codec (`docs/go-module-design.md`) showed
+that a model of the format can *regenerate* it from a compact description of
+the first-order change, for 38–125× smaller patches than bsdiff on stripped
+Go binaries (`research/binsync-lessons.md`). presage makes that architecture generic: a
 fixed **core** (a plan interpreter, one shared residual coder, a hashed
 frame container) plus pluggable **structure modules** that turn an input
 into a *plan* — a bounded declarative program of copy / relocate /
@@ -50,8 +50,8 @@ Findings that constrain the design; each links to the note that measured it.
 In scope for v1:
 
 - One **target** object (bytes) predicted from a **reference set** of zero
-  or more objects. Zero references = compression; one = delta (binsync's
-  case); several = delta against a fleet of near-identical variants.
+  or more objects. Zero references = compression; one = delta (the common
+  case); several = delta against a set of near-identical variants.
 - **Structural modules** for: Go linux/amd64 (port of the existing codec),
   generic ELF (C/C++/Rust, PIE and non-PIE, x86-64 then arm64), PE x64,
   tar/zip/gzip containers with deterministic recompression, safetensors/GGUF
@@ -59,12 +59,12 @@ In scope for v1:
 - **Portable modules**: a restricted-wasm profile so a decoder can run a
   module it was not built with; and **plan lowering** so a decoder need not
   run any module at all.
-- The existing go-binsync container (frames, hashes, pointer/store) reused
-  unchanged where possible.
+- The existing frame/hash container of the Go codec
+  (`docs/go-module-design.md` §2.5) reused unchanged where possible.
 
 Out of scope for v1: lossy anything; learned/neural predictors; universal
-syndrome patches (§7.5, reserved); P2P distribution; the update-lifecycle
-half of go-binsync (it is a client of this codec, not part of it).
+syndrome patches (§7.5, reserved); how patches reach a target — storage,
+distribution and rollout are clients of this codec, not part of it.
 
 ## 3. Architecture
 
@@ -96,9 +96,10 @@ the ones above it):
    zero or more *plan operations* the decoder must implement to expand that
    plan (§4). A module is one of: built into the decoder (native), portable
    (wasm), or absent (its ops must have been lowered).
-3. **Distribution** (out of the codec's hands): stores publish modules by
-   hash next to patches; decoders cache them. go-binsync's store layout gains
-   one directory, `modules/<hash>.wasm`.
+3. **Distribution** (out of the codec's hands): a module is an object named
+   by its hash, served next to the patches and cached by the decoder — one
+   more directory, `modules/<hash>.wasm`, in whatever store already holds
+   them.
 
 The design rule that follows from R3 and R8: **anything O(bytes) is in the
 core; anything O(metadata) may be in a module.** Copying, relocating
@@ -232,10 +233,10 @@ the derived map and address prior identities.
 **Follow-up (2026-08-29).** The module lays down the file's holes and
 headers as the codec does (`predictHoles`, `predictHeaders`), so the
 no-equivalence path starts from the old file's leading bytes rather than
-zeros; headers are recomputed from the layout's section table (DESIGN.md
-§3.2.2); and the codec's transform 3 lets a resized function's segment
-map borrow code from anywhere in old `.text` (far pieces, DESIGN.md
-§3.2.1), which the module inherits through `maxTransform`. Synthetic pair,
+zeros; headers are recomputed from the layout's section table (go-module-design.md
+§2.2.2); and the codec's transform 3 lets a resized function's segment
+map borrow code from anywhere in old `.text` (far pieces, go-module-design.md
+§2.2.1), which the module inherits through `maxTransform`. Synthetic pair,
 no equivalences: 2,356 → 1,536 xz, joint brotli 1,314 against the codec's
 1,184. Numbers and the DWARF findings in `go-module-results.md`.
 
@@ -413,12 +414,11 @@ any byte is produced (`adaptive-predictive-coding.md` §9d, xz's rule).
 
 Every module op must be expressible as core ops plus residual bytes: at
 worst `copy` + `fill` and a larger correction. The encoder lowers an op when
-the deployed decoder (known from the old binary's build info, as go-binsync
-already reads it) cannot run it. Lowering is the generalisation of
-go-binsync's "publisher picks the transform the deployed decoder can read"
-and guarantees that a v1 core decoder can read every future patch, at a
-measurable cost in bytes. The encoder reports the cost so a fleet operator
-can see what shipping the module would save.
+the decoder it is encoding for cannot run it. Lowering generalises the Go
+codec's transform ceiling (`docs/go-module-design.md` §2.6) and guarantees
+that a v1 core decoder can read every future patch, at a measurable cost in
+bytes. The encoder reports that cost, so the saving from shipping the module
+is visible before anyone ships it.
 
 ## 6. Residual coding
 
@@ -577,9 +577,9 @@ verified while streaming. Failure classes are named:
 | target hash mismatch | residual corrupt or wrong | fail |
 
 Every plan op is bounds-checked against declared lengths; allocation is
-bounded by `H_target`'s declared size and the header budget. As in
-go-binsync, a malformed patch fails verification and cannot write outside
-the output.
+bounded by `H_target`'s declared size and the header budget. As in the Go
+codec, a malformed patch fails verification and cannot write outside the
+output.
 
 ### 7.5 Reserved: syndrome correction
 
@@ -638,15 +638,16 @@ domain notes:
 Honest ceiling everywhere: gain is bounded by (second-order churn) /
 (first-order change). Major releases, data-dominated artefacts and
 address-free formats stay within a small factor of bsdiff regardless of
-module quality; the fleet-update shape — one artefact, many targets, many
-small steps — is where every domain's number is large.
+module quality. The shape where every domain's number is large is the same
+one: an artefact rebuilt often, in small steps, from a toolchain that lays
+it out by rule.
 
 ## 10. Milestones
 
 1. **Core extraction.** *Built* (`presage/`, `presage-core.md`): the
    container with multiple references, regions, prediction chunk hashes,
    the module registry with lowering, `lz`/`copy` core modules and the Go
-   module as one coarse op over go-binsync's transform (open question 2
+   module as one coarse op over the Go codec's transform (open question 2
    answered "coarse first"; `map`/`relocate`/`go:pclntab` as separate ops
    are deferred to the module that needs them). Exit met: the corpus gate
    (`presage/gomod/corpus_test.go`) holds every pair within 2 % of

@@ -13,7 +13,7 @@ and not confirmed against a source during this pass. Numbers are quoted with
 their source. Local experiments were run on linux/amd64 with gcc, rustc
 (stable, `strip` from binutils) and Go 1.25.
 
-Related in-repo material: `docs/DESIGN.md` (the Go predictor and its measured
+Related in-repo material: `docs/go-module-design.md` (the Go predictor and its measured
 28-67x over bsdiff), `docs/research/binary-delta.md`, `docs/research/go-binary-layout.md`.
 
 ---
@@ -157,7 +157,7 @@ their full update pipeline was −33% on Windows, −10% Linux, −9.7% macOS
 Two things to take from this table. First, even on point releases Zucchini is
 a 2.5–2.7x win over bsdiff, not 28–67x; Chrome/Firefox point releases contain
 real code changes across hundreds of files, so the residual is dominated by
-first-order change, and the Go numbers in `DESIGN.md` are for one-line
+first-order change, and the Go numbers in `go-module-design.md` are for one-line
 changes. Second, Courgette was already within 12–15% of Zucchini on patch
 size; the replacement was about memory, robustness and maintainability, not a
 compression breakthrough.
@@ -233,7 +233,7 @@ the *client-side replay* must work from the stripped image. What must survive
 stripping is therefore only what the client needs to (a) locate operands to
 rewrite and (b) regenerate tables — not what is needed to match functions. This
 relaxes almost every "no symbols" problem below, at the cost of making the
-predictor's wire description (the "prediction inputs" of `DESIGN.md`) carry
+predictor's wire description (the "prediction inputs" of `go-module-design.md`) carry
 the correspondence explicitly.
 
 ### 2.1 Go (baseline, done)
@@ -241,7 +241,7 @@ the correspondence explicitly.
 Verified locally: a `-ldflags=-s` Go 1.25 hello-world (1.5 MB) has `.text`,
 `.rodata`, `.gopclntab` (625 KB of it) and **no `.eh_frame`**, no `.symtab`.
 `.gopclntab` names every function with entry and size, plus pc-tables; Go 1.27
-adds a sorted `.go.type` with `textOff`s (`DESIGN.md`). Measured 28–67x over
+adds a sorted `.go.type` with `textOff`s (`go-module-design.md`). Measured 28–67x over
 bsdiff on one-line/small changes; 24–28x on prometheus point releases.
 
 Go linker layout (verified from `cmd/link/internal/ld/data.go`,
@@ -800,7 +800,7 @@ Be honest about where a predictor buys little:
 - **Data-dominated artefacts**: ICU tables, V8 snapshots, embedded assets,
   `.rodata` string moves. Zucchini already treats them as raw bytes and so
   would we. go-binsync's Go numbers benefit from Go's unusually pointer-dense,
-  fully described metadata (pclntab is 35% of a Go binary, `DESIGN.md`); a
+  fully described metadata (pclntab is 35% of a Go binary, `go-module-design.md`); a
   C binary of the same size has a few percent of such tables, so the
   *ceiling* over bsdiff is lower even with perfect prediction — the gain is
   bounded by (bytes of second-order churn) / (bytes of first-order change).

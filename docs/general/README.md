@@ -1,8 +1,9 @@
-# presage — generalising go-binsync's predictive codec
+# presage — generalising the Go codec
 
-Working notes for the follow-on project: a general predictive-encoding codec
-with pluggable, portable structure modules. `SPEC.md` is the authoritative
-design; `research/` holds what it rests on. Written 2026-08-27.
+Design and measurements for the general codec: predictive encoding with
+pluggable, portable structure modules, of which the Go predictor
+(`docs/go-module-design.md`) was the first. `SPEC.md` is the authoritative
+design; `research/` holds what it rests on. Started 2026-08-27.
 
 | document | what it is |
 |---|---|
@@ -10,7 +11,7 @@ design; `research/` holds what it rests on. Written 2026-08-27.
 | [`presage-core.md`](presage-core.md) | **implementation spec for milestone 1**, the `presage` package as built: container, coarse modules, residual, what is deferred |
 | [`elf-module.md`](elf-module.md) | **implementation spec for the ELF module** (`presage/elfmod`), as built: decoder data flow, wire format, symbols, matcher, gate; status: Chrome 2,581,091, libxul 3,010,960 through the CLI |
 | [`go-module-results.md`](go-module-results.md) | measured: the Go module on presage against the Go codec, Zucchini and bsdiff; DWARF builds end to end |
-| [`research/binsync-lessons.md`](research/binsync-lessons.md) | the ten measured insights from go-binsync the general design must keep, and what it got wrong |
+| [`research/binsync-lessons.md`](research/binsync-lessons.md) | the ten measured insights from the Go codec the general design must keep, and what it got wrong |
 | [`research/percival-thesis.md`](research/percival-thesis.md) | Percival 2006: the three-orders taxonomy, FFT block alignment, difference-string modes, universal (syndrome) deltas |
 | [`research/wasm-throughput-probe.md`](research/wasm-throughput-probe.md) | measured: native 98 MB/s vs wazero AOT 37 MB/s vs interpreter 1 MB/s on a relocation kernel; identical hashes |
 | [`research/portable-predictors.md`](research/portable-predictors.md) | ZPAQ/ZPAQL, wasm determinism and runtimes, eBPF/PolkaVM/Wuffs/Kaitai alternatives, verification story |

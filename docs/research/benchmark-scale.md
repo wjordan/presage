@@ -1,12 +1,11 @@
-# Scale benchmark: real release deltas, 100 MB-540 MB binaries, lossy WAN
+# Scale benchmark: real release deltas, 100 MB-540 MB binaries
 
 Measured on 2026-08-26 on the same 24-core Linux 6.17 x86-64 box (91 GB RAM) as
-`benchmark-local.md`, whose assumptions (one-line change, 29.6 MB binary, 100 Mbit/100 ms
-link) this document re-grounds against (a) real adjacent releases of prometheus,
-kube-apiserver, terraform, cockroach and vault, (b) 88-538 MB binaries, (c) a real
-netem-emulated WAN at 5-100 Mbit/s, 100-300 ms RTT, 0-2 % loss. Scripts: `bench/scale/`;
+`benchmark-local.md`, whose assumptions (one-line change, 29.6 MB binary) this document
+re-grounds against (a) real adjacent releases of prometheus, kube-apiserver, terraform,
+cockroach and vault and (b) 88-538 MB binaries. Scripts: `bench/scale/`;
 downloaded corpus: `bench/out/corpus/` (index: `bench/out/corpus/README.md`); logs:
-`bench/out/logs/07-*.log`; JSON: `bench/out/results/{scale-small,scale-big,churn_scale,netem}.json`.
+`bench/out/logs/07-*.log`; JSON: `bench/out/results/{scale-small,scale-big,churn_scale}.json`.
 
 ## Key findings
 
@@ -18,22 +17,17 @@ downloaded corpus: `bench/out/corpus/` (index: `bench/out/corpus/README.md`); lo
 * **Encoder memory per input byte:** bsdiff 9.0, xdelta3 (`-B` = file size) 8.9, zstd -19 --long 4.5-5.7, hdiffz -m-6 3.2-4.6, hdiffz -s-64 flat ~220 MB. Apply: hpatchz flat 27 MB; bspatch and `zstd -d --patch-from` 1.9 B/B (1.03 GB to apply a vault patch) - the client-side number.
 * **1 GB extrapolation** (linear from 537 MB / log-log fit): hdiffz -m-6 -p-8 86-130 s and 3.3 GB; hdiffz -s-64 155-200 s and < 0.5 GB; `zstd -19 -T0` ~70 s and 4.7 GB (+2 GB to apply); xdelta3 107-149 s and 9.4 GB; bsdiff 680-1,785 s (11-30 min) and 9 GB; full `zstd -19 -T0` ~43 s.
 * **Synthetic multi-package release (v1->v5):** 70 % of bytes differ; bsdiff 470 KB (7.8x v2c's 60 KB), hdiffz 573 KB, zstd 1.76 MB, xdelta3 2.72 MB = 5.6-32 % of the 8.43 MB full download; v4->v5 costs the same as v1->v5.
-* **netem, no loss (cubic):** a 60 KB GET on a fresh connection costs 4 RTT (0.40 s at 100 ms, 0.81 s at 200 ms); a 304 poll 2 RTT (0.20 / 0.40 / 0.60 s); 25.5 MB takes 3.2 s at 100 Mbit/100 ms (64 Mbit/s effective, slow start) and 12.3 s at 20 Mbit/200 ms (16.6 Mbit/s). 4/8-way ranged fetches gain only 10-20 %.
-* **netem with loss (cubic):** at 20 Mbit/200 ms/1 % a single connection gets 1.12-1.18 Mbit/s (5.7 % of the link, 1.6x the Mathis bound of 0.71 Mbit/s): 8.4 MB takes 57 s, 25.5 MB 180 s; 8 parallel ranged connections reach 8-9 Mbit/s (7-7.7x faster). At 5 Mbit/300 ms/2 %: 0.51 Mbit/s single (Mathis 0.33), 8.4 MB in 132 s, 8-way 27 s (4.9x); 25.5 MB single-connection was not measured (run killed, section 9; model: ~500 s, above the 600 s curl limit either way).
-* **Transfer model on the measured curves:** at 20 Mbit/200 ms a kube 1.36.4 update is full 20.6 s vs hdiffz -p-8 9.7 s (2.6 s transfer + 7 s encode) vs bsdiff 52.6 s; at 5 Mbit/300 ms/2 % full 317 s vs hdiffz 40 s vs bsdiff 77 s; vault stripped on the same link: full 1,119 s vs hdiffz -p-8 223 s. Parallel Range fetches shrink the full download to 61-215 s on that link but a 2-12 MB patch on one connection still wins.
-* **Resume:** without Range support a drop at 50 % re-downloads the whole object: +10-30 s (B) / +130-480 s (C) / +300-1,100 s (D) for a 19-68 MB full download vs +2.5-6.5 / 10-81 / 27-186 s for the hdiffz patch; with Range the extra cost is one fresh-connection overhead (0.4-1.6 s).
-* **A second HTTP request for the patch stops mattering (< 10 % overhead) above 13 MB (A), 6.4 MB (B), 0.8 MB (C), 0.5 MB (D)** and equals the patch's own transfer time only below 39-59 KB. Real patches are 2-12 MB: inlining the patch in the pointer object never pays; a keep-alive or HTTP/2 second request costs 1 RTT.
-* **Not measured:** the BBR pass and profile D's 25 MB fetch (the netem run was killed by the delta harness's `pkill -f bsdiff`, section 9); single-threaded zstd on the > 200 MB pairs (by design).
+* **Not measured:** single-threaded zstd on the > 200 MB pairs (by design).
 
 ## 0. Setup
 
 Same machine and methodology as `benchmark-local.md`: 24-core Linux 6.17 x86-64, 91 GB RAM,
-Go 1.26.4, zstd 1.5.7, xdelta3 3.2.0, bsdiff 4.3, HDiffPatch v5.1.3 (`bench/out/tools/HDiffPatch`),
-curl, iproute2/tc + `sch_netem`, `ethtool`. Wall time = `/usr/bin/time -f "%e %M"`, min of 3
+Go 1.26.4, zstd 1.5.7, xdelta3 3.2.0, bsdiff 4.3, HDiffPatch v5.1.3 (`bench/out/tools/HDiffPatch`).
+Wall time = `/usr/bin/time -f "%e %M"`, min of 3
 runs (1 run for inputs > 200 MB), RSS = max; every patch apply is `cmp`'d against NEW; every
 command has a timeout < 15 min (840 s). Scripts: `bench/scale/`; corpus: `bench/out/corpus/`
 (index in `bench/out/corpus/README.md`); logs: `bench/out/logs/07-*.log`; JSON:
-`bench/out/results/{scale-small,scale-big,churn_scale,netem}.json`.
+`bench/out/results/{scale-small,scale-big,churn_scale}.json`.
 
 ## 1. Corpus: adjacent official releases
 
@@ -116,7 +110,7 @@ afterwards; pairs > 200 MB: 1 run, serial, and only bsdiff / hdiffz (both modes)
 `zstd -19 -T0` / xdelta3 / full `zstd -19 -T0` as specified. The `-T0`/`-p-8` phase of the
 small suite overlapped the big suite, so those timings carry some contention noise (e.g.
 `zstd -19 -T0` 42 s vs 33 s single-threaded on one pair). All 99 completed cases applied
-byte-identically to NEW (`cmp`); 1 case timed out (vault unstripped bsdiff, see section 9).
+byte-identically to NEW (`cmp`); 1 case timed out (vault unstripped bsdiff, see section 7).
 
 ### Patch size (bytes)
 
@@ -135,7 +129,7 @@ byte-identically to NEW (`cmp`); 1 case timed out (vault unstripped bsdiff, see 
 | vault 2.0.3->2.0.4 stripped | 393,769,576 | 12,108,972 | **11,752,681** | 11,787,185 | 40,451,947 | 36,507,981 | 44,822,809 | 67,677,354 |
 | vault 2.0.3->2.0.4 | 537,754,780 | timeout | **91,132,633** | 91,148,620 | 119,765,773 | 115,826,792 | 126,749,351 | 149,329,950 |
 
-Patch as % of the full `zstd -19` download (the number that matters for the transfer model):
+Patch as % of the full `zstd -19` download:
 
 | pair | full B | bsdiff | hdiffz -m-6 | hdiffz -s-64 | zstd -19 | xdelta3 |
 |---|---:|---:|---:|---:|---:|---:|
@@ -242,7 +236,7 @@ struct field `person.Email` in `main.go`, a new package `internal/fourth` (uses
 `encoding/base64`, `hash/crc32`, `sort`; called from the new handler), a rewritten
 `util.Repeat` plus new `util.Slug`, a new `third.Tag` (pulls `fmt` into package third), and
 two string constants changed to different lengths (`greeting` +6 B, third's prefix +4 B).
-Built as F2 (`-trimpath -ldflags="-s -w"`, plus `-buildvcs=false` - see section 9) it is
+Built as F2 (`-trimpath -ldflags="-s -w"`, plus `-buildvcs=false` - see section 7) it is
 exactly 29,561,097 B like v1..v4.
 
 | pair | differing bytes | bsdiff | hdiffz -m-6 | hdiffz -s-64 | zstd -19 | xdelta3 | full zstd -19 |
@@ -259,159 +253,26 @@ history behind it is irrelevant, and the patch is 5.6-6.8 % of a full download r
 gap to the real releases is that v5 touches 4 tiny packages of the bench module while a
 real patch release also bumps vendored dependencies (kube 1.36.4: 320 files).
 
-## 6. Real WAN: netem measurements
+## 6. What changed vs the earlier assumptions
 
-`bench/scale/netem.py`: namespaces `bs-srv`/`bs-cli` on a veth pair, `netem delay RTT/2 rate R
-[loss p] limit max(1000, 2 BDP)` on **both** ends, TSO/GSO/GRO off, Go static server
-(`bench/scale/netsrv`, Range + ETag/If-Modified-Since) in the server namespace, curl in the
-client namespace, plain HTTP, cubic (host default). Objects: the 60,478 B bsdiff patch of
-v1->v2c, the 1,758,395 B `zstd -19 --patch-from` patch of v1->v5, the 8,432,157 B `zstd -19`
-full v2c binary, and the 25,547,524 B `zstd -19` terraform 1.15.9 binary. Single-connection
-GET and (objects >= 4 MB) 4-way / 8-way parallel `-r` range fetches (one process each,
-concatenation `cmp`'d), 3 runs each, median; a measurement over 150 s was not repeated
-(n=1). `--max-time 600`. Conditional GET = `curl -z <file>` -> 304.
-
-| profile | link | object | single s (n) | Mbit/s | 4-way s | 8-way s | 8-way Mbit/s | connect / TTFB / 304 ms |
-|---|---|---|---:|---:|---:|---:|---:|---|
-| A | 100 Mbit, 100 ms, 0 % | 60 KB | 0.40 (3) | 1.20 | | | | 100 / 201 / 200 |
-| A | | 1.76 MB | 1.13 (3) | 12.5 | | | | |
-| A | | 8.43 MB | 1.76 (3) | 38.3 | 1.43 | 1.26 | 53.7 | |
-| A | | 25.5 MB | 3.19 (3) | 64.0 | 2.97 | 2.87 | 71.2 | |
-| B | 20 Mbit, 200 ms, 0 % | 60 KB | 0.81 (3) | 0.60 | | | | 200 / 401 / 401 |
-| B | | 1.76 MB | 2.34 (3) | 6.0 | | | | |
-| B | | 8.43 MB | 5.14 (3) | 13.1 | 5.53 | 4.28 | 15.8 | |
-| B | | 25.5 MB | 12.29 (3) | 16.6 | 11.63 | 11.38 | 18.0 | |
-| C | 20 Mbit, 200 ms, 1 % each way | 60 KB | 1.01 (3) | 0.48 | | | | 200 / 401 / 401 |
-| C | | 1.76 MB | 8.06 (3) | 1.75 | | | | |
-| C | | 8.43 MB | 57.24 (3) | 1.18 | 14.83 | 7.41 | 9.10 | |
-| C | | 25.5 MB | 179.9 (1) | 1.14 | 47.90 | 25.64 | 7.97 | |
-| D | 5 Mbit, 300 ms, 2 % each way | 60 KB | 1.52 (3) | 0.32 | | | | 300 / 602 / 602 |
-| D | | 1.76 MB | 22.41 (3) | 0.63 | | | | |
-| D | | 8.43 MB | 131.5 (3) | 0.51 | 40.60 | 26.81 | 2.52 | |
-| D | | 25.5 MB | not measured | | not measured | not measured | | |
-
-* Latency structure (no loss): a fresh-connection GET of a small object costs 2 RTT before
-  the first byte (connect + request) and slow start adds ~1 RTT per doubling from 10 MSS:
-  60 KB = 4 RTT, 1.76 MB = 11 RTT at 100 ms (1.13 s), 25.5 MB reaches only 64 % of a 100 Mbit
-  link because slow start covers most of a 3 s transfer. The 304 poll is exactly 2 RTT on a
-  fresh connection (1 RTT on keep-alive); TLS 1.3 would add 1 RTT to each fresh connection.
-* Parallel range fetches without loss buy 10-20 % (they only shorten slow start; the link is
-  the bottleneck).
-* With loss, cubic's single-connection throughput collapses to 1.12-1.18 Mbit/s on the 20 Mbit
-  link and 0.49-0.51 Mbit/s on the 5 Mbit link, independent of object size beyond ~1 MB.
-  Mathis (`MSS/RTT * 1.22/sqrt(p)`, MSS 1448): 0.71 Mbit/s for C, 0.33 Mbit/s for D - the
-  measurements are 1.5-1.6x above the Reno bound (cubic's faster growth) but the model's
-  *shape* is right: rate ~ 1/(RTT sqrt p), not the link rate. N parallel connections scale
-  almost linearly (8-way: 7.0-7.7x on C, 4.9x on D, where 8 flows already need 2.5 of the
-  5 Mbit). Under these profiles the link is < 10 % utilised by one flow; anything the client
-  can do to fetch in parallel (Range on one object, or several objects) is worth 5-8x, and a
-  BBR sender would change this picture entirely (not measured, section 9).
-* A 25 MB full download on profile C takes 180 s single-connection (26 s 8-way); on D the
-  8.4 MB object alone took 132 s, so the 25 MB single fetch would have needed ~500 s (model).
-
-## 7. Updated transfer model
-
-`bench/scale/model_scale.py`: `transfer(bytes)` is a piecewise-linear interpolation through
-the **measured** single-connection medians of section 6 (0 B -> connect+TTFB, 60 KB, 1.76 MB,
-8.4 MB, 25.5 MB) per profile, extrapolated beyond the largest measured object at the tail
-rate (marked *; profile D's largest measured object is 8.4 MB, so its 25 MB+ cells are
-model). `total = transfer + encode + apply`; encode is the measured single-thread time
-except for `-p-8`/`-T0` rows. 8-way = parallel Range fetch of one object (measured 8-way
-curve; proportional for D). Full table (6 pairs x 6 methods): `bench/out/logs/07-model.log`.
-
-| profile | overhead s (fresh conn) | 304 s | t(64 KB) | t(1 MB) | t(8 MB) | t(30 MB) | t(100 MB) | tail Mbit/s | 8-way t(30 MB) |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| A 100 Mbit/100 ms/0 % | 0.20 | 0.20 | 0.4 | 0.8 | 1.8 | 3.7* | 9.8* | 95.5 | 3.4 |
-| B 20 Mbit/200 ms/0 % | 0.40 | 0.40 | 0.8 | 1.7 | 5.1 | 14.8* | 45.5* | 19.1 | 13.8 |
-| C 20 Mbit/200 ms/1 % | 0.40 | 0.40 | 1.0 | 5.1 | 56.9 | 222* | 748* | 1.12 | 31.9 |
-| D 5 Mbit/300 ms/2 % | 0.60 | 0.60 | 1.6 | 13.7 | 131 | 508* | 1,708* | 0.49 | 100* |
-
-Transfer / total seconds (total includes encode + apply); "8-way" = transfer only:
-
-| pair | method | patch B | enc s | A xfer / total | B xfer / total | C xfer / total | D xfer / total | D 8-way xfer |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| kube-apiserver 1.36.3->1.36.4 | full download (zstd -19 -T0) | 19,072,059 | 11.0 | 2.7 / 13.7 | 9.6 / 20.6 | 133 / 145 | 306* / 317* | 61* |
-| | hdiffz -m-6 -p-8 | 2,367,788 | 7.0 | 1.2 / 8.3 | 2.6 / 9.7 | 12.6 / 19.6 | 32.4 / 39.5 | 32.4 |
-| | bsdiff | 2,060,250 | 49.6 | 1.2 / 51.2 | 2.5 / 52.6 | 10.3 / 60.4 | 27.3 / 77.4 | 27.3 |
-| | zstd -19 -T0 --patch-from | 7,078,385 | 28.6 | 1.6 / 30.3 | 4.6 / 33.2 | 47.3 / 75.9 | 109 / 138 | 22.5 |
-| prometheus 3.13.1->3.13.2 stripped | full download | 23,808,116 | 12.4 | 3.0 / 15.5 | 11.6 / 24.0 | 167 / 180 | 383* / 395* | 76* |
-| | hdiffz -m-6 -p-8 | 2,730,887 | 7.5 | 1.2 / 8.8 | 2.8 / 10.3 | 15.2 / 22.8 | 38.3 / 45.9 | 38.3 |
-| | bsdiff | 2,714,204 | 54.5 | 1.2 / 56.2 | 2.7 / 57.7 | 15.1 / 70.1 | 38.0 / 93.0 | 38.0 |
-| prometheus 3.13.2->3.14.0 stripped (minor) | full download | 24,326,673 | 11.9 | 3.1 / 15.1 | 11.8 / 23.8 | 171 / 183 | 391* / 404* | 77* |
-| | hdiffz -m-6 -p-8 | 8,593,347 | 10.7 | 1.8 / 12.6 | 5.2 / 16.0 | 58.4 / 69.2 | 134* / 145* | 27.3 |
-| | bsdiff | 9,808,003 | 80.9 | 1.9 / 83.8 | 5.7 / 87.7 | 67.1 / 149 | 154* / 236* | 31.2 |
-| cockroach 26.2.4->26.2.5 stripped | full download | 58,377,272 | 17.6 | 5.9* / 23.7 | 26.0* / 43.8 | 415* / 433* | 948* / 966* | 186* |
-| | hdiffz -m-6 -p-8 | 9,457,347 | 26.0 | 1.8 / 28.0 | 5.6 / 31.7 | 64.6 / 90.7 | 148* / 174* | 30.1 |
-| | bsdiff | 8,588,309 | 150.2 | 1.8 / 153 | 5.2 / 157 | 58.4 / 210 | 134* / 286* | 27.3 |
-| vault 2.0.3->2.0.4 stripped | full download | 67,677,354 | 18.4 | 6.7* / 25.3 | 29.9* / 48.5 | 482* / 500* | 1,100* / 1,119* | 215* |
-| | hdiffz -m-6 -p-8 | 11,787,185 | 36.0 | 2.0 / 38.3 | 6.5 / 42.8 | 81.3 / 118 | 186* / 223* | 37.5 |
-| | bsdiff | 12,108,972 | 267.2 | 2.1 / 271 | 6.7 / 276 | 83.6 / 353 | 192* / 461* | 38.5 |
-| F2 v1->v5 | full download | 8,433,714 | 7.7 | 1.8 / 9.5 | 5.1 / 12.9 | 57.2 / 65.0 | 132 / 139 | 26.8 |
-| | hdiffz -m-6 -p-8 | 573,285 | 1.5 | 0.6 / 2.1 | 1.3 / 2.8 | 3.1 / 4.6 | 7.8 / 9.3 | 7.8 |
-| | bsdiff | 470,031 | 9.5 | 0.6 / 10.3 | 1.2 / 10.9 | 2.7 / 12.4 | 6.6 / 16.3 | 6.6 |
-| | zstd -19 -T0 --patch-from | 1,758,395 | 14.9 | 1.1 / 16.1 | 2.3 / 17.3 | 8.1 / 23.0 | 22.4 / 37.4 | 22.4 |
-
-* On A and B every option is encode-dominated: hdiffz -p-8 is the fastest end-to-end on
-  every pair (8-43 s) and the full download is second (14-49 s); bsdiff's 50-270 s encode
-  makes it the slowest even though its patch is the smallest.
-* On C and D the patch size dominates: the full download of a 19-68 MB object takes
-  133-482 s (C) and 306-1,100 s (D, model) on one connection; the 2-12 MB hdiffz patch
-  13-81 s / 32-186 s. An 8-way parallel full download (61-215 s on D) still loses to the
-  single-connection patch, and a parallel *patch* fetch (27-38 s on D for 2-12 MB) is the
-  best case overall.
-* Encode time can be amortised (one encode per release serves every client); the transfer
-  numbers cannot. With that lens, on D the ordering is bsdiff (smallest) ~ hdiffz > zstd
-  (2.5-3x more bytes) > full, and the 1 GB extrapolation says only hdiffz/zstd encoders stay
-  in the minutes range.
-
-Resume cost (connection drops at 50 % of the object; extra seconds vs. no drop):
-
-| object | no Range: bytes re-fetched | A / B / C / D extra s without Range | with Range (0 wasted bytes) |
-|---|---:|---|---|
-| kube full download 19.1 MB | 19,072,059 | 2.7 / 9.6 / 133 / 306 | 1.1 / 1.6 / ~0 / ~0 (+1 fresh-connection overhead 0.2-0.6 s) |
-| kube hdiffz patch 2.37 MB | 2,367,788 | 1.2 / 2.6 / 12.6 / 32.4 | 0.6 / 1.1 / ~0 / ~0 |
-| vault stripped full download 67.7 MB | 67,677,354 | 6.7 / 29.9 / 482 / 1,100 | 1.1 / 1.6 / ~0 / ~0 |
-| vault stripped hdiffz patch 11.8 MB | 11,787,185 | 2.0 / 6.5 / 81 / 186 | 1.0 / 1.6 / ~0 / ~0 |
-
-Without Range the resume cost is a whole second transfer; with Range it is the
-fresh-connection overhead plus a second slow start (~1-1.6 s on A/B; on the lossy profiles
-the stream never leaves the loss-limited regime, so restarting costs nothing measurable).
-
-When does a second HTTP request (patch as its own object instead of inline in the pointer)
-stop mattering? Extra request cost on a fresh connection = measured connect+TTFB:
-
-| profile | extra request s (plain HTTP) | + TLS 1.3 | patch size where transfer = 1x the extra request | where the extra request is < 10 % | 304 poll s |
-|---|---:|---:|---:|---:|---:|
-| A | 0.20 | 0.30 | 59 KB | 13.1 MB | 0.20 |
-| B | 0.40 | 0.60 | 58 KB | 6.4 MB | 0.40 |
-| C | 0.40 | 0.60 | 39 KB | 0.8 MB | 0.40 |
-| D | 0.60 | 0.90 | 39 KB | 0.5 MB | 0.60 |
-
-With keep-alive/HTTP/2 the extra request is 1 RTT (0.1-0.3 s) instead. Real-release patches
-(2-12 MB) are 40-200x above the 1x threshold on every profile: a separate patch object costs
-nothing noticeable; only the old sub-100 KB one-line patches would have benefited from
-inlining.
-
-## 8. What changed vs the earlier assumptions
-
-| assumption in `benchmark-local.md` | what the corpus / netem show |
+| assumption in `benchmark-local.md` | what the corpus shows |
 |---|---|
 | A release changes ~13 % of the bytes (one line, v2c); CDC keeps 22 % of the file in >= 64 KiB runs | 79-87 % of bytes move; 0-2 % survives in >= 64 KiB runs; even the smallest real release (4 Go files) behaves like this |
 | Patches are 60-75 KB = 0.7 % of a full download (140x saving) | 2-12 MB = 11-21 % (5-9x) for patch releases, 35-40 % for a minor release; the synthetic v5 is 5.6-6.8 % |
 | Encode is 1-6 s; bsdiff is viable | At 100-140 MB bsdiff takes 50-190 s and 0.8-1.2 GB; at 393 MB 267 s / 3.4 GB; at 537 MB it exceeds 14 min. hdiffz -p-8 is 7-46 s across the range |
 | zstd --patch-from is a reasonable pure-Go-friendly fallback (2.8x bsdiff) | Still 2.3-3.4x hdiffz/bsdiff, but now that means 5-25 MB more per update; it also needs OLD resident on the client (1.9 B/B) |
 | Unstripped binaries are a corner case | Three of five vendors ship unstripped; their deltas are 56-71 % of a full download. Stripping must be part of the pipeline |
-| Transfer = bytes/bandwidth + RTT; 100 Mbit/100 ms and 20 Mbit/200 ms without loss | A fresh-connection small GET is 4 RTT and a 304 is 2 RTT; with 1-2 % loss a cubic connection gets 1.1 / 0.5 Mbit/s regardless of the 20 / 5 Mbit link (1.5-1.6x the Mathis bound), and 8 parallel ranges recover 5-8x |
-| The patch can be inlined in the pointer object to save a round trip | The second request is < 10 % overhead above 0.5-13 MB; real patches are 2-12 MB, so it does not matter |
 | Apply memory is negligible | hpatchz: 27 MB flat; bspatch / zstd -d --patch-from: 1.9x OLD (0.8-1 GB for vault/cockroach) |
 
-## 9. Failures, skips and caveats
+## 7. Failures, skips and caveats
 
 * **vault 2.0.3->2.0.4 unstripped bsdiff (537 MB) timed out at 840 s** (it needed ~9 GB and,
   extrapolating cockroach's 447 s at 326 MB with exponent 1.43, ~900 s). Not retried; the
   stripped pair (393 MB) completed in 267 s.
 * Single-threaded `zstd -19 --patch-from` and `zstd -19` were not run on the > 200 MB pairs
   (only `-T0`), as specified; their single-thread rate is ~linear at 3-4.6 MB/s from 88 MB up.
+* The delta harness once killed a co-running job by `pkill -f bsdiff` on a timeout; it now
+  kills the timed-out process group instead (`os.killpg`).
 * The `v1..v4` bench binaries had been built before `bench/` was under git; `go build` now
   stamps `vcs.revision/vcs.time/vcs.modified` into `.go.buildinfo` (+128 B in `.rodata`),
   which shifted everything and broke bit-reproducibility against the stored files.
@@ -423,20 +284,8 @@ inlining.
   diff (marked). Nothing was cloned.
 * `-T0`/`-p-8` timings from the small suite overlapped the big suite's single-threaded runs
   (up to ~2 cores busy); treat them as +-20 %.
-* **The netem run was killed at 1,541 s (profile D, before the 25 MB object) by the delta
-  harness**: on the vault bsdiff timeout it ran `pkill -f bsdiff`, which also matched
-  netem.py's own command line (`--obj bsdiff-60k=...`). Profile D's 60 KB / 1.76 MB / 8.4 MB
-  results were recovered from the log (`from_log` records in `netem.json`); profile D's
-  25 MB object and the whole **BBR pass were not measured**. The harness now kills the timed-out
-  process group instead (`os.killpg`). Namespaces were removed manually afterwards.
-* netem: the same `loss p%` is applied on both veth ends, so ACKs are lost with the same
-  probability as data. Queue `limit` = max(1000, 2 x BDP) packets. TSO/GSO/GRO were
-  disabled on both ends so netem sees real 1500-B packets (with offloads on, one "loss"
-  drops a 64 KB super-packet). Plain HTTP; TLS 1.3 would add 1 RTT to every fresh
-  connection (TLS 1.2: 2 RTT). Client and server are on the same kernel, so this measures
-  TCP congestion-control behaviour, not a real Internet path.
 
-## 10. Naive comparisons on the Go 1.27 pairs
+## 8. Naive comparisons on the Go 1.27 pairs
 
 Whole-file compression, a content-defined-chunk store and the exact-match delta
 coders, measured on the two Go 1.27 pairs the Go-aware codec is headlined on
@@ -482,9 +331,6 @@ python3 bench/scale/churn_scale.py             # section 2 (results/churn_scale.
 python3 bench/scale/delta_scale.py --small-only --workers 4 --out scale-small.json   # ~40 min
 python3 bench/scale/delta_scale.py --big-only --out scale-big.json                   # ~50 min
 python3 bench/scale/render_scale.py            # sections 3-4 tables (07-render-scale.log)
-python3 bench/scale/netem.py --obj bsdiff-60k=... --obj patch-1m=... --obj full-8m=... --obj blob-25m=... --cc cubic,bbr   # ~70 min, needs sudo
-python3 bench/scale/model_scale.py [--cc bbr]  # section 7
 ```
 
-`bench/scale/netsrv/` is the Range/304-capable Go static server used inside the server
-namespace (`bench/out/tools/netsrv`). Logs: `bench/out/logs/07-{fetch,corpus-info,gh-compare,build-v5,churn,delta-small,delta-big,render-scale,netem,model}.log`.
+Logs: `bench/out/logs/07-{fetch,corpus-info,gh-compare,build-v5,churn,delta-small,delta-big,render-scale}.log`.

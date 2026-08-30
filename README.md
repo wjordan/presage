@@ -117,6 +117,7 @@ benchmarks isolate one model's contribution.
 |---|---|
 | [`docs/general/SPEC.md`](docs/general/SPEC.md) | the design: core, modules, plan language, residual coding, selection, verification, ranked domains |
 | [`docs/general/presage-core.md`](docs/general/presage-core.md) | implementation spec for what is built |
+| [`docs/go-module-design.md`](docs/go-module-design.md) | the Go module's design: prediction pipeline, correction format, container, the supported Go release |
 | [`docs/general/go-module-results.md`](docs/general/go-module-results.md) | the Go module measured against Zucchini, bsdiff and the prior Go-aware codec |
 | [`docs/general/baselines.md`](docs/general/baselines.md) | the pairs, tools and flags behind the table above |
 | [`docs/general/research/`](docs/general/research/) | the measurements the design rests on, including the Chrome ELF and Firefox MAR studies |

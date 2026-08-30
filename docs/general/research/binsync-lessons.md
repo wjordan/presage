@@ -1,6 +1,6 @@
 # What go-binsync taught — the insights the general codec must keep
 
-Distilled from `docs/DESIGN.md`, `docs/research/go-aware-transform.md` and the
+Distilled from `docs/go-module-design.md`, `docs/research/go-aware-transform.md` and the
 `delta` package (5,301 lines: ≈ 1,200 generic — container, correction,
 exact-match engine, plain codec — and ≈ 4,100 Go/x86-specific). Each item
 below is a measured fact from that work, followed by what it implies for a

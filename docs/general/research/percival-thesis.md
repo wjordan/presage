@@ -46,7 +46,7 @@ one-sentence statement of the project.
    Cost O(m log n + n), memory O(n^{1/2+ε}). *This alone* gives patches only
    8 % larger than full bsdiff 6 on the security corpus (Table 2.2:
    1.27 % vs 1.38 %) — with sub-linear memory. That is a result binsync's plain
-   codec (§3.8 of DESIGN.md, hash-indexed) should be measured against.
+   codec (§2.8 of go-module-design.md, hash-indexed) should be measured against.
 2. **Local alignment** (§2.5): suffix-sort S#T#, LCP, longest match per
    position in T; seeds extended while ≥ 50 % match. Needed for small matched
    regions; dominated by suffix sort time and O(√n) more memory than block
@@ -137,7 +137,7 @@ needed. Two concrete consequences:
    blobs), the ch. 1 aligner produces a piecewise-constant shift map from a
    *sub-linear* index — the same object binsync's data maps are (per-16-byte
    block shift runs), obtained without metadata and without a suffix array.
-   Memory O(n^{1/2+ε}) is the property binsync's decoder (§11.3 of DESIGN.md,
+   Memory O(n^{1/2+ε}) is the property binsync's decoder (§5.3 of go-module-design.md,
    7.6× the input) lacks.
 
 ## Three ideas to lift directly
@@ -150,7 +150,7 @@ needed. Two concrete consequences:
    multiprecision difference would be one or two small bytes instead of four.
 2. **Separate *where* from *how much*** (§2.7): a positions stream and a values
    stream with different coders. binsync already splits ctrl/literal streams
-   (DESIGN.md §3.4) for the same reason.
+   (go-module-design.md §2.4) for the same reason.
 3. **Snap boundaries to power-of-two alignment on ties** (§2.4): a cheap prior
    that binsync's function-level alignment gets for free (32 B) and a
    metadata-free aligner must reconstruct.

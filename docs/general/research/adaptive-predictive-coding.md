@@ -484,7 +484,7 @@ Constraints these systems impose, and why:
    system stores the chain and the decoder undoes it back to front. Nobody
    infers the chain.
 5. **Length-exactness or explicit lengths at every stage.** Positional
-   correction (go-binsync §3.3–3.4 of DESIGN.md) depends on the prediction
+   correction (§2.3–2.4 of go-module-design.md) depends on the prediction
    having the exact output length; xz block headers carry compressed and
    uncompressed sizes; RAR filter records carry `BlockLength`. A module
    whose output length is not known before it runs breaks positional
@@ -780,7 +780,7 @@ decoder. Constraints, each with the precedent that motivates it:
    cycles; undeclared reads make it nondeterministic across
    implementations.
 6. **Determinism gate**: the encoder runs the decoder's exact reconstruction
-   and hashes the prediction (go-binsync already does this, DESIGN.md §3.2);
+   and hashes the prediction (go-binsync already does this, go-module-design.md §2.2);
    the hash goes in the stream. This is cheaper than proving every module
    deterministic and catches the Go-version-drift class of bug.
 7. **Canonical serialisation**: one encoding for each selector value, no

@@ -6,7 +6,7 @@ release 3.13.1→3.13.2 (93.7 MB, patch 93,965 B), the minor release
 `bench/testsrv` pairs v1→v2c (1,264 B) and v1→v4 (1,785 B). All four are Go
 1.27 linux/amd64.
 
-The codec is `delta/` at the revision under test; `docs/DESIGN.md` §3.2–3.4
+The codec is `delta/` at the revision under test; `docs/go-module-design.md` §2.2–2.4
 describes it. `bench/goattr` is report-only: it reuses `delta.Predict`,
 `delta.EncodeCorrection` and the shipped compressor, so every price below is
 a price the patch really pays. No patch byte changes.
@@ -435,7 +435,7 @@ and 765 wrong bytes, and would gain tens of bytes.
 
 Every byte of the residual is inside a `_func` record. The regenerated functab
 index, the regenerated findfunctab and all five variable-length blobs are
-byte-exact on both pairs — the stage-1a/1b split of `docs/DESIGN.md` §3.4 and
+byte-exact on both pairs — the stage-1a/1b split of `docs/go-module-design.md` §2.4 and
 the `findfunctab` regeneration are doing exactly what they claim.
 
 By field, with the delta the codec would have had to add (`new − predicted`).
@@ -744,7 +744,7 @@ patch pair, against the +15,511 and +301 those slots are worth: **+14,391 net
 field, not a prediction, so it belongs with `RecShapes` rather than in `synth`,
 and it is the only version of this idea the measurements support.
 
-**Built, with one correction (docs/DESIGN.md 3.2.2).** The mask alone is not
+**Built, with one correction (docs/go-module-design.md 2.2.2).** The mask alone is not
 enough: this probe's cursor reads the *true* offsets of the matched
 functions' slots and a decoder has only its own re-targeted ones. Driving the
 cursor from those loses it — one mispredicted offset in 880,000 poisons every
@@ -767,7 +767,7 @@ tables are misaligned rather than mispredicted: `delta/typedesc.go`'s walker
 copies a matched descriptor's uncommon-type method array *positionally*, entry
 k of the old array to entry k of the new one, so one method the release
 inserted moves every later entry — the `.text` failure the segment map of
-DESIGN §3.2.1 just fixed, in another table. On the minor pair 3,303 of the
+`go-module-design.md` §2.2.1 just fixed, in another table. On the minor pair 3,303 of the
 3,800 wrong method `Name` fields sit at a shifted index of the new table, and
 of the 651 descriptors holding a wrong method field, 74 have entries inserted
 and 100 have entries deleted.

@@ -4,7 +4,7 @@ Research notes for the generalised predictive codec (2026-08-27). Question:
 is "container images / package updates / archives" a domain where a
 structure-aware *predictor* beats general-purpose compression and delta by a
 large margin, the way the Go-aware transform does for Go binaries
-(`docs/DESIGN.md` §1: 24–68× over bsdiff)?
+(`docs/go-module-design.md` §1: 24–68× over bsdiff)?
 
 Sourcing rule: every number carries an inline URL to a primary source unless
 marked *(secondary)* or *(unverified)*. Where our own earlier documents already
@@ -176,7 +176,7 @@ matter here:
 
 None of these is a *delta between two versions*. Their unit of reuse is the
 file (eStargz) or the ~64 KiB chunk (zstd:chunked); a rebuilt Go binary,
-which changes 13–70 % of its bytes in ~2 M short runs (`DESIGN.md` §1),
+which changes 13–70 % of its bytes in ~2 M short runs (`go-module-design.md` §1),
 matches zero chunks.
 
 ### 1.4 The layer-invalidation problem
@@ -855,7 +855,7 @@ files, rebuilt with BuildKit.
 | Tool | Patch (est.) | Basis |
 |---|---|---|
 | Registry pull (layer invalidated) | 100 % of the app layer, ~10–30 MB gz | layer digest changes |
-| zstd:chunked / eStargz dedup | ~90–100 % of the layer | no 64 KiB chunk survives a Go rebuild (`DESIGN.md` §1) |
+| zstd:chunked / eStargz dedup | ~90–100 % of the layer | no 64 KiB chunk survives a Go rebuild (`go-module-design.md` §1) |
 | Balena librsync / RAUC blocks | ~50–100 % of the binary | block matching on shifted code |
 | bsdiff / zstd --patch-from on the *uncompressed* layer | 2–10 MB | `benchmark-scale.md`: kube-apiserver 2.06 MB, terraform 5.4 MB |
 | bsdiff on the *compressed* layer blob | ≈ full | deflate scrambles; this is what naive "delta the OCI blob" gives |
@@ -878,6 +878,6 @@ promise that.
 
 ## References
 
-Primary sources are linked inline. Cross-references: `docs/DESIGN.md` §1,
+Primary sources are linked inline. Cross-references: `docs/go-module-design.md` §1,
 `docs/research/update-systems.md` §2.4–2.12, `docs/research/binary-delta.md`
 §2, `docs/research/benchmark-scale.md`, `docs/general/research/percival-thesis.md`.
