@@ -168,47 +168,25 @@ func References(code []byte, pc uint64) []Reference {
 }
 
 // WalkReferences visits PC-relative operands without retaining a potentially
-// large reference table.
-//
-// The x86asm decoder can panic on a truncated or invalid sequence (a
-// structural boundary may legally leave one), which is correction data, not a
-// reason to fail. Rather than pay a deferred recover on every instruction --
-// tens of millions per sweep of a large .text -- one recover covers a whole
-// run and resumes one byte past the offending position, which is what the
-// per-instruction err path does too. Panics are rare, so the amortised cost is
-// a single defer per body plus one per actual panic.
+// large reference table. Undecodable bytes are stepped over one at a time;
+// step never panics, so a truncated or invalid sequence at a structural
+// boundary is correction data, not a failure.
 func WalkReferences(code []byte, pc uint64, visit func(Reference)) {
 	for i := 0; i < len(code); {
-		i = walkFrom(code, pc, i, visit)
-	}
-}
-
-// walkFrom walks from start to the end of code, or returns the byte after a
-// decoder panic so WalkReferences can resume. The deferred recover reads the
-// live loop index, so next names the position that failed plus one.
-func walkFrom(code []byte, pc uint64, start int, visit func(Reference)) (next int) {
-	i := start
-	defer func() {
-		if recover() != nil {
-			next = i + 1
-		}
-	}()
-	for i < len(code) {
-		inst, err := x86asm.Decode(code[i:], 64)
-		if err != nil || inst.Len == 0 {
+		length, off, n, ok := step(code[i:])
+		if !ok {
 			i++
 			continue
 		}
-		if off, n := pcrelField(inst, code[i:]); n == 1 || n == 2 || n == 4 {
+		if n == 1 || n == 2 || n == 4 {
 			d := disp(code[i+off : i+off+n])
 			visit(Reference{
-				Start: i, Off: i + off, N: n, Next: i + inst.Len,
-				Target: uint64(int64(pc) + int64(i) + int64(inst.Len) + d),
+				Start: i, Off: i + off, N: n, Next: i + length,
+				Target: uint64(int64(pc) + int64(i) + int64(length) + d),
 			})
 		}
-		i += inst.Len
+		i += length
 	}
-	return len(code)
 }
 
 // Body is one code region to walk: its bytes and the pc its first byte lives
@@ -266,20 +244,20 @@ func Relocate(code, out []byte, srcPC, dstPC uint64, lookup func(target uint64) 
 	n := copy(out, code)
 	code = code[:n]
 	for i := 0; i < len(code); {
-		inst, err := decode(code[i:])
-		if err != nil || inst.Len == 0 {
+		length, off, n, ok := step(code[i:])
+		if !ok {
 			st.Fails++
 			i++
 			continue
 		}
 		st.Insns++
-		if off, n := pcrelField(inst, code[i:]); n > 0 {
-			relocOne(code, out, i, off, n, inst.Len, srcPC, dstPC, lookup, st)
+		if n > 0 {
+			relocOne(code, out, i, off, n, length, srcPC, dstPC, lookup, st)
 			if refs != nil {
 				*refs = append(*refs, Ref{i + off, n})
 			}
 		}
-		i += inst.Len
+		i += length
 	}
 }
 
@@ -330,20 +308,20 @@ func ContentHash(code []byte) uint64 {
 	h.Write(buf[:])
 	var zero [8]byte
 	for i := 0; i < len(code); {
-		inst, err := decode(code[i:])
-		if err != nil || inst.Len == 0 {
+		length, off, n, ok := step(code[i:])
+		if !ok {
 			h.Write(code[i : i+1])
 			i++
 			continue
 		}
-		if off, n := pcrelField(inst, code[i:]); n > 0 {
+		if n > 0 {
 			h.Write(code[i : i+off])
 			h.Write(zero[:n])
-			h.Write(code[i+off+n : i+inst.Len])
+			h.Write(code[i+off+n : i+length])
 		} else {
-			h.Write(code[i:min(i+inst.Len, len(code))])
+			h.Write(code[i:min(i+length, len(code))])
 		}
-		i += inst.Len
+		i += length
 	}
 	return h.Sum64()
 }
@@ -356,16 +334,16 @@ func Equal(a, b []byte) bool {
 		return false
 	}
 	for k := 0; k < len(a); {
-		inst, err := decode(a[k:])
-		if err != nil || inst.Len == 0 {
+		length, off, n, ok := step(a[k:])
+		if !ok {
 			if a[k] != b[k] {
 				return false
 			}
 			k++
 			continue
 		}
-		end := min(k+inst.Len, len(a))
-		if off, n := pcrelField(inst, a[k:]); n > 0 {
+		end := min(k+length, len(a))
+		if n > 0 {
 			lo, hi := k+off, k+off+n
 			if string(a[k:lo]) != string(b[k:lo]) || string(a[hi:end]) != string(b[hi:end]) {
 				return false
@@ -390,15 +368,15 @@ func Canonical(code []byte) (canon []byte, bounds []int32) {
 	bounds = make([]int32, 0, len(code)/4+2)
 	for i := 0; i < len(canon); {
 		bounds = append(bounds, int32(i))
-		inst, err := decode(canon[i:])
-		if err != nil || inst.Len == 0 {
+		length, off, n, ok := step(canon[i:])
+		if !ok {
 			i++
 			continue
 		}
-		if off, n := pcrelField(inst, canon[i:]); n > 0 {
+		if n > 0 {
 			clear(canon[i+off : i+off+n])
 		}
-		i += inst.Len
+		i += length
 	}
 	return canon, append(bounds, int32(len(code)))
 }
