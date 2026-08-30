@@ -9,7 +9,7 @@ import (
 	"github.com/wjordan/presage/delta/x86"
 )
 
-// The segment map for resized functions (docs/DESIGN.md 3.2.1).
+// The segment map for resized functions (docs/go-module-design.md 2.2.1).
 //
 // A matched function is copied positionally -- byte k of the old body lands
 // at byte k of the new one -- and relocated as if it had moved by one
@@ -446,7 +446,7 @@ func segsByIdx(maps []segMap, old, new *gobin.Bin, m *match) (all, local map[int
 // offset into its new one. Transmitted pieces take precedence, which makes
 // this the inverse of the covering list predictText lays down; case 3 is an
 // old byte that was deleted or displaced, where every answer is a guess and
-// only determinism matters (docs/DESIGN.md 3.2.1).
+// only determinism matters (docs/go-module-design.md 2.2.1).
 func mapSegOff(segs []segPiece, o, newSize uint64) uint64 {
 	k := sort.Search(len(segs), func(k int) bool {
 		return uint64(segs[k].Old)+uint64(segs[k].N) > o

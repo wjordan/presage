@@ -28,7 +28,7 @@ import (
 // from the size of the file to nothing.
 
 // MaxPlainSize is the largest input the plain codec accepts. Above it,
-// publish uploads the blob only and says so.
+// Encode declines rather than degrade silently.
 const MaxPlainSize = 256 << 20
 
 // plainProbe is how hard the anchor search looks; it stands in for the

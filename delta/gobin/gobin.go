@@ -9,7 +9,7 @@
 // MapType by 24 bytes and made go:func.* alignment data-dependent. Supporting
 // a matrix of those is how a codec becomes untestable; supporting one, gated
 // by a byte-exact self-prediction check, is how it stays reviewable
-// (docs/DESIGN.md 3.6, D14). Anything else takes the plain codec.
+// (docs/go-module-design.md 2.6, D14). Anything else takes the plain codec.
 package gobin
 
 import (

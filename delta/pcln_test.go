@@ -138,7 +138,7 @@ func TestNameKey(t *testing.T) {
 	}
 }
 
-// The pctab replay (docs/DESIGN.md 3.2.2). The fixture is a pctab of nine
+// The pctab replay (docs/go-module-design.md 2.2.2). The fixture is a pctab of nine
 // self-delimiting tables and four functions: one matched, one the release
 // added, one matched but reshaped to two more pcdata slots, one matched. The
 // invented slots between them are a fresh allocation, a backward dedup and a

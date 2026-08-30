@@ -127,7 +127,7 @@ func newContentPair(n int) (pred, want []byte) {
 
 // TestCorrectionShapes round-trips both shapes of the transform-2 stream and
 // checks that the encoder picks the one that is actually smaller. Which one
-// that is is a property of the release, not of the codec (docs/DESIGN.md
+// that is is a property of the release, not of the codec (docs/go-module-design.md
 // 3.4): a near-miss residual wants the merged, xor-ed shape and a residual
 // of new content wants the shipped one.
 func TestCorrectionShapes(t *testing.T) {

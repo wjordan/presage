@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Reproduce the whole local benchmark. Usage: run.sh [step...]  (steps: tools build diff delta cdc probes model; default all)
+# Reproduce the whole local benchmark. Usage: run.sh [step...]  (steps: tools build diff delta cdc probes tables; default all)
 # Outputs: bench/out/bin (binaries), bench/out/patches, bench/out/results/*.json, bench/out/logs/*.log
 set -uo pipefail
 BENCH="$(cd "$(dirname "$0")" && pwd)"; cd "$BENCH"
 OUT=$BENCH/out; L=$OUT/logs; mkdir -p "$L" "$OUT/tools"
 export PATH=/usr/local/go/bin:$HOME/go/bin:$PATH
-STEPS=("$@"); [ ${#STEPS[@]} -eq 0 ] && STEPS=(tools build diff delta cdc probes model)
+STEPS=("$@"); [ ${#STEPS[@]} -eq 0 ] && STEPS=(tools build diff delta cdc probes tables)
 has() { for s in "${STEPS[@]}"; do [ "$s" = "$1" ] && return 0; done; return 1; }
 
 if has tools; then
@@ -33,4 +33,4 @@ if has cdc; then
   wait
 fi
 if has probes; then timeout 960 ./goprobe.sh 2>&1 | tee "$L/05-goprobe.log"; fi
-if has model; then python3 render_delta.py > "$OUT/results/delta_tables.md"; python3 render_cdc.py > "$OUT/results/cdc_tables.md"; python3 model.py 2>&1 | tee "$L/06-model.log"; fi
+if has tables; then python3 render_delta.py > "$OUT/results/delta_tables.md"; python3 render_cdc.py > "$OUT/results/cdc_tables.md"; fi

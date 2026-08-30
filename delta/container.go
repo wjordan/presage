@@ -13,8 +13,7 @@ import (
 const Magic = "BSZ1"
 
 // Transforms. The number is written into the patch; a decoder that meets one
-// it does not implement returns ErrUnsupportedTransform, and the target
-// falls back to the blob.
+// it does not implement returns ErrUnsupportedTransform rather than guess.
 const (
 	// TransformPlain is the general-purpose codec: a bsdiff-class delta over
 	// the whole file. It works on anything.
@@ -25,9 +24,9 @@ const (
 	TransformGoAMD64 = 1
 	// TransformGoSegmap is the same codec with a sub-function segment map in
 	// the layout, so that a matched function whose size changed is laid down
-	// and relocated piece by piece (docs/DESIGN.md 3.2.1). The layout is a
+	// and relocated piece by piece (docs/go-module-design.md 2.2.1). The layout is a
 	// new shape, so a decoder that implements only transform 1 is served a
-	// transform-1 patch or falls back to the blob (3.6).
+	// transform-1 patch or refuses this one (docs/go-module-design.md 2.6).
 	TransformGoSegmap = 2
 	// TransformGoFar lets a segment-map piece name old code outside the
 	// function's own old body (segfar.go), so that the code an edit added
@@ -75,7 +74,8 @@ const knownFlags = FlagDebugZ
 
 // ErrUnsupportedTransform means the patch was produced by a newer codec than
 // this build implements — a transform number above maxTransform, or a
-// header flag it does not know. The caller should fetch the blob instead.
+// header flag it does not know. The caller should obtain the file some other
+// way.
 type ErrUnsupportedTransform struct {
 	Transform byte
 	Flags     byte // the unknown flag bits, zero when the transform is the problem

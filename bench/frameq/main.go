@@ -1,7 +1,7 @@
-// blobq: blob frame codec measurement — brotli quality 10 vs 11 on 8 MiB
+// frameq: frame codec measurement — brotli quality 10 vs 11 on 8 MiB
 // frames of a whole binary, encoding 8-way parallel, decoding sequentially.
 //
-//	blobq <binary>
+//	frameq <binary>
 package main
 
 import (

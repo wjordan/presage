@@ -87,8 +87,8 @@ type Header struct {
 }
 
 // ErrUnsupported means the patch needs something this build lacks: a newer
-// container version, a header flag, or a module. The caller should fetch
-// the blob instead.
+// container version, a header flag, or a module. The caller should obtain
+// the file some other way.
 type ErrUnsupported struct{ What string }
 
 func (e *ErrUnsupported) Error() string {

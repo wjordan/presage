@@ -241,7 +241,7 @@ func TestSegmapCheck(t *testing.T) {
 	}
 }
 
-// TestMapperSegLookup walks the three-step lookup of docs/DESIGN.md 3.2.1
+// TestMapperSegLookup walks the three-step lookup of docs/go-module-design.md 2.2.1
 // through the mapper itself: a transmitted piece, the implicit shift-0
 // piece, and the fallback for an old byte no piece places.
 func TestMapperSegLookup(t *testing.T) {

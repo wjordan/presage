@@ -17,7 +17,7 @@ type Options struct {
 	// Registry holds the modules the encoder may choose from. Nil means
 	// the core modules only.
 	Registry *Registry
-	// Modules, if set, names the module ids the deployed decoder has; a
+	// Modules, if set, names the module ids the decoder has; a
 	// region whose module is not among them is coded with the core lz
 	// module instead (lowering, SPEC §5.4). Nil means no restriction.
 	Modules []byte
@@ -53,7 +53,7 @@ type ErrPredictionDiverged struct {
 }
 
 func (e *ErrPredictionDiverged) Error() string {
-	return fmt.Sprintf("presage: region %d (%s): the prediction differs from the encoder's; fetch the blob", e.Region, e.Module)
+	return fmt.Sprintf("presage: region %d (%s): the prediction differs from the encoder's", e.Region, e.Module)
 }
 
 func (o Options) registry() *Registry {

@@ -164,7 +164,7 @@ func predictPcln(old, new *gobin.Bin, m *match, l *layout, bp *blobPred) []byte 
 	return out
 }
 
-// The pctab replay (docs/DESIGN.md 3.2.2).
+// The pctab replay (docs/go-module-design.md 2.2.2).
 //
 // cmd/link/internal/ld.generatePctab lays pctab out as the distinct pc-value
 // tables in allocation order, starting at offset 1: per function pcsp,

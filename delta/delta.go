@@ -1,11 +1,11 @@
-// Package delta is go-binsync's patch codec.
+// Package delta is the Go linux/amd64 predictor, which presage drives as its
+// `go` module (docs/go-module-design.md).
 //
 // A patch turns the bytes of one binary into the bytes of another. Two
-// transforms share one container (docs/DESIGN.md 3.5): a Go-aware
-// predict-then-correct codec for the binaries go-binsync exists for, and a
-// bsdiff-class codec for everything else. Both are verified by hash before
-// their output is used, so a mispredicting encoder costs bytes, never
-// correctness.
+// transforms share one container (docs/go-module-design.md 2.5): a Go-aware
+// predict-then-correct codec for stripped Go binaries, and a bsdiff-class
+// codec for everything else. Both are verified by hash before their output
+// is used, so a mispredicting encoder costs bytes, never correctness.
 package delta
 
 import (
@@ -14,16 +14,16 @@ import (
 	"runtime"
 )
 
-// Options controls Encode. The zero value is the right choice for a
-// publisher with no old decoders in the fleet.
+// Options controls Encode. The zero value encodes for a decoder of this
+// same build.
 type Options struct {
-	// MaxTransform is the newest transform the *deployed decoder* is known
-	// to support. The publisher reads it from the old binary's build info
-	// (docs/DESIGN.md 3.6). Zero means "no limit": use the best available.
+	// MaxTransform caps the wire format at what a decoder older than this
+	// build can read (docs/go-module-design.md 2.6). Zero means "no limit":
+	// use the best available.
 	MaxTransform int
 
 	// PlainOnly skips the Go-aware codec even for a supported binary. It
-	// exists for the self-check corpus and for `go-binsync diff --plain`.
+	// exists for the self-check corpus and for a plain-only encode.
 	PlainOnly bool
 
 	// Workers bounds the encoder's parallelism. Zero means GOMAXPROCS.
@@ -35,7 +35,7 @@ type Options struct {
 }
 
 // Stats is an accounting of one encode, for the benchmark harness and for
-// `go-binsync diff -v`.
+// `presage diff -v`.
 //
 // The per-stream sizes are the streams as the codec produced them, before
 // compression: the body is compressed as one piece, because the streams
@@ -74,9 +74,9 @@ func (o Options) transformCap() int {
 
 // Encode produces a patch turning old into new.
 //
-// It tries the Go-aware transform when both binaries qualify and the
-// deployed decoder can read it, and falls back to the plain codec — never
-// to an error — when they do not. The returned patch always reproduces new
+// It tries the Go-aware transform when both binaries qualify and
+// MaxTransform allows it, and falls back to the plain codec — never to an
+// error — when they do not. The returned patch always reproduces new
 // exactly; Apply verifies that before it hands the bytes over.
 func Encode(old, new []byte, o Options) ([]byte, error) {
 	h := &Header{
@@ -192,9 +192,9 @@ func Apply(old, patch []byte, w io.Writer) error {
 	return err
 }
 
-// unsupportedError marks an input the Go-aware codec declines. It is never
-// a failure: the encoder falls back to the plain codec and the decoder to
-// the blob.
+// unsupportedError marks an input the Go-aware codec declines. It is never a
+// failure: the encoder falls back to the plain codec, and the decoder reports
+// a patch it cannot read as unsupported.
 type unsupportedError struct{ msg string }
 
 func (e *unsupportedError) Error() string { return e.msg }

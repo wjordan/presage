@@ -89,7 +89,7 @@ func predictGoAMD64(old, new []byte, tf byte) (*goPred, error) {
 //	stage 1a  a plain delta of funcnametab+filetab, which change length
 //	stage 1b  a plain delta of the predicted cutab+pctab+go:func.* against
 //	          the real ones -- the residual is shifted, not positional, so
-//	          a bounded local window cannot follow it (docs/DESIGN.md 3.4)
+//	          a bounded local window cannot follow it (docs/go-module-design.md 2.4)
 //	stage 2   a positional correction of the predicted whole file
 //
 // plus the BLAKE3 of the predicted file, so that an encoder and a decoder
@@ -202,7 +202,7 @@ func applyGoAMD64(old, body []byte, h *Header) ([]byte, error) {
 	}
 	if hashOf(pred) != sum {
 		return nil, fmt.Errorf("delta: the predicted base does not match the encoder's; " +
-			"encoder and decoder disagree, fetch the blob")
+			"encoder and decoder disagree")
 	}
 	if err := applyCorrection(pred, r.b, h.Transform >= TransformGoSegmap); err != nil {
 		return nil, err

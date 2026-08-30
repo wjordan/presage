@@ -9,7 +9,7 @@ import (
 	"github.com/wjordan/presage/delta/gobin"
 )
 
-// The self-prediction gate (docs/DESIGN.md 3.6, D14). Encoding a binary
+// The self-prediction gate (docs/go-module-design.md 2.6, D14). Encoding a binary
 // against itself exercises every predictor -- the function layout, the
 // pclntab rebuild, the stage-1b blob emulation, the type-descriptor walk,
 // the instruction relocator -- with a known answer: the prediction must
@@ -73,9 +73,9 @@ func TestCorpusRoundTrip(t *testing.T) {
 	}
 }
 
-// TestTransform1Compat holds the previous transform open. A publisher whose
-// fleet still runs a transform-1 decoder asks for one (docs/DESIGN.md 3.6),
-// and the patch it gets must carry no segment map and must still apply.
+// TestTransform1Compat holds the previous transform open. An encoder capped
+// at transform 1 (docs/go-module-design.md 2.6) must produce a patch with no
+// segment map that still applies.
 func TestTransform1Compat(t *testing.T) {
 	var old, new []byte
 	for _, p := range corpus(t) {

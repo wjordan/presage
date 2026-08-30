@@ -9,7 +9,7 @@ import (
 	"github.com/wjordan/presage/internal/cz"
 )
 
-// The correction turns a prediction into the real file (docs/DESIGN.md 3.4).
+// The correction turns a prediction into the real file (docs/go-module-design.md 2.4).
 //
 // Where the prediction is right -- most of the file -- it costs nothing: the
 // stream names a gap and moves on. Where it is wrong, the differing bytes
@@ -44,7 +44,7 @@ const (
 const lzRegion = 1
 
 // The whole correction is in turn written one of two ways, and which one
-// wins is a property of the release rather than of the codec (docs/DESIGN.md
+// wins is a property of the release rather than of the codec (docs/go-module-design.md
 // 3.4, research 14.5). A patch release's residual is near-misses a few bytes
 // apart: merging runs up to 32 correct bytes apart costs almost nothing --
 // the swallowed bytes are correct, so under xor they are zeros -- and saves
@@ -63,8 +63,8 @@ var (
 // of the patch where no module predicts the pointer tables.
 //
 // A patch containing a shape-2 correction is announced by a header flag, so
-// a build that does not know the shape rejects the patch outright and fetches
-// the blob instead of misreading it (presage/container.go). The trailing
+// a build that does not know the shape rejects the patch outright rather than
+// misread it (presage/container.go). The trailing
 // stream lengths would fail such a build's parse anyway; the flag is what
 // makes it fail early and by name.
 const (
@@ -224,7 +224,7 @@ func czLen(b []byte) int {
 }
 
 // EncodeCorrection writes the stream that turns pred into want, in the one
-// shape every deployed decoder reads. It is exported so experimental
+// shape every decoder reads. It is exported so experimental
 // predictors can use the production correction format while their prediction
 // formats are still being evaluated.
 func EncodeCorrection(pred, want []byte) ([]byte, error) {

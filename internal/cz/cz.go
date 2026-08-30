@@ -8,7 +8,7 @@
 // zstd's framing wins by a few dozen bytes on the smallest patches, and
 // trying it costs ~30 ms per 8 MiB frame. Brotli quality 10 on large frames
 // was 4-5 % larger for 1.7-1.9x the speed and is no longer used.
-// See docs/DESIGN.md 3.5.
+// See docs/go-module-design.md 2.5.
 package cz
 
 import (

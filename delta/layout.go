@@ -47,7 +47,7 @@ type layout struct {
 	// otherwise get wrong
 	RecShapes []recShape
 
-	// the pctab replay (pcln.go, docs/DESIGN.md 3.2.2): one bit per invented
+	// the pctab replay (pcln.go, docs/go-module-design.md 2.2.2): one bit per invented
 	// _func pc-table slot saying the linker allocated that table fresh, and
 	// one gap per record that has such a slot; transform 2 and above only
 	NPcFresh int

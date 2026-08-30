@@ -53,7 +53,7 @@ func TestLoweringDropsAModule(t *testing.T) {
 	var st Stats
 	roundTrip(t, [][]byte{old}, old, Options{Modules: []byte{ModuleLZ}, Stats: &st})
 	if st.Regions[0].Module != "lz" {
-		t.Fatalf("module %s, want lz when copy is not deployed", st.Regions[0].Module)
+		t.Fatalf("module %s, want lz when copy is unavailable", st.Regions[0].Module)
 	}
 }
 
