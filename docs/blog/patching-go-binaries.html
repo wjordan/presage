@@ -1,57 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Patching Go Binaries with Presage</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<meta name="description" content="Adjacent Prometheus releases differ by 2.2-2.7 MB under the best general-purpose differs. A Go-aware codec gets it to 70 KB, byte-for-byte exact.">
+<link rel="canonical" href="https://willjordan.us/writing/patching-go-binaries/">
+<link rel="alternate" type="application/atom+xml" href="https://willjordan.us/feed.xml" title="Will Jordan">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Will Jordan">
+<meta property="og:title" content="Patching Go Binaries with Presage">
+<meta property="og:description" content="Adjacent Prometheus releases differ by 2.2-2.7 MB under the best general-purpose differs. A Go-aware codec gets it to 70 KB, byte-for-byte exact.">
+<meta property="og:url" content="https://willjordan.us/writing/patching-go-binaries/">
+<meta property="article:published_time" content="2026-08-30">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Patching Go Binaries with Presage">
+<meta name="twitter:description" content="Adjacent Prometheus releases differ by 2.2-2.7 MB under the best general-purpose differs. A Go-aware codec gets it to 70 KB, byte-for-byte exact.">
 <style>
+:root { color-scheme: light dark; }
+body { font: 1rem/1.5 sans-serif; max-width: 70ch; margin: 0 auto; padding: 0 1rem 3rem; }
+h1, h2, h3 { line-height: 1.2; margin: 2rem 0 0.75rem; }
+h3 { font-size: 1rem; font-weight: normal; }
+img { max-width: 100%; height: auto; }
+ul { padding-left: 1.5rem; }
+li { margin-bottom: 0.4rem; }
+figcaption { font-size: 0.875rem; }
+hr { border: 0; border-top: 1px solid currentColor; opacity: 0.25; margin: 2rem 0; }
+@media (prefers-color-scheme: dark) { body { color: #e6e6e6; background-color: #121212; } }
+
+/* Article styles, layered on style.css.
+   The chart scripts read --plan/--fix/--go/--ink/--ink2/--muted/--rule/--paper
+   at runtime, so those names have to keep existing in both themes. */
 :root{
-  --bg:#f5f7f9; --paper:#ffffff; --ink:#182230; --ink2:#4b5563; --muted:#6b7683;
-  --rule:#d9dee4; --rule2:#eceff2; --code-bg:#eef1f4;
-  --plan:#1d67b0; --plan-soft:#dbe7f4; --fix:#c96a2e; --fix-soft:#f6e3d6;
-  --go:#2f7d4f; --go-soft:#dcefe3; --bad:#b3402f;
-  color-scheme:light;
+  --ink:#1a1a1a; --ink2:#333; --muted:#666; --rule:#d8d8d8; --paper:#fff;
+  --plan:#26619c; --plan-soft:#dde7f1;
+  --fix:#a85f21; --fix-soft:#f2e3d5;
+  --go:#2f7d4f; --ok:#2f7d4f; --ok-soft:#dfece4;
+  --bad:#a8392a; --bad-soft:#f2dcd8;
+  --code-bg:#f0f0f0;
 }
 @media (prefers-color-scheme: dark){
-  :root:not([data-theme="light"]){
-    --bg:#12171d; --paper:#181e25; --ink:#e6e9ec; --ink2:#c2c9d1; --muted:#98a3ae;
-    --rule:#2c343e; --rule2:#222932; --code-bg:#1f262e;
-    --plan:#4a90d6; --plan-soft:#1c2f44; --fix:#cf7a42; --fix-soft:#3a2818;
-    --go:#5fb37f; --go-soft:#1c3326; --bad:#e0705f; color-scheme:dark;
+  :root{
+    --ink:#e6e6e6; --ink2:#d0d0d0; --muted:#9aa0a6; --rule:#333; --paper:#1a1a1a;
+    --plan:#79b8f3; --plan-soft:#1d2c3c;
+    --fix:#d08a4d; --fix-soft:#33261a;
+    --go:#6cb98a; --ok:#6cb98a; --ok-soft:#1d2f24;
+    --bad:#e08070; --bad-soft:#33201d;
+    --code-bg:#1e1e1e;
   }
 }
-:root[data-theme="dark"]{
-  --bg:#12171d; --paper:#181e25; --ink:#e6e9ec; --ink2:#c2c9d1; --muted:#98a3ae;
-  --rule:#2c343e; --rule2:#222932; --code-bg:#1f262e;
-  --plan:#4a90d6; --plan-soft:#1c2f44; --fix:#cf7a42; --fix-soft:#3a2818;
-  --go:#5fb37f; --go-soft:#1c3326; --bad:#e0705f; color-scheme:dark;
-}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font-family:"Source Serif 4",Georgia,"Times New Roman",serif;font-size:18px;line-height:1.55;-webkit-font-smoothing:antialiased}
-h1,h2,table,figcaption,.eyebrow,code,.mono{font-family:"JetBrains Mono","SFMono-Regular",Menlo,Consolas,monospace}
-main{max-width:66ch;margin:0 auto;padding:56px 24px 96px}
-.eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
-h1{font-size:clamp(30px,4.5vw,44px);line-height:1.12;font-weight:700;letter-spacing:-.02em;margin:10px 0 18px;text-wrap:balance}
-h2{font-size:22px;font-weight:700;letter-spacing:-.01em;margin:64px 0 6px;text-wrap:balance}
-p{margin:0 0 18px}
-.lede{font-size:21px;line-height:1.45;color:var(--ink2)}
-a{color:var(--plan)}
-code{font-size:.86em;background:var(--code-bg);padding:1px 5px;border-radius:3px}
-strong{font-weight:600}
-figure{margin:28px 0}
-figcaption{font-size:13px;color:var(--muted);line-height:1.5;margin-top:10px}
-.card{background:var(--paper);border:1px solid var(--rule);border-radius:8px;padding:20px 22px}
-.tbl{overflow-x:auto}
-table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
-th,td{padding:7px 10px;border-bottom:1px solid var(--rule2);text-align:left;vertical-align:top}
-th{font-weight:500;color:var(--muted);font-size:12px;letter-spacing:.04em;text-transform:uppercase}
+
+body{max-width:none;padding:0}
+main,.site-nav,.site-foot{max-width:70ch;margin:0 auto;padding:0 1rem}
+main{padding-bottom:3rem}
+.site-nav{padding-top:1.5rem}
+.site-foot{padding-top:1rem;padding-bottom:3rem;border-top:1px solid var(--rule)}
+.site-nav,.site-foot{font-size:.875rem}
+
+.lede{color:var(--ink2)}
+.src{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--rule);font-size:.875rem;color:var(--muted)}
+.notes p,.rung{font-size:.875rem;color:var(--muted)}
+.rung{display:flex;align-items:flex-start;gap:.5rem;margin:0 0 1rem}
+.rung svg{width:72px;height:16px;flex:none;margin-top:2px}
+.rung b{color:var(--ink);font-weight:600}
+.rung b.neg{color:var(--bad)}
+p .plan,figcaption .plan{color:var(--plan);font-weight:600}
+p .fix,figcaption .fix{color:var(--fix);font-weight:600}
+code{background:var(--code-bg);padding:1px 4px}
+
+/* figures */
+figure{margin:1.5rem 0}
+.card{border:1px solid var(--rule);padding:1rem}
+.wide{width:min(880px,calc(100vw - 2rem));margin-left:50%;transform:translateX(-50%)}
+figcaption.head{margin:0 0 .75rem}
+svg{display:block;width:100%;height:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.strip{display:block;width:100%;height:auto}
+.scroll,.tbl{overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain}
+.scroll>svg{min-width:var(--mw,700px)}
+
+/* tables */
+table{border-collapse:collapse;width:100%;font-size:.875rem;font-variant-numeric:tabular-nums}
+th,td{padding:.35rem .5rem;border-bottom:1px solid var(--rule);text-align:left;vertical-align:top}
+th{font-weight:600;color:var(--muted);font-size:.8125rem}
 td.n,th.n{text-align:right;white-space:nowrap}
-tr.total td{font-weight:700;color:var(--go)}
+tr.total td{border-top:1px solid var(--rule);font-weight:700}
 td:last-child{width:45%}
-.bar{height:10px;border-radius:2px;background:var(--plan);display:inline-block;vertical-align:middle;min-width:2px}
-tr.total .bar{background:var(--go)}
-.strip{display:block;width:100%;height:auto;font-family:"JetBrains Mono",monospace}
-.notes p{font-size:15px;color:var(--ink2);margin-bottom:12px}
-hr{border:0;border-top:1px solid var(--rule);margin:56px 0}
+.hero-table td:first-child{width:40%}
+.bar{height:10px;background:var(--plan);display:inline-block;vertical-align:middle;min-width:2px}
+.bar.fix{background:var(--fix)}
+
+/* comparison figure */
+.join{font-size:.8125rem;display:grid;grid-template-columns:1fr 1fr;gap:1rem;align-items:start;overflow-x:auto}
+.join table td,.join table th{padding:.25rem .5rem}
+.join thead th{white-space:nowrap;vertical-align:bottom}
+.join td.ok{background:var(--ok-soft);color:var(--ok)}
+.join td.bad{background:var(--bad-soft);color:var(--bad)}
+.join td.new{color:var(--muted);font-style:italic}
+.join .sum{grid-column:1/-1;color:var(--ink2);margin-top:.4rem}
+.togs{display:flex;gap:.5rem;margin-bottom:.75rem}
+button.tog{font:inherit;font-size:.8125rem;padding:.25rem .625rem;border:1px solid var(--rule);background:var(--paper);color:var(--ink2);cursor:pointer}
+button.tog[aria-pressed="true"]{background:var(--plan);border-color:var(--plan);color:var(--paper)}
+.ctl{display:grid;grid-template-columns:150px 1fr 130px;gap:.75rem;align-items:center;font-size:.8125rem;color:var(--muted);margin-top:.75rem;padding-top:.75rem;border-top:1px solid var(--rule)}
+.ctl input[type=range]{width:100%;accent-color:var(--plan)}
+.ctl .v{color:var(--ink);text-align:right}
+
+.tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--paper);font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;padding:.4rem .6rem;opacity:0;transition:opacity .08s;z-index:9;max-width:min(340px,calc(100vw - 24px));white-space:normal;overflow-wrap:break-word}
+.tip.pin{left:50%;top:auto;bottom:14px;transform:translateX(-50%);max-width:calc(100vw - 24px);width:max-content}
+@media (prefers-reduced-motion:reduce){.tip{transition:none}}
+
+@media (max-width:640px){
+  .ctl{grid-template-columns:1fr}
+  /* the two tables must stay side by side; reading one against the other is the figure */
+  .join{grid-template-columns:2fr 3fr;gap:.5rem}
+  .join table{font-size:.6875rem}
+  .join table td,.join table th{padding:.2rem .25rem}
+  .join thead th{white-space:normal;font-size:.625rem;line-height:1.25}
+  .wide{width:calc(100vw - 1.25rem)}
+  .card{padding:.625rem}
+  .hero-table td:first-child,td:last-child{width:auto}
+}
 </style>
+</head>
+<body>
+<div class="site-nav"><p><a href="https://willjordan.us/">Will Jordan</a> &middot; <a href="https://willjordan.us/writing/">Writing</a> &middot; <a href="https://willjordan.us/projects/">Projects</a></div>
 <main>
-<div class="eyebrow">presage · research note</div>
 <h1>Patching Go binaries with presage</h1>
 <p class="lede">Prometheus is a 94 MB Go executable. Between two adjacent patch releases, the best general-purpose differs produce patches of 2.2–2.7 MB. Presage's Go codec produces one of 70 KB — byte-for-byte exact — by having the decoder regenerate the tables the Go linker regenerated.</p>
 
@@ -67,7 +139,7 @@ hr{border:0;border-top:1px solid var(--rule);margin:56px 0}
 <figcaption>Prometheus <a href="https://github.com/prometheus/prometheus/releases/tag/v3.13.1">3.13.1</a> → <a href="https://github.com/prometheus/prometheus/releases/tag/v3.13.2">3.13.2</a>, Linux x86-64, stripped, after compression.</figcaption></figure>
 
 <h2>Presage</h2>
-<p>Presage is a binary patcher built on one idea: most of the bytes that change between two builds of a program change <em>because something else moved</em>, and a decoder that knows the file format can work those bytes out for itself. A presage patch is a small <strong>plan</strong> — what moved where — from which the decoder builds a complete prediction of the new file out of the old one, plus a <strong>correction</strong> listing every byte the prediction got wrong. The prediction is deterministic, so the encoder runs the decoder's code, sees exactly what it will produce, and ships only the difference. Format knowledge lives in codecs: each one claims the files it understands and predicts them, and a file no codec claims falls back to an ordinary delta. <a href="https://claude.ai/code/artifact/76cdde83-6967-41b2-b2e3-7b9a2e86db1a">Slicing Chrome's Zucchini patches in half</a> shows the approach on a 291 MB C++ binary, where a codec for x86-64 code and ELF tables halves the patch Chrome's own updater ships. This note is about the codec for Go.</p>
+<p>Presage is a binary patcher built on one idea: most of the bytes that change between two builds of a program change <em>because something else moved</em>, and a decoder that knows the file format can work those bytes out for itself. A presage patch is a small <strong>plan</strong> — what moved where — from which the decoder builds a complete prediction of the new file out of the old one, plus a <strong>correction</strong> listing every byte the prediction got wrong. The prediction is deterministic, so the encoder runs the decoder's code, sees exactly what it will produce, and ships only the difference. Format knowledge lives in codecs: each one claims the files it understands and predicts them, and a file no codec claims falls back to an ordinary delta. <a href="https://willjordan.us/writing/slicing-zucchini-patches/">Slicing Chrome's Zucchini patches in half</a> shows the approach on a 291 MB C++ binary, where a codec for x86-64 code and ELF tables halves the patch Chrome's own updater ships. This note is about the codec for Go.</p>
 
 <h2>What is in a Go binary</h2>
 <p>A Go program is a statically linked executable with everything it needs inside it: the code, the runtime, and the metadata the runtime uses to run it. That metadata is large. Prometheus 3.13.2 is 94 MB, and less than half of it is machine code.</p>
@@ -81,7 +153,7 @@ hr{border:0;border-top:1px solid var(--rule);margin:56px 0}
 </figure>
 
 <h2>The Go codec</h2>
-<p>The Go codec reads the old binary's function table, matches functions between the two builds by name, and works out from a short description of the new function list — which functions were added, removed or resized, and how the data sections shifted — where everything now lives. From that and the old binary the decoder regenerates <code>.gopclntab</code>, the type descriptors and the other Go data sections in full; copies each function to its new address with its PC-relative operands re-targeted; and recomputes the ELF headers from the section table it now knows. A function that was edited is laid down in pieces: the parts that survived the edit at their new offsets, relocated at their true positions, and the pieces may come from anywhere in the old binary — the code a small change adds is rarely new to the file, because the compiler emits the same sequences for the same constructs. The encoder tries each candidate piece by relocating it and keeps it only when the result beats the plain copy.</p>
+<p>The Go codec reads the old binary's function table, matches functions between the two builds by name, and works out where everything now lives from a short description of the new function list: which functions were added, removed or resized, and how the data sections shifted. From that and the old binary the decoder regenerates <code>.gopclntab</code>, the type descriptors and the other Go data sections in full; copies each function to its new address with its PC-relative operands re-targeted; and recomputes the ELF headers from the section table it now knows. A function that was edited is laid down in pieces: the parts that survived the edit at their new offsets, relocated at their true positions, and the pieces may come from anywhere in the old binary; the code a small change adds is rarely new to the file, because the compiler emits the same sequences for the same constructs. The encoder tries each candidate piece by relocating it and keeps it only when the result beats the plain copy.</p>
 
 <figure class="card"><div class="tbl"><table>
 <thead><tr><th>Prediction</th><th class="n">Patch bytes</th><th></th></tr></thead>
@@ -94,7 +166,7 @@ hr{border:0;border-top:1px solid var(--rule);margin:56px 0}
 <p>On this pair the codec's prediction is wrong in 54,520 of 93.8 million bytes. The rest of the patch is the plan and the container. Encoding takes 5 s and applying 1 s; both sides verify the result against the release hash before it is used, so a wrong prediction costs bytes, never correctness. On a 30 MB program rebuilt after adding one <code>if</code> statement — the change that moves 13 % of the file's bytes and nothing else — the patch is 1,202 bytes; bsdiff's is 150,475.</p>
 
 <h2>What a default build changes</h2>
-<p>Everything above is for stripped binaries, which is how Go programs are usually shipped. A plain <code>go build</code> also keeps debug information — DWARF — and for Prometheus that is another 38 MB on disk — 87 MB once decompressed — compressed section by section with zlib by the linker. That is a problem for every byte-oriented patcher: a compressed stream whose input changed anywhere is a different stream from beginning to end, so on the default build the same patch release costs 28–29 MB whichever tool ships it.</p>
+<p>Everything above is for stripped binaries, which is how Go programs are usually shipped. A plain <code>go build</code> also keeps DWARF debug information. For Prometheus that is another 38 MB on disk, or 87 MB once decompressed, compressed section by section with zlib by the linker. That is a problem for every byte-oriented patcher: a compressed stream whose input changed anywhere is a different stream from beginning to end, so on the default build the same patch release costs 28–29 MB whichever tool ships it.</p>
 
 <figure class="card"><div class="tbl"><table>
 <thead><tr><th>Method</th><th class="n">Bytes</th><th></th></tr></thead>
@@ -107,7 +179,7 @@ hr{border:0;border-top:1px solid var(--rule);margin:56px 0}
 </tbody></table></div>
 <figcaption>Prometheus 3.13.1 → 3.13.2, Linux x86-64, debug build, after compression.</figcaption></figure>
 
-<p>Presage handles it in two layers. Decompression is exact — Go's own <code>compress/zlib</code> reproduces the linker's output byte for byte at the level the linker uses — so the decoder works on the decompressed bytes and recompresses at the end, and the transform itself ships nothing. That alone brings the patch to 8.5 MB, which is what the decompressed debug sections cost as a byte-level delta. The section that resists a byte-level delta, <code>.debug_info</code>, resists it for the same structural reason code and tables do: it holds hundreds of thousands of four-byte references between its own entries, and every one that points past an edited compilation unit shifted by the amount that unit grew. The DWARF layer handles that the same way: the decoder walks the <em>old</em> <code>.debug_info</code> with the old abbreviation table, finds every reference field, projects its position and its value into the new image, and writes the projected value. Positions project through the runs of unchanged bytes around them, or through a table of paired records where a section is fixed-size rows that byte matching aligns by chance; addresses project through the function map the Go codec already has. The same walk covers the address, frame and line tables and the symbol table.</p>
+<p>Presage handles it in two layers. Decompression is exact: Go's own <code>compress/zlib</code> reproduces the linker's output byte for byte at the level the linker uses. So the decoder works on the decompressed bytes and recompresses at the end, and the transform itself ships nothing. That alone brings the patch to 8.5 MB, which is what the decompressed debug sections cost as a byte-level delta. The section that resists a byte-level delta, <code>.debug_info</code>, resists it for the same structural reason code and tables do: it holds hundreds of thousands of four-byte references between its own entries, and every one that points past an edited compilation unit shifted by the amount that unit grew. The DWARF layer handles that the same way: the decoder walks the <em>old</em> <code>.debug_info</code> with the old abbreviation table, finds every reference field, projects its position and its value into the new image, and writes the projected value. Positions project through the runs of unchanged bytes around them, or through a table of paired records where a section is fixed-size rows that byte matching aligns by chance; addresses project through the function map the Go codec already has. The same walk covers the address, frame and line tables and the symbol table.</p>
 
 <figure class="card"><div class="tbl"><table>
 <thead><tr><th>Prediction</th><th class="n">Patch bytes</th><th></th></tr></thead>
@@ -135,14 +207,14 @@ const fmt=n=>n.toLocaleString('en-US');
 const mb=n=>n<1e5?(n/1e6).toFixed(3):n<1e6?(n/1e6).toFixed(2):(n/1e6).toFixed(1);
 function drawSections(){
   const host=document.getElementById('sections');host.innerHTML='';
-  const W=840,H=100,ink2=css('--ink2'),muted=css('--muted'),plan=css('--plan'),fix=css('--fix'),go=css('--go');
+  const W=840,H=100,ink2=css('--ink2'),muted=css('--muted'),plan=css('--plan'),fix=css('--fix'),go=css('--go'),paper=css('--paper');
   const parts=[['.text','machine code',42116561,ink2],['.rodata','constants and strings',3678233,fix],['.gopclntab','function table, pc/line tables, stack maps',35205370,go],['.go.type','type descriptors',11770480,plan],['other','.noptrdata, .data and the small sections',998910,muted]];
   const tot=parts.reduce((a,p)=>a+p[2],0);
   const s=el('svg',{viewBox:`0 0 ${W} ${H}`,class:'strip',role:'img','aria-label':'Prometheus 3.13.2 by section'},host);
   let x=0;
   parts.forEach(([nm,desc,n,col])=>{const w=n/tot*W;
     tip(el('rect',{x,y:14,width:Math.max(w-1.5,0.5),height:50,fill:col},s),`${nm} — ${desc}: ${fmt(n)} B (${(100*n/tot).toFixed(1)}%)`);
-    if(w>70){const t=el('text',{x:x+8,y:36,'font-size':13,'font-weight':500,fill:'#fff'},s);t.textContent=nm;const u=el('text',{x:x+8,y:54,'font-size':11,fill:'#fff',opacity:.85},s);u.textContent=(n/1e6).toFixed(1)+' MB'}
+    if(w>70){const t=el('text',{x:x+8,y:36,'font-size':13,'font-weight':500,fill:paper},s);t.textContent=nm;const u=el('text',{x:x+8,y:54,'font-size':11,fill:paper,opacity:.85},s);u.textContent=(n/1e6).toFixed(1)+' MB'}
     x+=w});
   const a=el('text',{x:0,y:84,'font-size':11,fill:muted},s);a.textContent='0';
   const b=el('text',{x:W,y:84,'font-size':11,fill:muted,'text-anchor':'end'},s);b.textContent=(tot/1e6).toFixed(1)+' MB';
@@ -186,3 +258,6 @@ const mq=matchMedia('(prefers-color-scheme: dark)');mq.addEventListener&&mq.addE
 new MutationObserver(drawAll).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
 })();
 </script>
+<div class="site-foot"><p><a href="https://willjordan.us/writing/">&larr; All writing</a> &middot; <a href="mailto:will.jordan@gmail.com">will.jordan@gmail.com</a> &middot; <a href="https://github.com/wjordan">@wjordan</a> &middot; <a href="https://willjordan.us/feed.xml">RSS</a></div>
+</body>
+</html>

@@ -4,121 +4,126 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Slicing Chrome's Zucchini Patches in Half</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;1,400&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap">
 <style>
+:root { color-scheme: light dark; }
+body { font: 1rem/1.5 sans-serif; max-width: 70ch; margin: 0 auto; padding: 0 1rem 3rem; }
+h1, h2, h3 { line-height: 1.2; margin: 2rem 0 0.75rem; }
+h3 { font-size: 1rem; font-weight: normal; }
+img { max-width: 100%; height: auto; }
+ul { padding-left: 1.5rem; }
+li { margin-bottom: 0.4rem; }
+figcaption { font-size: 0.875rem; }
+hr { border: 0; border-top: 1px solid currentColor; opacity: 0.25; margin: 2rem 0; }
+@media (prefers-color-scheme: dark) { body { color: #e6e6e6; background-color: #121212; } }
+
+/* Article styles, layered on style.css.
+   The chart scripts read --plan/--fix/--go/--ink/--ink2/--muted/--rule/--paper
+   at runtime, so those names have to keep existing in both themes. */
 :root{
-  --bg:#f5f7f9; --paper:#ffffff; --ink:#182230; --ink2:#4b5563; --muted:#6b7683;
-  --rule:#d9dee4; --rule2:#eceff2;
-  --plan:#1d67b0; --plan-soft:#dbe7f4; --fix:#c96a2e; --fix-soft:#f6e3d6;
-  --code-bg:#eef1f4; --ok:#2f7d4f; --ok-soft:#dcefe3; --bad:#b3402f; --bad-soft:#f5dcd8;
+  --ink:#1a1a1a; --ink2:#333; --muted:#666; --rule:#d8d8d8; --paper:#fff;
+  --plan:#26619c; --plan-soft:#dde7f1;
+  --fix:#a85f21; --fix-soft:#f2e3d5;
+  --go:#2f7d4f; --ok:#2f7d4f; --ok-soft:#dfece4;
+  --bad:#a8392a; --bad-soft:#f2dcd8;
+  --code-bg:#f0f0f0;
 }
 @media (prefers-color-scheme: dark){
-  :root:not([data-theme="light"]){
-    --bg:#12171d; --paper:#181e25; --ink:#e6e9ec; --ink2:#c2c9d1; --muted:#98a3ae;
-    --rule:#2c343e; --rule2:#222932;
-    --plan:#4a90d6; --plan-soft:#1c2f44; --fix:#cf7a42; --fix-soft:#3a2818;
-    --code-bg:#1f262e; --ok:#5fb37f; --ok-soft:#1c3326; --bad:#e0705f; --bad-soft:#3d1f1a;
+  :root{
+    --ink:#e6e6e6; --ink2:#d0d0d0; --muted:#9aa0a6; --rule:#333; --paper:#1a1a1a;
+    --plan:#79b8f3; --plan-soft:#1d2c3c;
+    --fix:#d08a4d; --fix-soft:#33261a;
+    --go:#6cb98a; --ok:#6cb98a; --ok-soft:#1d2f24;
+    --bad:#e08070; --bad-soft:#33201d;
+    --code-bg:#1e1e1e;
   }
 }
-:root[data-theme="dark"]{
-  --bg:#12171d; --paper:#181e25; --ink:#e6e9ec; --ink2:#c2c9d1; --muted:#98a3ae;
-  --rule:#2c343e; --rule2:#222932;
-  --plan:#4a90d6; --plan-soft:#1c2f44; --fix:#cf7a42; --fix-soft:#3a2818;
-  --code-bg:#1f262e; --ok:#5fb37f; --ok-soft:#1c3326; --bad:#e0705f; --bad-soft:#3d1f1a;
-}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font-family:"Source Serif 4",Georgia,"Times New Roman",serif;font-size:18px;line-height:1.55;-webkit-font-smoothing:antialiased}
-.mono,h1,h2,h3,table,figcaption,.rung,.eyebrow,.kpi,pre,code,.ctl{font-family:"JetBrains Mono","SFMono-Regular",Menlo,Consolas,monospace}
-main{max-width:66ch;margin:0 auto;padding:56px 24px 96px}
-.wide{width:min(880px,calc(100vw - 48px));margin-left:50%;transform:translateX(-50%)}
-.eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
-.eyebrow a{color:inherit;border-bottom-color:var(--rule)}
-.eyebrow a:hover{color:var(--plan);border-bottom-color:var(--plan)}
-.src{margin-top:40px;padding-top:16px;border-top:1px solid var(--rule);font-size:14px;color:var(--muted)}
-h1{font-size:clamp(30px,4.5vw,44px);line-height:1.12;font-weight:700;letter-spacing:-.02em;margin:10px 0 18px;text-wrap:balance}
-h2{font-size:22px;font-weight:700;letter-spacing:-.01em;margin:64px 0 6px;text-wrap:balance}
-.rung{display:flex;align-items:flex-start;gap:10px;font-size:12px;color:var(--muted);margin:0 0 16px;letter-spacing:.02em}
+
+body{max-width:none;padding:0}
+main,.site-nav,.site-foot{max-width:70ch;margin:0 auto;padding:0 1rem}
+main{padding-bottom:3rem}
+.site-nav{padding-top:1.5rem}
+.site-foot{padding-top:1rem;padding-bottom:3rem;border-top:1px solid var(--rule)}
+.site-nav,.site-foot{font-size:.875rem}
+
+.lede{color:var(--ink2)}
+.src{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--rule);font-size:.875rem;color:var(--muted)}
+.notes p,.rung{font-size:.875rem;color:var(--muted)}
+.rung{display:flex;align-items:flex-start;gap:.5rem;margin:0 0 1rem}
 .rung svg{width:72px;height:16px;flex:none;margin-top:2px}
-.rung b{color:var(--ink);font-weight:500}
-.rung b.neg{color:var(--bad);font-weight:700}
+.rung b{color:var(--ink);font-weight:600}
+.rung b.neg{color:var(--bad)}
 p .plan,figcaption .plan{color:var(--plan);font-weight:600}
 p .fix,figcaption .fix{color:var(--fix);font-weight:600}
-p{margin:0 0 18px}
-.lede{font-size:21px;line-height:1.45;color:var(--ink2)}
-a{color:var(--plan);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--plan) 40%,transparent)}
-a:hover{border-bottom-color:var(--plan)}
-a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid var(--plan);outline-offset:2px}
-code{font-size:.86em;background:var(--code-bg);padding:1px 5px;border-radius:3px}
-em{font-style:italic}
-strong{font-weight:600}
-figure{margin:28px 0}
-figcaption{font-size:13px;color:var(--muted);line-height:1.5;margin-top:10px}
-figcaption.head{margin:0 0 12px}
-.card{background:var(--paper);border:1px solid var(--rule);border-radius:8px;padding:20px 22px}
-table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
-th,td{padding:7px 10px;border-bottom:1px solid var(--rule2);text-align:left;vertical-align:top}
-th{font-weight:500;color:var(--muted);font-size:12px;letter-spacing:.04em;text-transform:uppercase}
-td.n,th.n{text-align:right}
+code{background:var(--code-bg);padding:1px 4px}
+
+/* figures */
+figure{margin:1.5rem 0}
+.card{border:1px solid var(--rule);padding:1rem}
+.wide{width:min(880px,calc(100vw - 2rem));margin-left:50%;transform:translateX(-50%)}
+figcaption.head{margin:0 0 .75rem}
+svg{display:block;width:100%;height:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.strip{display:block;width:100%;height:auto}
+.scroll,.tbl{overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain}
+.scroll>svg{min-width:var(--mw,700px)}
+
+/* tables */
+table{border-collapse:collapse;width:100%;font-size:.875rem;font-variant-numeric:tabular-nums}
+th,td{padding:.35rem .5rem;border-bottom:1px solid var(--rule);text-align:left;vertical-align:top}
+th{font-weight:600;color:var(--muted);font-size:.8125rem}
+td.n,th.n{text-align:right;white-space:nowrap}
 tr.total td{border-top:1px solid var(--rule);font-weight:700}
-.hero-table td:first-child{width:40%}.hero-table td:last-child{width:34%}
-figure table td:last-child{width:30%;min-width:120px}
-.bar{height:10px;border-radius:2px;background:var(--plan);display:inline-block;vertical-align:middle}
+td:last-child{width:45%}
+.hero-table td:first-child{width:40%}
+.bar{height:10px;background:var(--plan);display:inline-block;vertical-align:middle;min-width:2px}
 .bar.fix{background:var(--fix)}
-.ctl{display:grid;grid-template-columns:150px 1fr 130px;gap:12px;align-items:center;font-size:12px;color:var(--muted);margin-top:14px;padding-top:12px;border-top:1px solid var(--rule2)}
-.ctl input[type=range]{width:100%;accent-color:var(--plan)}
-.ctl .v{color:var(--ink);text-align:right}
-button.tog{font:12px "JetBrains Mono",monospace;padding:6px 12px;border:1px solid var(--rule);background:var(--paper);color:var(--ink2);border-radius:4px;cursor:pointer}
-button.tog[aria-pressed="true"]{background:var(--plan);border-color:var(--plan);color:#fff}
-.togs{display:flex;gap:8px;margin-bottom:14px}
-.join{font-size:13px;display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start;overflow-x:auto}
-.join table td,.join table th{padding:4px 8px}
-.join thead th{white-space:nowrap;letter-spacing:0;vertical-align:bottom}
+
+/* comparison figure */
+.join{font-size:.8125rem;display:grid;grid-template-columns:1fr 1fr;gap:1rem;align-items:start;overflow-x:auto}
+.join table td,.join table th{padding:.25rem .5rem}
+.join thead th{white-space:nowrap;vertical-align:bottom}
 .join td.ok{background:var(--ok-soft);color:var(--ok)}
 .join td.bad{background:var(--bad-soft);color:var(--bad)}
 .join td.new{color:var(--muted);font-style:italic}
-.join .sum{grid-column:1/-1;font-size:13px;color:var(--ink2);margin-top:6px}
-svg{display:block;width:100%;height:auto;font-family:"JetBrains Mono",monospace}
-.scroll{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}
-/* --mw is the width below which a figure scrolls rather than shrink; it has
-   to stay under the column it sits in (834px inside .wide, 66ch elsewhere). */
-.scroll>svg{min-width:var(--mw,700px)}
-.scroll::-webkit-scrollbar{height:8px}
-.scroll::-webkit-scrollbar-thumb{background:var(--rule);border-radius:4px}
-.tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--bg);font:12px/1.45 "JetBrains Mono",monospace;padding:7px 10px;border-radius:5px;opacity:0;transition:opacity .08s;z-index:9;max-width:min(340px,calc(100vw - 24px));white-space:normal;overflow-wrap:break-word;box-shadow:0 2px 12px rgba(0,0,0,.22)}
-.tip.pin{left:50%;top:auto;bottom:14px;transform:translateX(-50%);max-width:calc(100vw - 24px);width:max-content;font-size:12.5px;padding:10px 13px}
+.join .sum{grid-column:1/-1;color:var(--ink2);margin-top:.4rem}
+.togs{display:flex;gap:.5rem;margin-bottom:.75rem}
+button.tog{font:inherit;font-size:.8125rem;padding:.25rem .625rem;border:1px solid var(--rule);background:var(--paper);color:var(--ink2);cursor:pointer}
+button.tog[aria-pressed="true"]{background:var(--plan);border-color:var(--plan);color:var(--paper)}
+.ctl{display:grid;grid-template-columns:150px 1fr 130px;gap:.75rem;align-items:center;font-size:.8125rem;color:var(--muted);margin-top:.75rem;padding-top:.75rem;border-top:1px solid var(--rule)}
+.ctl input[type=range]{width:100%;accent-color:var(--plan)}
+.ctl .v{color:var(--ink);text-align:right}
+
+.tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--paper);font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;padding:.4rem .6rem;opacity:0;transition:opacity .08s;z-index:9;max-width:min(340px,calc(100vw - 24px));white-space:normal;overflow-wrap:break-word}
+.tip.pin{left:50%;top:auto;bottom:14px;transform:translateX(-50%);max-width:calc(100vw - 24px);width:max-content}
 @media (prefers-reduced-motion:reduce){.tip{transition:none}}
-hr{border:0;border-top:1px solid var(--rule);margin:56px 0}
-ul{padding-left:22px}li{margin-bottom:8px}
+
 @media (max-width:640px){
-.ctl{grid-template-columns:1fr}
-  /* The two tables have to stay side by side -- reading one against the other
-     is the whole figure -- so shrink them to fit rather than stacking. */
-  .join{grid-template-columns:2fr 3fr;gap:8px}
-  .join table{font-size:11px}
-  .join table td,.join table th{padding:3px 4px}
-  .join thead th{white-space:normal;height:31px;font-size:9.5px;line-height:1.25}
-  .join .sum{font-size:12px}
-  .togs{gap:6px;margin-bottom:10px}
-  button.tog{padding:5px 9px}
-  body{font-size:17px}
-  main{padding:28px 14px 64px}
-  .wide{width:calc(100vw - 20px)}
-  .card{padding:12px 10px}
-  h1{margin:8px 0 14px}
-  h2{margin:44px 0 6px}
-  .lede{font-size:19px}
-  table{font-size:13px}
-  th,td{padding:6px 6px}
-  .hero-table td:first-child,.hero-table td:last-child{width:auto}
-  figure table td:last-child{width:22%;min-width:48px}
-  figure{margin:20px 0}
+  .ctl{grid-template-columns:1fr}
+  /* the two tables must stay side by side; reading one against the other is the figure */
+  .join{grid-template-columns:2fr 3fr;gap:.5rem}
+  .join table{font-size:.6875rem}
+  .join table td,.join table th{padding:.2rem .25rem}
+  .join thead th{white-space:normal;font-size:.625rem;line-height:1.25}
+  .wide{width:calc(100vw - 1.25rem)}
+  .card{padding:.625rem}
+  .hero-table td:first-child,td:last-child{width:auto}
 }
 </style>
+<meta name="description" content="Chrome&#39;s own updater ships a 5.9 MB patch between two stable releases. A prediction-based differ gets the same pair to 2.6 MB, byte-for-byte exact.">
+<link rel="canonical" href="https://willjordan.us/writing/slicing-zucchini-patches/">
+<link rel="alternate" type="application/atom+xml" href="https://willjordan.us/feed.xml" title="Will Jordan">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Will Jordan">
+<meta property="og:title" content="Slicing Chrome&#39;s Zucchini Patches in Half">
+<meta property="og:description" content="Chrome&#39;s own updater ships a 5.9 MB patch between two stable releases. A prediction-based differ gets the same pair to 2.6 MB, byte-for-byte exact.">
+<meta property="og:url" content="https://willjordan.us/writing/slicing-zucchini-patches/">
+<meta property="article:published_time" content="2026-08-30">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Slicing Chrome&#39;s Zucchini Patches in Half">
+<meta name="twitter:description" content="Chrome&#39;s own updater ships a 5.9 MB patch between two stable releases. A prediction-based differ gets the same pair to 2.6 MB, byte-for-byte exact.">
 </head>
 <body>
+<div class="site-nav"><p><a href="https://willjordan.us/">Will Jordan</a> &middot; <a href="https://willjordan.us/writing/">Writing</a> &middot; <a href="https://willjordan.us/projects/">Projects</a></div>
 <main>
-<div class="eyebrow"><a href="https://github.com/wjordan/presage">presage</a> · research note · draft</div>
 <h1>Slicing Chrome's Zucchini patches in half</h1>
 <p class="lede">Chrome's Linux executable is 291 MB. Between two adjacent stable releases, <a href="https://chromium.googlesource.com/chromium/src/+/main/components/zucchini/README.md">Zucchini</a> — the differ inside Chrome's own updater — produces a 5.9 MB patch. This post introduces a tool that produces a 2.6 MB one for the same pair, byte-for-byte exact: the patch is a structural plan the decoder <em>predicts</em> the new binary from, plus a correction for the bytes it got wrong.</p>
 
@@ -230,7 +235,7 @@ ul{padding-left:22px}li{margin-bottom:8px}
 <p>That is nearly all code churn in a release-to-release build: the same instructions with different addresses inside them. Percival's second-order change, at one instruction. A byte differ pays for it in every one of the roughly 925,000 functions in the image.</p>
 <p>The starting point already reproduces those three bytes, most of the time: the equivalences copy the body and the displacement is retargeted through the map. For 139,050 functions — 55 MB of code — it does not, and this layer takes over. It is not that the matcher copied the wrong bytes: nine times in ten the equivalence covering such a function is a single run copied from that function's own old body. What differs is where the displacements inside it end up pointing.</p>
 <p>The plan carries a function map. Chrome's publisher has the unstripped build on both sides, so the encoder knows which old function became which new one; the client receives no symbols, only where each matched body came from and where it belongs. The decoder walks each placed function, decodes its x86, and re-encodes every PC-relative displacement — calls, jumps, RIP-relative loads — against the new addresses. For <code>TimeTicks::Now()</code> that reproduces those three bytes from nothing.</p>
-<p>The map has to be cheap or it cannot pay. Sent as addresses — where each old body starts, where it lands, both extents, the 261,104 points where the oracle needs an exact answer — it is 1.32 MB compressed, more than the layer saves. Encoded against what the decoder already holds it is 256 KB for the same mappings: function starts as indices into the boundary list the decoder derives from Clang's <code>0xcc</code> padding, ends inferred from the next start, correspondence points as indices into the set of old branch targets, and each point's shift as the change from the previous one, which is zero 99.2% of the time and turns a 176 KB column into 4 KB. Anything the decoder can enumerate, the plan names rather than spells out.</p>
+<p>The map has to be cheap or it cannot pay. Sent as addresses, the map lists where each old body starts, where it lands, both extents, and the 261,104 points where the oracle needs an exact answer. That costs 1.32 MB compressed, more than the layer saves. Encoded against what the decoder already holds it is 256 KB for the same mappings: function starts as indices into the boundary list the decoder derives from Clang's <code>0xcc</code> padding, ends inferred from the next start, correspondence points as indices into the set of old branch targets, and each point's shift as the change from the previous one, which is zero 99.2% of the time and turns a 176 KB column into 4 KB. Anything the decoder can enumerate, the plan names rather than spells out.</p>
 <p>Even at that price, shipped on its own the map is a step backwards. Retargeting every mapped function through it unconditionally makes the patch 3.94 MB, 122 KB worse than the layer before it: the prediction comes out no better than the equivalences' (98.662% of bytes right against 98.668%) and the map costs 256 KB to send. What makes it pay is one bit per function, choosing whether the equivalence copy or the moved old body is the better starting point. Neither wins everywhere. Equivalences preserve the compiler's local layout, including the islands of data it emits between functions; function identity wins when the byte matcher has grabbed the wrong copy of near-identical code, which <a href="https://research.google/pubs/safe-icf-pointer-safe-identical-code-folding-in-gold/">identical-code folding</a> (ICF) makes common.</p>
 
 <figure class="card">
@@ -598,5 +603,6 @@ ul{padding-left:22px}li{margin-bottom:8px}
 })();
 </script>
 
+<div class="site-foot"><p><a href="https://willjordan.us/writing/">&larr; All writing</a> &middot; <a href="mailto:will.jordan@gmail.com">will.jordan@gmail.com</a> &middot; <a href="https://github.com/wjordan">@wjordan</a> &middot; <a href="https://willjordan.us/feed.xml">RSS</a></div>
 </body>
 </html>
