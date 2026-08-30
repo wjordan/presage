@@ -2,8 +2,11 @@ package delta
 
 import (
 	"bytes"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/wjordan/presage/delta/gobin"
@@ -46,30 +49,34 @@ func TestSelfPrediction(t *testing.T) {
 	}
 }
 
-// TestCorpusRoundTrip encodes every ordered pair of corpus binaries of the
-// same size class and checks the patch reproduces the target exactly. It is
-// the codec's end-to-end correctness test; the size numbers it prints are
-// what the documentation quotes.
+// TestCorpusRoundTrip encodes ordered pairs of corpus binaries and checks the
+// patch reproduces the target exactly. It is the codec's end-to-end
+// correctness test; the size numbers it prints are what the documentation
+// quotes.
+//
+// By default it runs every pair whose two binaries share a build flavour --
+// the pairings a release actually produces -- plus, for each pair of
+// flavours, one representative in each direction so that mismatched inputs
+// (stripped against unstripped, PIE against EXEC) still round-trip. That is
+// 168 of the 600 ordered pairs on the reference corpus and 7.9% of the work:
+// the 432 pairs it leaves out are repetitions of the same cross-flavour
+// shapes, and they cost 103 s each because the prediction is mostly wrong.
+// Set BINSYNC_CORPUS_ALL=1 for all of them (~35 min, the release gate).
 func TestCorpusRoundTrip(t *testing.T) {
-	files := corpus(t)
-	for i, a := range files {
-		for j, b := range files {
-			if i == j {
-				continue
+	for _, pair := range corpusPairs(corpus(t)) {
+		a, b := pair[0], pair[1]
+		t.Run(filepath.Base(a)+"->"+filepath.Base(b), func(t *testing.T) {
+			t.Parallel()
+			old, new := readFile(t, a), readFile(t, b)
+			var st Stats
+			patch, err := Encode(old, new, Options{Stats: &st})
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
 			}
-			t.Run(filepath.Base(a)+"->"+filepath.Base(b), func(t *testing.T) {
-				t.Parallel()
-				old, new := readFile(t, a), readFile(t, b)
-				var st Stats
-				patch, err := Encode(old, new, Options{Stats: &st})
-				if err != nil {
-					t.Fatalf("Encode: %v", err)
-				}
-				mustRoundTrip(t, old, new, patch)
-				t.Logf("transform %d, patch %d B (%.3f%% of %d), residual %d B",
-					st.Transform, len(patch), 100*float64(len(patch))/float64(len(new)), len(new), st.PredictErr)
-			})
-		}
+			mustRoundTrip(t, old, new, patch)
+			t.Logf("transform %d, patch %d B (%.3f%% of %d), residual %d B",
+				st.Transform, len(patch), 100*float64(len(patch))/float64(len(new)), len(new), st.PredictErr)
+		})
 	}
 }
 
@@ -114,6 +121,63 @@ func mustRoundTrip(t *testing.T, old, new, patch []byte) {
 	if !bytes.Equal(got.Bytes(), new) {
 		t.Fatalf("Apply produced %d bytes, want %d, and they differ", got.Len(), len(new))
 	}
+}
+
+// corpusPairs chooses the ordered pairs TestCorpusRoundTrip encodes. A corpus
+// name is "<version>-<flavour>", optionally "-rebuild"; the flavour is what
+// makes a pair cheap or expensive, so the default set is every same-flavour
+// pair plus, for each ordered pair of flavours, the smallest cross-flavour
+// pair -- smallest because these run in parallel and one 43 MB unstripped
+// target alone costs six minutes of wall clock.
+func corpusPairs(files []string) [][2]string {
+	if os.Getenv("BINSYNC_CORPUS_ALL") != "" {
+		var all [][2]string
+		for i, a := range files {
+			for j, b := range files {
+				if i != j {
+					all = append(all, [2]string{a, b})
+				}
+			}
+		}
+		return all
+	}
+	flavour := func(p string) string {
+		n := filepath.Base(p)
+		i := strings.Index(n, "-")
+		if i < 0 {
+			return n
+		}
+		return strings.TrimSuffix(n[i+1:], "-rebuild")
+	}
+	size := func(p string) int64 {
+		fi, err := os.Stat(p)
+		if err != nil {
+			return 1 << 62
+		}
+		return fi.Size()
+	}
+	var out [][2]string
+	rep := map[string][2]string{}
+	for i, a := range files {
+		for j, b := range files {
+			if i == j {
+				continue
+			}
+			fa, fb := flavour(a), flavour(b)
+			if fa == fb {
+				out = append(out, [2]string{a, b})
+				continue
+			}
+			k := fa + "->" + fb
+			if cur, ok := rep[k]; !ok || size(a)+size(b) < size(cur[0])+size(cur[1]) {
+				rep[k] = [2]string{a, b}
+			}
+		}
+	}
+	for _, k := range slices.Sorted(maps.Keys(rep)) {
+		out = append(out, rep[k])
+	}
+	return out
 }
 
 // corpus lists the binaries BINSYNC_CORPUS names, skipping the test when it
