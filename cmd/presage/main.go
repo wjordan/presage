@@ -2,6 +2,9 @@
 // target, and its application.
 //
 //	presage diff <old> <new> -o <patch>          make a patch
+//	presage diff -symbols OLD,NEW <old> <new> -o <patch>
+//	                                             the same, with the images' function
+//	                                             symbols (encoder-only; ELF or Breakpad)
 //	presage patch <old> <patch> -o <new>         apply one, verifying the result
 package main
 
@@ -15,7 +18,8 @@ import (
 	"time"
 
 	"github.com/wjordan/presage/presage"
-	"github.com/wjordan/presage/presage/gomod"
+	"github.com/wjordan/presage/presage/modules"
+	"github.com/wjordan/presage/presage/symbols"
 )
 
 func main() {
@@ -66,7 +70,7 @@ func flagsFirst(fs *flag.FlagSet, args []string) []string {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: presage diff <old> <new> -o <patch> | presage patch <old> <patch> -o <new>")
+	fmt.Fprintln(os.Stderr, "usage: presage diff [-symbols OLD,NEW] <old> <new> -o <patch> | presage patch <old> <patch> -o <new>")
 	os.Exit(2)
 }
 
@@ -74,13 +78,18 @@ func diff(args []string) error {
 	fs := flag.NewFlagSet("diff", flag.ExitOnError)
 	out := fs.String("o", "", "write the patch here (required)")
 	verbose := fs.Bool("v", false, "report where the patch bytes went")
-	modules := fs.String("modules", "", "restrict the encoder to these modules, by name (e.g. lz,eq)")
+	only := fs.String("modules", "", "restrict the encoder to these modules, by name (e.g. lz,eq)")
+	symPaths := fs.String("symbols", "", "function symbols of the old and new images, comma-separated (ELF with .symtab, or Breakpad text); encoder-only")
 	fs.Parse(flagsFirst(fs, args))
 	if fs.NArg() != 2 || *out == "" {
 		usage()
 	}
-	reg := gomod.Registry()
-	allowed, err := moduleIDs(reg, *modules)
+	syms, err := openSymbols(*symPaths)
+	if err != nil {
+		return err
+	}
+	reg := modules.Registry(syms[0], syms[1])
+	allowed, err := moduleIDs(reg, *only)
 	if err != nil {
 		return err
 	}
@@ -112,6 +121,28 @@ func diff(args []string) error {
 		}
 	}
 	return nil
+}
+
+// openSymbols parses -symbols: empty for none, else exactly two paths,
+// old then new. One path is not applied to both images unless written
+// twice ("-symbols A,A"): symbols of the wrong image are worse than none.
+func openSymbols(spec string) ([2]symbols.Reader, error) {
+	var syms [2]symbols.Reader
+	if spec == "" {
+		return syms, nil
+	}
+	paths := strings.Split(spec, ",")
+	if len(paths) != 2 {
+		return syms, fmt.Errorf("-symbols wants OLD,NEW (two paths), got %d", len(paths))
+	}
+	for i, p := range paths {
+		r, err := symbols.Open(p)
+		if err != nil {
+			return syms, err
+		}
+		syms[i] = r
+	}
+	return syms, nil
 }
 
 // moduleIDs resolves a comma-separated list of module names; empty means
@@ -152,7 +183,7 @@ func apply(args []string) error {
 	}
 	start := time.Now()
 	var buf bytes.Buffer
-	if err := presage.Apply([][]byte{old}, patch, gomod.Registry(), &buf); err != nil {
+	if err := presage.Apply([][]byte{old}, patch, modules.Registry(), &buf); err != nil {
 		return err
 	}
 	if err := os.WriteFile(*out, buf.Bytes(), 0o755); err != nil {

@@ -122,3 +122,51 @@ func TestCorruptBodyIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// cutModule is an exact module that predicts the reference verbatim and
+// cuts the target in half, so the residual is coded in pieces.
+type cutModule struct{ lzModule }
+
+func (cutModule) ID() byte              { return 9 }
+func (cutModule) Name() string          { return "cut" }
+func (cutModule) Exact() bool           { return true }
+func (cutModule) Cuts(t []byte) []int64 { return []int64{int64(len(t) / 2)} }
+func (cutModule) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
+	if len(refs[0]) != len(target) {
+		return nil, nil, ErrDeclined
+	}
+	return nil, refs[0], nil
+}
+func (cutModule) Materialise(refs [][]byte, plan []byte, n int64) ([]byte, error) {
+	return refs[0][:n], nil
+}
+
+func TestSplitResidual(t *testing.T) {
+	// Two halves of different character: scattered single-byte edits, then
+	// a repetitive block of shifted words, so a piecewise correction wins.
+	old := make([]byte, 8<<10)
+	for i := range old {
+		old[i] = byte(i * 7)
+	}
+	target := append([]byte(nil), old...)
+	for i := 0; i < len(target)/2; i += 97 {
+		target[i] ^= 0x5a
+	}
+	for i := len(target) / 2; i+8 <= len(target); i += 8 {
+		target[i]++
+	}
+	reg := NewRegistry()
+	reg.Add(cutModule{})
+	patch := roundTrip(t, [][]byte{old}, target, Options{Registry: reg})
+	h, err := ParseHeader(patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Flags&FlagSplitResidual == 0 {
+		t.Fatalf("flags %#x: the split residual was not chosen", h.Flags)
+	}
+	// Pieces that do not tile the region are refused, not misread.
+	if err := applySplitResidual(make([]byte, 10), []byte{2, 5, 0, 0, 0, 6, 0, 0, 0}); err == nil {
+		t.Fatal("pieces not covering the region were accepted")
+	}
+}

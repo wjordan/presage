@@ -125,17 +125,49 @@ func (copyModule) Materialise(refs [][]byte, plan []byte, length int64) ([]byte,
 // residual codes what the prediction got wrong. Exact regions use the
 // positional correction; declared regions use the shifted delta, whose
 // stream replaces the prediction by the target outright.
-func residual(m Module, pred, target []byte) ([]byte, error) {
+// residual codes what the prediction got wrong and returns the header flags
+// the stream needs. Exact regions use the positional correction, in pieces
+// where the module cuts the target and that is smaller (split.go); declared
+// regions use the shifted delta, whose stream replaces the prediction by
+// the target outright.
+func residual(m Module, pred, target []byte) ([]byte, byte, error) {
 	if !m.Exact() {
-		return delta.DiffLZ(pred, target), nil
+		return delta.DiffLZ(pred, target), 0, nil
 	}
 	if len(pred) != len(target) {
-		return nil, fmt.Errorf("presage: module %s predicted %d bytes for a %d-byte region", m.Name(), len(pred), len(target))
+		return nil, 0, fmt.Errorf("presage: module %s predicted %d bytes for a %d-byte region", m.Name(), len(pred), len(target))
 	}
-	return delta.EncodeCorrectionAdaptive(pred, target)
+	whole, err := delta.EncodeCorrectionAdaptive(pred, target)
+	if err != nil {
+		return nil, 0, err
+	}
+	var flags byte
+	if delta.UsesModalCorrection(whole) {
+		flags |= FlagModalCorrection
+	}
+	c, ok := m.(Cutter)
+	if !ok {
+		return whole, flags, nil
+	}
+	cuts := c.Cuts(target)
+	if len(cuts) == 0 {
+		return whole, flags, nil
+	}
+	split, modal, size, err := splitResidual(pred, target, cuts)
+	if err != nil {
+		return nil, 0, err
+	}
+	if size >= frameCost(whole) {
+		return whole, flags, nil
+	}
+	flags = FlagSplitResidual
+	if modal {
+		flags |= FlagModalCorrection
+	}
+	return split, flags, nil
 }
 
-func applyResidual(m Module, pred, stream []byte, length int64) ([]byte, error) {
+func applyResidual(m Module, pred, stream []byte, length int64, flags byte) ([]byte, error) {
 	if !m.Exact() {
 		return delta.PatchLZ(pred, stream, length)
 	}
@@ -143,6 +175,12 @@ func applyResidual(m Module, pred, stream []byte, length int64) ([]byte, error) 
 		return nil, fmt.Errorf("%w: module %s materialised %d bytes for a %d-byte region", ErrCorrupt, m.Name(), len(pred), length)
 	}
 	out := append([]byte(nil), pred...)
+	if flags&FlagSplitResidual != 0 {
+		if err := applySplitResidual(out, stream); err != nil {
+			return nil, err
+		}
+		return out, nil
+	}
 	if err := delta.ApplyFlaggedCorrection(out, stream); err != nil {
 		return nil, err
 	}

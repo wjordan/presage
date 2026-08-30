@@ -123,14 +123,12 @@ func Encode(refs [][]byte, target []byte, o Options) ([]byte, error) {
 		chosen = reg.Get(ModuleLZ)
 		plan, pred, _ = chosen.Analyse(refs, target)
 	}
-	res, err := residual(chosen, pred, target)
+	res, rflags, err := residual(chosen, pred, target)
 	if err != nil {
 		return nil, err
 	}
-	if chosen.Exact() && delta.UsesModalCorrection(res) {
-		h.Flags |= FlagModalCorrection
-		st.Flags = h.Flags
-	}
+	h.Flags |= rflags
+	st.Flags = h.Flags
 	h.Regions = []Region{{Length: int64(len(target)), Module: chosen.ID(), PlanLen: int64(len(plan))}}
 	st.Regions = []RegionStats{{Module: chosen.Name(), Length: int64(len(target)), Plan: len(plan), Residual: len(res), PredictErr: diffBytes(pred, target)}}
 
@@ -222,7 +220,7 @@ func Apply(refs [][]byte, patch []byte, reg *Registry, w io.Writer) error {
 		if predictionHash(pred) != root {
 			return &ErrPredictionDiverged{Region: i, Module: m.Name()}
 		}
-		bytes, err := applyResidual(m, pred, res, rg.Length)
+		bytes, err := applyResidual(m, pred, res, rg.Length, h.Flags)
 		if err != nil {
 			return err
 		}

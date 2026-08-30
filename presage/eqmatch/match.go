@@ -49,10 +49,33 @@ type Params struct {
 	// second run costs three varints. The setting is where this matcher
 	// parts company with Zucchini's, and it is worth 50 % on a DWARF pair.
 	Drop int
+	// Expect, when set, says where a structural model (a function map)
+	// predicts the source of destination offset dst. The matcher probes
+	// that source as a candidate and breaks near-ties towards it, because a
+	// caller with such a model codes the source column as a residual
+	// against it, so a run near the expected source is nearly free.
+	Expect func(dst int) (src int, ok bool)
+	// Slack is the exact-prefix advantage a candidate needs to displace the
+	// one nearest the expected source. Default 16.
+	Slack int
+	// MinFar is the shortest run emitted whose source is not near the
+	// expected one: such a run pays a full source offset, and a short one
+	// is usually an idiom the residual coder would have compressed anyway.
+	// Default Min, which disables the distinction.
+	MinFar int
 }
 
-// Defaults are the measured-best settings.
+// Defaults are the measured-best settings for data whose residual is an
+// LZ stream over the whole image (DWARF sections under the Go module).
 var Defaults = Params{Min: 32, Drop: 4096}
+
+// CodeDefaults are the measured-best settings for a whole ELF image whose
+// .text is matched on x86.Canonical bytes and whose source column is coded
+// against a function map (Expect set): Chrome 151 .169 → .173 2,617,700 and
+// libxul 154.0 → 154.0.1 3,632,264 through bench/elfpredict, against
+// 2,621,664 / 4,063,404 with Zucchini's stream
+// (docs/general/research/matcher-chrome.md).
+var CodeDefaults = Params{Min: 12, Drop: 24, MinFar: 96, Slack: 16}
 
 const (
 	maxSeed  = 16
@@ -72,6 +95,12 @@ const (
 	// slack is the prefix advantage a candidate needs before it beats one
 	// that continues the delta in force.
 	slack = 16
+	// near is how far from the expected source the chain is searched past
+	// its cap, and nearChain bounds that search. A function that gained a
+	// few bytes puts the rest of its old body a little away from where the
+	// map says, and the seed there is what the residual column wants.
+	near      = 1 << 16
+	nearChain = 1 << 12
 )
 
 func (p Params) withDefaults() Params {
@@ -80,6 +109,12 @@ func (p Params) withDefaults() Params {
 	}
 	if p.Drop <= 0 {
 		p.Drop = Defaults.Drop
+	}
+	if p.Slack <= 0 {
+		p.Slack = slack
+	}
+	if p.MinFar < p.Min {
+		p.MinFar = p.Min
 	}
 	return p
 }
@@ -227,18 +262,45 @@ func Match(src, dst []byte, p Params) []Run {
 				bestSrc, bestLen = hint, l
 			}
 		}
+		if p.Expect != nil {
+			if e, ok := p.Expect(pos); ok && e >= 0 && e+k <= len(src) {
+				expected = e
+				if l := matchForward(src, e, dst, pos, probe); l >= k && (bestSrc < 0 || betterCandidate(l, e, bestLen, bestSrc, expected, p.Slack)) {
+					bestSrc, bestLen = e, l
+				}
+			}
+		}
 		if bestLen < accept {
 			h := seedHash(dst, pos, k) & idx.mask
 			seen := 0
-			for c := idx.head[h]; c >= 0 && seen < chain; c = idx.next[c] {
+			c := idx.head[h]
+			for ; c >= 0 && seen < chain; c = idx.next[c] {
 				seen++
 				o := int(c)
 				l := matchForward(src, o, dst, pos, probe)
 				if l < k {
 					continue
 				}
-				if bestSrc < 0 || betterCandidate(l, o, bestLen, bestSrc, expected) {
+				if bestSrc < 0 || betterCandidate(l, o, bestLen, bestSrc, expected, p.Slack) {
 					bestSrc, bestLen = o, l
+				}
+			}
+			// Chains run from high offsets down; keep walking while the
+			// expected source may still be ahead, looking only near it.
+			if expected >= 0 && (bestSrc < 0 || absInt(bestSrc-expected) > near) {
+				for ; c >= 0 && seen < nearChain && int(c) >= expected-near; c = idx.next[c] {
+					seen++
+					o := int(c)
+					if o > expected+near {
+						continue
+					}
+					l := matchForward(src, o, dst, pos, probe)
+					if l < k {
+						continue
+					}
+					if bestSrc < 0 || betterCandidate(l, o, bestLen, bestSrc, expected, p.Slack) {
+						bestSrc, bestLen = o, l
+					}
 				}
 			}
 		}
@@ -249,7 +311,11 @@ func Match(src, dst []byte, p Params) []Run {
 		fwd := fuzzyForward(src, bestSrc, dst, pos, p.Drop)
 		back := fuzzyBackward(src, bestSrc, dst, pos, prevDstEnd, p.Drop)
 		s, d, n := bestSrc-back, pos-back, fwd+back
-		if n < p.Min {
+		need := p.Min
+		if expected < 0 || absInt(bestSrc-expected) > near {
+			need = p.MinFar
+		}
+		if n < need {
 			pos++
 			continue
 		}
@@ -269,7 +335,7 @@ func Match(src, dst []byte, p Params) []Run {
 // longer to displace one that starts closer to where the source column
 // expects the next run, because the column pays for the difference and
 // not for the run.
-func betterCandidate(l, o, bestLen, bestSrc, expected int) bool {
+func betterCandidate(l, o, bestLen, bestSrc, expected, slack int) bool {
 	if l >= bestLen+slack {
 		return true
 	}

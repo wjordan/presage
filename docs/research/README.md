@@ -4,7 +4,8 @@ Background research and measurements behind `docs/DESIGN.md`. Each document
 has a summary of findings at the top, cites primary sources inline, and marks
 inferences as such. All measurements were taken on 2026-08-26 with Go 1.26.4 on
 linux/amd64, except `go-residual-attribution.md` (2026-08-28, Go 1.27
-binaries).
+binaries). The general codec's own design, module specs (`elf-module.md`,
+`presage-core.md`) and measurements live in `docs/general/`.
 
 | Document | Question | Headline result |
 |---|---|---|

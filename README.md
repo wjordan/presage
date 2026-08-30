@@ -35,12 +35,19 @@ Every row is `presage diff`, then `presage patch`, then a byte-exact compare.
 |---|---:|---:|---:|---:|---:|
 | one-line change, 30 MB Go binary | **1,202** | 173,060 | 150,475 | 1,390,889 | 538,493 |
 | prometheus 3.13.1 → 3.13.2, Go, 94 MB | **70,195** | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
+| Chrome 151.0.7922.169 → .173, C++, 291 MB | **2,581,091** | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
+| Firefox libxul 154.0 → 154.0.1, C++, 186 MB | **3,010,960** | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
 
 The one-line change is the extreme case and the clearest picture of what
 prediction buys: 125× smaller than bsdiff, because almost the whole patch is
 displacement that presage recomputes rather than sends. The ratio falls as the
-pair grows further apart, to 38× on a Go patch release. That is expected:
-prediction removes displacement, and genuinely new code still has to be sent.
+pair grows further apart, to 38× on a Go patch release, 7× on the Chrome
+pair and 4× on libxul. That is expected: prediction removes displacement, and
+genuinely new code still has to be sent.
+
+On libxul the more honest denominator is what Mozilla actually ships, an
+mbsdiff patch of 10,779,184 whose blocks the MAR container compresses with XZ;
+presage is 3.6× smaller than that.
 
 ## How it works
 
@@ -54,6 +61,11 @@ A patch is a sequence of **regions**, each claimed by one module:
   function table a stripped Go binary still carries, predicts the new layout,
   and models `.gopclntab`, type descriptors and `.rodata`. A DWARF layer
   handles unstripped builds, including compressed debug sections.
+- `elf` — the ELF x86-64 module for everything else: aligns functions by
+  name from symbols the encoder has (the decoder never sees them), finds
+  equivalence runs modulo relocation with the native matcher, regenerates
+  `.rela.dyn`, `.eh_frame` and jump tables, repairs the address fields the
+  runs leave wrong, and shares the Go module's DWARF layer.
 
 Each module emits a **plan**, a small description of the change, and the
 core materialises the prediction natively from it, then codes the residual.
@@ -65,7 +77,7 @@ bsdiff need 9–12× the input in RAM.
 ## Status
 
 Milestone 1 of `docs/general/SPEC.md` is built: the container, the residual
-coder, the four modules above, and end-to-end verification. The rest of the
+coder, the five modules above, and end-to-end verification. The rest of the
 SPEC (the portable wasm module profile, cross-file priors, further domains)
 is design.
 
@@ -79,15 +91,21 @@ go install github.com/wjordan/presage/cmd/presage@latest
 
 presage diff old new -o patch      # -v reports where the patch bytes went
 presage patch old patch -o new
+
+presage diff old new -o patch -symbols old.debug,new.debug
 ```
+
+`-symbols` gives the encoder the unstripped builds or Breakpad `.sym` files
+for a non-Go binary; the patch does not carry them and the decoder does not
+need them.
 
 As a library:
 
 ```go
 patch, err := presage.Encode([][]byte{old}, target, presage.Options{
-    Registry: gomod.Registry(),
+    Registry: modules.Registry(oldSyms, newSyms), // symbols optional, encoder-only
 })
-err = presage.Apply([][]byte{old}, patch, gomod.Registry(), w)
+err = presage.Apply([][]byte{old}, patch, modules.Registry(), w)
 ```
 
 `Options.Modules` restricts the encoder to named modules, which is how the

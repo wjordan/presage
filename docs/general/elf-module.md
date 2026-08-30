@@ -1,0 +1,442 @@
+# The ELF module: `presage/elfmod`
+
+*Spec, 2026-08-29. Implementation-ready. The decoder-side pipeline of
+`bench/elfpredict` at its default `corrected-fields` rung, as one presage
+module behind the `Module` seam of `presage/module.go`, so that
+`presage diff old new -symbols old.sym,new.sym` and `presage patch` cover a
+non-Go ELF x86-64 image end to end. Design authority: `SPEC.md` §4–6, §10
+item 3; template: `presage/gomod` (`presage-core.md` §4, §7).*
+
+## Status (2026-08-30)
+
+Built and shipped: `presage/elfmod` (tracks T1–T4 of §8), `presage/symbols`,
+`-symbols` on `presage diff`, the matcher work of §4 in `presage/eqmatch`,
+and the split residual in the core (`SPEC.md` §6.1). Measured through the
+CLI, applied and `cmp`-verified:
+
+| pair | `presage diff -symbols` | harness, native matcher | harness, Zucchini stream |
+|---|---:|---:|---:|
+| Chrome 151 .169 → .173 | **2,581,091** (encode 111 s / 6.0 GB, apply 4.4 s / 3.8 GB) | 2,617,700 | 2,634,264 |
+| libxul 154.0 → 154.0.1 | **3,010,960** (encode 164 s, apply 2.1 s) | 3,632,264 | 4,063,404 |
+| libxul, no symbols | about 3.5 MB | — | — |
+
+The Go rows are unchanged (1,202 / 70,195); the prometheus DWARF pair moved
+332,414 → 330,678 from the matcher's near search. The port's self-prediction
+gate found three bugs the harness numbers had carried, so the module beats
+the harness on identical plans: a CIE with a personality routine (`zPLR`)
+was declined and its FDEs (198 libxul / 221 Chrome) left out of the
+regenerated `.eh_frame_hdr`, shifting every later entry; the function map
+collapsed duplicate names (Rust closures, monomorphisations,
+anonymous-namespace templates) onto the last old twin, 9,007 FDEs on an
+identical libxul; and ICF's several FDEs per initial location were all
+indexed where the linker indexes the first. The remaining gap to the
+harness-native number was the correction's shape, not a stage, and is
+closed by the split residual (`SPEC.md` G14).
+
+## 0. Targets, and what the harness numbers actually are
+
+| pair | table | harness, Zucchini stream | harness, native matcher | note |
+|---|---:|---:|---:|---|
+| Chrome 151.0.7922.169 → .173 (291 MB) | 2,634,264 | 2,634,264 (plan 1,244,060 + corr 1,434,428; 99.377 % correct) | **4,823,576** (plan 2,285,048 + corr 2,538,528; 98.389 %) — measured 2026-08-29, this tree | Zucchini 5,263,732 |
+| libxul 154.0 → 154.0.1 (186 MB) | 4,063,404 | 4,063,404 (plan 1,178,352 + corr 2,885,052; 96.968 %) | 4,780,572 | with `delta/modal.go` on the Zucchini-stream prediction: 3,977,931 |
+
+Three facts the table hides, all load-bearing for this spec:
+
+1. **Both table numbers were produced with Zucchini's equivalence stream**
+   (`-equivalence-patch`, `research/firefox-partial-mar.md` §"bottom line":
+   the bold row is the Zucchini-stream row; `chrome-elf-handoff.md` §"How to
+   run"). The module must use `presage/eqmatch` and never Zucchini, and the
+   native matcher is +17.6 % on libxul and **+83 % on Chrome**. Matching or
+   beating the table is therefore a matcher problem first and a port second
+   (§4, track T3). The Chrome gap is not the equivalence stream alone
+   (337,956 xz) — it is a worse prediction everywhere the layers project
+   *through* the runs: `.rela.dyn` addends (reloc plan 942,096 vs 97,124),
+   `.text` (2,226,012 vs 1,167,832).
+2. The harness's correction number is `min(lz-shape xz, columnar xz,
+   per-section split)` (`bench/elfpredict/main.go:145`, `correction.go:150`)
+   and its plan is a separate `xz -9e` stream. The product ships one body —
+   plan, prediction hash, residual — in `internal/cz` frames (raw / zstd /
+   brotli-11, 16 MiB window, 8 MiB `FrameSize`), with
+   `delta.EncodeCorrectionAdaptive` (plain, near, **modal**) as the residual.
+   On the Chrome-native run the harness's split picked the lz shape on every
+   cut and joint xz was +1.2 % over split; modal is worth −9.3 % on libxul.
+   Net: the product's terminal stage is expected within ±3 % of the harness on
+   the same prediction, slightly ahead on libxul.
+3. Every stage the harness measures at `corrected-fields` is decoder-faithful
+   (replayed from serialized plans and the old image only —
+   `image.go:17`), **except** that every plan carries target-derived section
+   geometry and counts it; that convention is kept (§2.8).
+
+## 1. Decoder data flow at `corrected-fields`
+
+`Materialise(refs, plan, length)` is `predictImage` (`image.go:17–189`) with
+the Go-tables branch removed. Inputs: `old = refs[0]`, the plan. Output:
+`length` bytes, length-exact. Stages, in order; each names what it reads from
+the old image and what from the plan.
+
+| # | stage | harness | reads | writes |
+|---|---|---|---|---|
+| 0 | parse the plan container; parse the equivalence header (`OldLen, NewLen, OldText, NewText`) | `image.go:18–30`, `equivalence.go:373` | plan | — |
+| 1 | decode the structure: dense function map from boundary indices + extents guessed from old padding, then points and ranges | `plan.go:388, 428, 482`; `detectBoundaries :134`, `sourceExtents :164`, `referenceTargets :192` | old `.text` | `predictionPlan` |
+| 2 | decode equivalences; sources of runs that start inside a mapped function come from the residual column against `srcPredictor.at` | `equivalence.go:269`, `:48` | structure | `[]equivalence` |
+| 3 | lay: `out` zero-filled, `0xcc` inside new `.text`; copy every run whole-image | `image.go:50–58` | old, runs | all sections |
+| 4 | build the oracles once: `addressLookup` over the structure (points → map → ranges), `sourceEquivalenceMapper` (runs de-overlapped by source, `project` extrapolates to nearest run) | `equivalence.go:500–575`, `:114–193`, `plan.go:562–646` | — | — |
+| 5 | `.rela.dyn`: predict slot-gap column from the old table through the **pointer oracle**, apply gap correction (exact), predict addends by slot join, apply addend correction, predict tail, apply; `assembleRela` | `reloc.go:488, 299, 380, 391, 464` | old table, plan corrections | `.rela.dyn` |
+| 6 | DWARF field layer (unstripped ELF only): `dwarf.Apply` with the pointer oracle as `ptr` and `funcSizeDeltas(structure)` | `image.go:103–113`, `dwarf.go:75`, `presage/dwarf` | old debug secs, runs clipped per section | debug sections |
+| 7 | `.eh_frame`: walk the **old** section's FDEs, project each `initial_location` field through the runs, retarget via the pointer oracle, fix `address_range` where old sizes agree; regenerate `.eh_frame_hdr` from the placed FDEs | `ehframe.go:155, 212, 235` | old `.eh_frame`, section maps | both sections |
+| 8 | `.rodata` switch tables: enumerate candidate spans in the old section by signature (`roDataSpans`), apply only the variants whose `Keep` bit is set, retarget entries through the pointer oracle | `rodata.go:167, 199, 232` | old `.rodata`, `Keep` bits | `.rodata` |
+| 9 | retarget `.text`: walk references in every mapped body of the laid prediction, resolve each field's old target through the **image oracle** (projection first inside `.text`), rewrite the displacement | `equivalence.go:616` | — | `.text` fields |
+| 10 | per-function choice: structural prediction of old `.text` relocated through `addressLookup.target`, copy chosen bodies over the retargeted ones | `image.go:158–175`, `plan.go:669` | old `.text`, choice bits | chosen bodies |
+| 11 | field fix, last: enumerate 4-byte displacement sites by walking the finished `.text`; apply address remaps (index into the sorted distinct-target domain + shift), then per-field deltas | `fieldfix.go:245, 42, 119` | plan columns | `.text` fields |
+
+Then the core: `applyResidual` → `delta.ApplyFlaggedCorrection` (positional,
+`Exact() == true`), prediction hash check, target hash check
+(`presage/codec.go:157`).
+
+Stages 5–8 are each conditional on their sub-plan being non-empty, exactly as
+the harness treats every sub-plan as optional (`image.go:63, 103, 114, 143`).
+Stage 10 is conditional on a non-empty choice stream; stage 11 on a non-empty
+field stream. Stage 1 with zero mappings (no symbols, §3.4) leaves `Maps`
+empty: stages 2, 9, 10, 11 take their no-map branches (`equivalence.go:269`
+`pred == nil`, `:616` whole-section walk, `fieldfix.go:42` `len(maps)==0`).
+
+**Layer order is not negotiable.** §13.1 of `chrome-elf-whole-image.md`
+measured the alternatives; and stage 11 names fields by position in a walk
+of the finished prediction, so every stage that can move a `.text` byte runs
+before it.
+
+## 2. Wire format
+
+The module's plan is the harness's combined plan (`equivalence.go:686`)
+re-cut as a fixed sequence of eight uvarint-length-prefixed streams, no
+magic (the container's region header names the module), no "optional
+trailing streams" convention (that existed to keep old measurements
+byte-comparable; an absent layer is an empty stream):
+
+```
+plan := eq structure choices reloc ehframe rodata fields dwarf
+        each: uvarint(len) bytes
+```
+
+Each stream keeps the harness serialization verbatim — these columns were
+tuned against xz through eleven EPP revisions (`plan.go:15–41`) and the
+`chrome-elf-whole-image.md` §12 sweep found nothing better — with the
+changes listed.
+
+| stream | format | transmitted | derived on both sides | change from harness |
+|---|---|---|---|---|
+| `eq` | `EQP2`: `OldLen NewLen OldText{Addr,Off,Size} NewText{…} predicted:u8` then streams `SrcSkip SrcResidual DstSkip CopyLen` (`equivalence.go:332`) | run columns, geometry | which source column each run uses (from the map) | drop the magic; keep the rest |
+| `structure` | `EPPB`: `OldAddr NewAddr TargetLen mode:u8 n` + columns `srcIndexDelta srcOffset extentResidual sizeDelta startResidual copyBits`, then points `n idxDelta offset shiftDelta`, then ranges `n (oldΔ newΔ size)` (`plan.go:237`) | map columns, points, ranges | boundary list, extents, reference-target list (`plan.go:134,164,192`) | drop the magic; `mode` must be `planDense` (0) — `planSparse`/`planGoDerived` are not written and are rejected on read |
+| `choices` | bitmap, one bit per mapping in destination order (`equivalence.go:856`) | | | none |
+| `reloc` | `OldOff OldSize NewOff NewSize RelCount TailCount Anchor`, old and new section maps (`(addrΔ offΔ size)*`), streams `gap addend tail` (each a `delta.EncodeCorrection` stream), optional flags word (`reloc.go:184`) | geometry, three column corrections | predicted columns | `PairByRow`/`NoAddends`/`DerivedGeometry` flags are not written (experiment rungs); `HeadCount` kept behind its flag (Go-linker PIE tables) |
+| `ehframe` | nine uvarints of geometry (`ehframe.go:42`) | geometry | FDE list, `.eh_frame_hdr` contents | none |
+| `rodata` | eight uvarints of geometry, `n Keep[n]` (`rodata.go:48`) | geometry, one bit per (span, variant) | candidate spans | none |
+| `fields` | streams `RemapIndex RemapShift FieldIndex FieldDelta` (`fieldfix.go:89`) | | site list, remap domain | none |
+| `dwarf` | `presage/dwarf` `Plan.Marshal()`; the runs are *not* carried (`Plan.MarshalRuns`) — the decoder clips the whole-image equivalences per section (`dwarf.go:48`) exactly as the harness does | | | none |
+
+Section geometry appears in `eq` (text), `reloc` (every allocated section
+with file bytes, both images), `ehframe`, `rodata` and `dwarf`. Old-side
+geometry is derivable from the old image's section headers; it is ~1 KB
+against a 2.6 MB patch and is kept as shipped so that the port is a copy,
+not a redesign. Listed as a later saving, not part of this milestone.
+
+Everything else the harness serialized — `plan.bin`, the derived/retarget
+/selected artefacts, memo keys — is encoder-internal scaffolding and has no
+wire form here.
+
+## 3. Encoder
+
+`Analyse(refs, target)` runs the harness's construction (`main.go:1140–1210`)
+and `buildRungPlans` (`main.go:412–720`) restricted to the `corrected-fields`
+path, then materialises its own plan and returns that prediction — never the
+encoder's working copy — so `Materialise` is proven on every encode (as
+`gomod.Analyse` does with `layer`).
+
+Order (each step names its harness source):
+
+1. Sections of both images (`elf.go:34`): allocated, non-TLS, non-zero,
+   `Addr != 0`; `.text` required, else `ErrDeclined`. A Go binary that
+   `gomod` accepted never reaches here (registry order, §6); one it declined
+   is fine here.
+2. Code units from the symbol tables (§3.4; `elf.go:122`) — both images.
+3. `constructPlan` (`match.go:54`): name match with `chooseNameCandidate`
+   (`:27`; size equal → `x86.Equal` canonical → byte-equal), then content
+   match by `x86.ContentHash` verified with `x86.Equal`; `Ranges =
+   sectionRanges` (`elf.go:73`). `inferReferencePoints` (`match.go:141`).
+4. Equivalences: `eqmatch.Match(old, new, params)` whole image
+   (`nativeeq.go:23`), `encodeColumns` (`equivalence.go:258`), marshalled
+   against the map's `srcPredictor` (`equivalence.go:332`; `main.go:426`).
+5. Two `.text` predictions: structural (`predictDecoded`, relocate, plan
+   lookup) and retargeted (lay runs in `.text`, stage 9) →
+   `chooseStructuralFunctions` with the `bytes` score (`equivalence.go:856`;
+   `main.go:344`). The harness's `corr`/`fields` scores are dropped.
+6. `buildRelocPlan` (`reloc.go:519`) with the pointer oracle over the map,
+   when both images have `.rela.dyn`/`.rela` with ≥1 `R_X86_64_RELATIVE`
+   entry (`elf.go:247`, `main.go:452–485`); otherwise a geometry-only reloc
+   plan (`main.go:487`) — the later layers read the section maps from it.
+7. DWARF plan (`dwarf.go:63`, `main.go:566–592`): `dwarf.Build` over the
+   unallocated sections present in both images, `withRecords` as the
+   harness (`main.go:578`), `addrMap` = pointer oracle. Absent when the pair
+   has no `.debug_info`. Compressed debug sections are already expanded by
+   the core (`delta.ExpandPair`, `codec.go:96`) before the module sees them.
+8. `.eh_frame` geometry plan when both images have `.eh_frame` and the new
+   one `.eh_frame_hdr` (`main.go:596–608`).
+9. `.rodata`: predict once with everything above (stages 0–9 of §1 —
+   the harness predicts the `modelled-eh-frame` rung, `main.go:628`), then
+   `selectRoDataTables` (`rodata.go:260`) → `Keep`.
+10. Fields: predict again with the rodata plan (`main.go:653`), then
+    `encodeFieldFix(gate=false)` on the `.text` window (`fieldfix.go:132`).
+11. Final: `Materialise` of the assembled plan → `pred`; return.
+
+Three full predictions per encode (steps 9, 10, 11): ~2.2 s each on Chrome
+(`chrome-elf-handoff.md` §"cost table"). The harness's stage timings, xz
+probes, `planComponents`, memo and `-out` artefacts are not ported.
+
+### 3.4 Symbols: encoder-only input
+
+SPEC G7: correspondence is shipped, not recovered; the encoder holds the
+unstripped artefacts. Package `presage/symbols`:
+
+```go
+// Funcs lists the function symbols of an image: address (virtual), size,
+// name. Names are fingerprinted by the caller; the reader keeps none.
+type Func struct{ Addr, Size uint64; Name string }
+type Reader interface{ Funcs(visit func(Func)) error }
+
+func Open(path string) (Reader, error)   // sniffs: Breakpad text ("MODULE "/"FUNC "), else ELF
+func FromELF(f *elf.File) Reader         // .symtab STT_FUNC; falls back to .gopclntab (readPclntabFuncs) when there is no symtab
+func FromBreakpad(r io.Reader) Reader    // "FUNC [m ]addr size paramsize name", hex, module-relative == vaddr for PIE
+```
+
+`elfmod.CodeUnits(r Reader, text Section) ([]CodeUnit, Stats, error)` is
+`loadCodeUnits` (`elf.go:122`): group by address, max size, 16-byte name
+fingerprints, clip to the next start / end of `.text`.
+
+Module configuration, mirroring `gomod.Module{Stats}`:
+
+```go
+type Module struct {
+    Symbols [2]symbols.Reader // old, new; nil = no symbols
+    Params  eqmatch.Params    // zero = eqmatch.Defaults
+    Stats   *Stats
+}
+```
+
+CLI: `presage diff -symbols OLD,NEW old new -o patch`. Both paths sniffed
+by `symbols.Open`; Chrome's are `symbols-<ver>/debug-info/chrome.debug`
+(ELF, 1.45 GB each — the reader streams `f.Symbols()` and releases it, as
+`elf.go:171–176`), Firefox's are the `FUNC` lines of `libxul.so.sym`
+(`research/firefox-partial-mar.md` §6). `-symbols` with one path applies to
+both images only if the user says so explicitly (`-symbols A,A`); with the
+flag absent the module runs **without a map** (§1, zero mappings): whole-
+image equivalences, section-range retargeting, the reloc/eh_frame/rodata
+layers and the field fix still apply. That is the harness's
+`equivalence-derived` rung plus the late layers, and it is the honest
+symbol-less number, not a decline. `Analyse` records in `Stats.Notes`
+whether symbols were used.
+
+## 4. Equivalence source: `presage/eqmatch`, and the gap it must close
+
+The module calls `eqmatch.Match` with `Module.Params` (default
+`eqmatch.Defaults`, `Min 32 / Drop 4096` — the libxul harness row's
+`-native-equivalences` with default min/drop, `firefox-partial-mar.md`
+§6). No Zucchini anywhere in the encode path; `parseExternalEquivalence`
+(`equivalence.go:209`) is not ported.
+
+Measured cost of that decision, same tree, same plans otherwise:
+
+| pair | Zucchini stream | native | gap |
+|---|---:|---:|---:|
+| Chrome 151 .169→.173 | 2,634,264 | 4,823,576 | +83.1 % |
+| libxul 154.0→154.0.1 | 4,063,404 | 4,780,572 | +17.6 % |
+
+`research/matcher-spike.md` §5 named the three things Zucchini's matcher
+has that this one lacks and judged them "not worth doing on this
+evidence" — the evidence being two Go pairs measured under
+`-no-text-equivalences`, where the runs never touch `.text`. On a C++ image
+the runs *are* the `.text` base and the projection every data layer
+resolves pointers through, and the judgement inverts. Track T3 (§8) owns
+closing it; the levers, in the order the spike ranked them:
+
+1. **Reference-aware matching** in `.text`: compare and extend on
+   `x86.Canonical` bytes (PC-relative fields zeroed) so two calls to the same
+   moved function agree, then let stage 9 retarget the fields. Seeds hashed
+   on canonical bytes; the extension scores canonical agreement.
+2. **Anchor quality**: a second, longer seed table consulted first, or a
+   suffix array over old (`+4 B/old byte`).
+3. **Selection**: a pruning pass over candidate runs before the greedy scan
+   commits.
+4. Per-section `Drop`: the data sections are projected through
+   (`project` extrapolates to the *nearest* run, `equivalence.go:176`), so an
+   over-extended run in `.data.rel.ro` mis-places every pointer after the
+   divergence; a smaller drop there is the cheap experiment.
+
+Exit for T3 is measured with the harness, not the module:
+`go run ./bench/elfpredict … -native-equivalences -rungs corrected-fields`
+on both pairs, ≤ the Zucchini-stream number.
+
+**Done** (`research/matcher-chrome.md`): Chrome 4,823,576 → 2,617,700
+(Zucchini-stream re-run on the same tree 2,621,664), libxul 4,780,572 →
+3,632,264. The ladder: tuning alone floors at 3,462,416 (drop 24 / min 24);
+masking `.text` on `x86.Canonical` 3,120,372; `Params.Expect`, the
+function map's predicted source, probed and near-tie-broken toward
+2,945,952; a near search past the 32-candidate chain cap within 64 KB of
+the expected source 2,788,040; `Params.MinFar` (a run far from the
+expected source must be ≥ 96 B) 2,646,484; min 12 under that 2,617,700.
+Lever 2 (suffix array) and lever 3 (global selection) were not needed.
+`eqmatch.CodeDefaults` = `{Min 12, Drop 24, MinFar 96, Slack 16}` is what
+the module uses; the Go DWARF path keeps `Defaults`.
+
+## 5. Inventory: harness → product
+
+| harness | lines | disposition | target |
+|---|---:|---|---|
+| `plan.go` types, `marshal`/`unmarshalPlan`, `readDenseMaps`, `readPointsAndRanges`, `detectBoundaries`, `sourceExtents`, `referenceTargets` + cache, `addressLookup`, `predictDecoded` | ~600 | move; drop `planSparse`, `planGoDerived`, `sparseStructure`, `derivedMap`, `Prior` | `presage/elfmod/structure.go` |
+| `equivalence.go` `equivalencePlan`, `srcPredictor`, `sourceEquivalenceMapper`, `encodeColumns`, `decodeEquivalences`, `marshal`/`parse`, `sourceAt`, `read/writeDisplacement`, `oracleParts`, `retargetEquivalencePrediction`, `chooseStructuralFunctions` (`bytes` only), `wrongCount` | ~550 | move; drop `parseExternalEquivalence`, `readFixedStream`, `sparseWalkOffsets`, `predictEquivalences`, `predictCombined`, `withEquivalences`, all `probe*` | `presage/elfmod/equiv.go`, `oracle.go`, `retarget.go` |
+| `match.go` | 223 | move | `presage/elfmod/match.go` |
+| `elf.go` `section`, `image`, `loadImage` (from bytes, not path), `sectionRanges`, `codeUnit`, `loadCodeUnits`, `relaSection`; `isBreakpad`, `readBreakpadFuncs`, `readPclntabFuncs` | 271 | move / split | `presage/elfmod/image.go`; `presage/symbols/` |
+| `image.go` `predictImage`, `funcSizeDeltas` | ~200 | adapt: becomes `Materialise`; drop `goMapDeriver`, `goGeometry`, `ApplyGoTables` branch, `noGoText`/`noDwarf` flags | `presage/elfmod/elfmod.go` |
+| `reloc.go` | 561 | move; drop `PairByRow`/`NoAddends`/`DerivedGeometry`, `relocDiag`, `relocCodecStats` | `presage/elfmod/reloc.go` |
+| `ehframe.go` | 245 | move; drop `reportEhFrame` | `presage/elfmod/ehframe.go` |
+| `rodata.go` | 307 | move; drop `reportRoData` | `presage/elfmod/rodata.go` |
+| `fieldfix.go` | ~310 | move; drop `probeFieldBases`, `gate` parameter (always false) | `presage/elfmod/fieldfix.go` |
+| `dwarf.go` | 104 | move (adapter over `presage/dwarf`) | `presage/elfmod/dwarf.go` |
+| `nativeeq.go` | 89 | fold into `Analyse` (three lines) | — |
+| `parallel.go` | 59 | move | `presage/elfmod/parallel.go` |
+| `main.go` construction (`:1140–1210`), `runCombined` (`:250–410`), `buildRungPlans` (`:412–720`) | ~500 | adapt: the `corrected-fields` path only, as `Analyse`; drop rungs, memo, `-resume`, `measure`, `attribute`, `planColumnCost`, reports | `presage/elfmod/encode.go` |
+| `correction.go`, `packing.go`, `xz.go`, `timing.go`, `memo.go`, `attribute.go`, `instpos/instdiff/dispcol/immprobe/condprobe/valueprobe/orderprobe/rnfdict/operands.go` | ~3,500 | drop (measurement, probes, memo) | — |
+| `*_test.go` `plan_test` round-trips, `reloc_test`, `ehframe_test`, `rodata_test`, `fieldfix_test`, `correction_test`, `breakpad_test` | ~1,100 | move the round-trip/replay tests; drop harness-only ones | `presage/elfmod/*_test.go`, `presage/symbols/*_test.go` |
+| `delta/x86` (`Relocate`, `References`, `WalkBodies`, `ContentHash`, `Equal`, `Canonical`) | — | reuse as is | — |
+| `presage/dwarf`, `presage/eqmatch` | — | reuse; T3 changes `eqmatch` internals, not its API | — |
+
+Net: ≈ 3,300 harness lines become ≈ 2,600 product lines plus tests. The
+harness keeps working throughout (it is not modified by the port); once the
+gate is green the harness's whole-image rungs may be re-pointed at
+`elfmod` in a follow-up, not now.
+
+## 6. Decoder contract
+
+`Materialise(refs, plan, length)`:
+
+- Pure function of `refs[0]` and `plan` (SPEC §4.3); `length` must equal
+  the equivalence header's `NewLen`, else `ErrCorrupt`. `Exact() == true`:
+  the prediction is length-exact and the residual is the positional
+  correction (SPEC §6.1, G9) — every layer writes into a pre-sized `out`.
+  A region of this module is never length-declared.
+- Every offset and length in the plan is bounds-checked before use, as the
+  harness does (`image.go:70, 119, 147`; `plan.go:428–480`); a plan that
+  fails a check returns `presage.ErrCorrupt`. The prediction hash catches
+  what the checks let through.
+- Parallelism: stages 9, 10, 11 walk one body per goroutine
+  (`parallel.go`); output regions are disjoint and every lookup is a read,
+  so results are order-independent. `runtime.GOMAXPROCS(0)` workers.
+- Memory bound: `old` + `out` + structural `.text` prediction (`Text.Size`)
+  + reference-target list (8 B × targets: 49 MB on Chrome) + the run and
+  map tables. ≈ 2.9× the image on Chrome (≈ 850 MB); the structural
+  prediction is freed after stage 10. The encoder additionally holds the
+  target, the matcher's hash chain (4 B × `1<<26` + 4 B × old bytes ≈ 1.4 GB
+  on Chrome) and two extra predictions: ≈ 6× the image.
+- Time: decode ≈ 2.5 s on Chrome (harness `predict corrected-fields`
+  2.24 s) plus the residual apply; encode ≈ 60 s cold (symbols 2 s, match
+  2.3 s, points 3.5 s, `eqmatch` 9 s, reloc plan, three predictions, field
+  fix 2.3 s, residual).
+
+## 7. Gate
+
+`presage/elfmod/corpus_test.go`, modelled on `presage/gomod/corpus_test.go`:
+
+- `TestPairs`: for each of Chrome (`~/.cache/presage-chrome-zucchini/
+  chrome-151.0.7922.{169,173}` with `symbols-…/debug-info/chrome.debug`) and
+  libxul (`~/.cache/presage-pairs/libxul-154.0{,.1}.so` with
+  `libxul-154.0{,.1}.funcs`): skip when any file is absent; `presage.Encode`
+  with the ELF module and its symbols; `presage.Apply`; `bytes.Equal`.
+  Assert the region's module is `elf`, and the patch size against two
+  budgets: **parity** — ≤ 1.03 × the harness `-native-equivalences`
+  `corrected-fields` number of the same tree (proves the port; today
+  4,823,576 / 4,780,572), and **product** — ≤ the table (2,634,264 /
+  4,063,404), which depends on T3 and is `t.Skip`-ped behind
+  `PRESAGE_ELF_PRODUCT_GATE=1` until T3 lands, then made unconditional.
+  Manual-run class (minutes); tagged like the Go corpus gate.
+- `TestSelfPrediction`: each image against itself with its own symbols:
+  `PredictErr == 0`, residual ≤ 64 B (as the Go gate).
+- `TestNoSymbols`: libxul pair without `Symbols`; must round-trip; size
+  recorded, not asserted.
+
+Fast unit tests (<1 s each, `t.Parallel`), from the harness's own where they
+exist: structure plan round-trip and truncation rejection
+(`plan_test.go:15, 44`), equivalence plan round-trip, reloc column replay on
+a synthetic table (`reloc_test.go`), `.eh_frame` walk + hdr regeneration
+(`ehframe_test.go`), rodata span detection and `Keep` selection
+(`rodata_test.go`), field-fix encode/apply round-trip (`fieldfix_test.go`),
+Breakpad and ELF symbol readers on small fixtures, and a synthetic whole
+module test: a hand-built two-function ELF-shaped byte image (no real
+linker) through `Analyse` → `Materialise` → equality with the returned
+prediction.
+
+## 8. Work breakdown
+
+The shared type file is written **first**, by the integrator, before the
+tracks start, so that T1/T2 compile independently:
+`presage/elfmod/types.go` = `section`, `image` (bytes-based), `mapping`,
+`addressRange`, `addressPoint`, `equivalence`, `sectionMap` +
+`offsetOf`/`addrOf`, `planReader`/`appendU`/`appendS`/`appendStream`,
+`cmpU`, and the two oracle signatures `func(uint64) x86.Target` named
+`ImageOracle`/`PointerOracle`. Straight copies from `plan.go`, `elf.go`,
+`reloc.go:40–127`.
+
+**T1 — structure, equivalences, oracles, `.text` (core).**
+Files: `structure.go`, `equiv.go`, `oracle.go`, `retarget.go`, `match.go`,
+`image.go`, `parallel.go`, `elfmod.go` (`Module`, `Materialise` stages
+0–4, 9–10 with 5–8, 11 as calls into functions T2 provides — stubbed as
+no-ops returning `nil` until T2 lands), `encode.go` steps 1–5, 11.
+Interfaces out: `decodeStructure`, `decodeEquivalences`, `newOracleParts`
+(`.image(rp)`, `.pointer(rp)`, `.sm`, `.lk`), `retargetText`,
+`chooseStructuralFunctions`. Done-check: unit tests above for its files;
+libxul pair without symbols round-trips through `presage.Encode/Apply`
+(T4's CLI not needed — a test can call the API); with symbols via the API,
+`Stats.PredictErr` on `.text` within 1 % of the harness's
+`per-function-selection` rung (`-rungs text-ladder`).
+
+**T2 — regenerators and the field fix.**
+Files: `reloc.go`, `ehframe.go`, `rodata.go`, `fieldfix.go`, `dwarf.go`.
+Depends only on `types.go` and `presage/dwarf`, `delta`, `delta/x86`.
+Interfaces out: `buildRelocPlan/applyReloc`, `applyEhFrame`,
+`selectRoDataTables/applyRoData`, `encodeFieldFix/applyFieldFix`,
+`buildDwarfPlan/applyDwarf`, each taking `(out, old []byte, plan, oracle
+funcs, mapper)` exactly as the harness signatures do. Done-check: the
+harness's own unit tests pass moved over; a replay test per layer on a
+synthetic image (encode → apply → equal).
+
+**T3 — matcher parity (`presage/eqmatch`).**
+Files: `presage/eqmatch/*` only; API unchanged (`Match`, `Params`,
+`Encode`, `Decode`). Levers in §4 order; measure each with the harness on
+both pairs (`-native-equivalences -rungs corrected-fields`, Chrome memo is
+warm). Done-check: Chrome ≤ 2,634,264 and libxul ≤ 4,063,404 at the
+harness, no regression on the Go DWARF pair (`prom-3.13.1-D` 323,744 ±
+3 %) — the layered Go region uses the same matcher. Record the ladder in
+`research/matcher-spike.md` §7.
+
+**T4 — symbols, CLI, gate, docs.**
+Files: `presage/symbols/*`, `cmd/presage/main.go` (`-symbols`, module
+registration order §6, `-v` prints the ELF module's notes),
+`presage/elfmod/corpus_test.go`, `docs/general/baselines.md` (Chrome and
+libxul rows return only when the product gate is green, sourced from
+`presage diff`), `README.md` table. Done-check: `symbols` unit tests on
+Breakpad and ELF fixtures; `presage diff -symbols` on both pairs produces a
+patch that `presage patch` applies byte-exactly.
+
+**Integration.** Registry: `gomod.Registry()` becomes a `presage/modules`
+(or `cmd`-side) registry that adds `gomod.Module{}` then `elfmod.Module{}`;
+`ModuleELF = 4`. Candidate order is id order, so a Go binary is taken by
+`go` first and `elf` sees only what `go` declined. Wire T2's functions
+into T1's stages 5–8 and 11; run the parity gate; then T3's matcher under
+the product gate; regenerate the two table rows from `presage diff`;
+update `SPEC.md` §10 item 3 status.
+
+## 9. Not in scope
+
+Deriving old-side geometry (§2.8); re-pointing the harness at `elfmod`;
+non-x86-64 ELF (`delta/x86` is the only relocator); PE/Mach-O (SPEC §10
+item 6); the region DAG (SPEC §5.2) — the module is one region, one plan,
+as `gomod` is; symbol-less matching by content only beyond what
+`constructPlan`'s hash pass already does.

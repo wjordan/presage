@@ -93,12 +93,21 @@ literal stream, and measures 2.5–2.8× larger than `lz` on every pair tried
 libxul 154.0 → 154.0.1 16,403,799 vs 10,594,355); as a declared region with
 an `lz` residual it only ties `lz` at 3× the time. Its runs are the base
 under a module that models part of a file — the layered DWARF plan — which
-is where the matcher's measured gain came from. Ids above 15 are for
-admitted modules (SPEC §4.1), unused yet.
+is where the matcher's measured gain came from. `4 elf` (`presage/elfmod`,
+`elf-module.md`) — any other ELF x86-64 image: plan is the function map,
+reference points, equivalence runs, per-function choices and the
+regenerator plans (`.rela.dyn`, `.eh_frame`, jump tables, field fix, DWARF);
+symbols are an encoder-only input (`Module.Symbols`, `presage/symbols`);
+exact. Registered after `go`, so a Go binary `go` declines falls to it. Ids
+above 15 are for admitted modules (SPEC §4.1), unused yet.
 
-Residual: exact regions use the positional correction (`SPEC.md` §6.1 modes
-0–1, as `delta` ships them; modes 2–3 are a follow-up); declared regions use
-the `lz` stream, and for `lz` regions the residual *is* the plan.
+Residual: exact regions use the positional correction (`SPEC.md` §6.1: the
+adaptive shapes and the modal correction), or, where the module implements
+`presage.Cutter`, the split residual — one piece per cut, each in the
+smaller of the adaptive shapes or the columnar form, flagged
+`FlagSplitResidual` (`presage/split.go`, `delta/columnar.go`); declared
+regions use the `lz` stream, and for `lz` regions the residual *is* the
+plan.
 
 Selection (SPEC §6.4) in this milestone is tier 1 only: the Go module claims
 the whole file when both binaries parse, else `lz` does. Lowering (§5.4) is

@@ -171,3 +171,43 @@ func TestEncodeDecode(t *testing.T) {
 		t.Fatalf("empty run list: %v %v", runs, err)
 	}
 }
+
+// TestExpectPrefersMappedSource: the same block occurs twice in the source;
+// with Expect naming the second copy, the run is taken from there even
+// though the first copy is found first in the chain.
+func TestExpectPrefersMappedSource(t *testing.T) {
+	rng := rand.New(rand.NewSource(3))
+	block := make([]byte, 400)
+	rng.Read(block)
+	src := append(append(append([]byte(nil), block...), make([]byte, 1000)...), block...)
+	dst := append([]byte(nil), block...)
+	second := len(block) + 1000
+	runs := Match(src, dst, Params{Min: 16, Drop: 24, Expect: func(int) (int, bool) { return second, true }})
+	if len(runs) != 1 || runs[0].Src != uint64(second) {
+		t.Fatalf("runs = %+v, want one run from %d", runs, second)
+	}
+	// And a source the map places a little off is still found near it.
+	runs = Match(src, dst, Params{Min: 16, Drop: 24, Expect: func(int) (int, bool) { return second + 7, true }})
+	if len(runs) != 1 || runs[0].Src != uint64(second) {
+		t.Fatalf("runs = %+v, want one run from %d", runs, second)
+	}
+}
+
+// TestMinFarRejectsShortFarRuns: a 40-byte idiom recurring far from the
+// expected source is emitted at MinFar 32 and dropped at MinFar 64.
+func TestMinFarRejectsShortFarRuns(t *testing.T) {
+	rng := rand.New(rand.NewSource(4))
+	idiom := make([]byte, 40)
+	rng.Read(idiom)
+	src := append(append([]byte(nil), idiom...), make([]byte, 1<<17)...)
+	dst := make([]byte, 1000)
+	rng.Read(dst)
+	copy(dst[500:], idiom)
+	expect := func(int) (int, bool) { return 1<<16 + 100, true }
+	if runs := Match(src, dst, Params{Min: 16, Drop: 24, MinFar: 32, Expect: expect}); len(runs) != 1 {
+		t.Fatalf("MinFar 32: runs = %+v, want the idiom", runs)
+	}
+	if runs := Match(src, dst, Params{Min: 16, Drop: 24, MinFar: 64, Expect: expect}); len(runs) != 0 {
+		t.Fatalf("MinFar 64: runs = %+v, want none", runs)
+	}
+}

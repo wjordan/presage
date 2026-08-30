@@ -28,7 +28,12 @@ const (
 	// shape it does not know.
 	FlagModalCorrection = 2
 
-	knownFlags = FlagDebugZ | FlagModalCorrection
+	// FlagSplitResidual marks a patch whose exact regions may carry the
+	// correction in pieces, each compressed on its own (split.go). Named
+	// here for the same reason as the modal flag.
+	FlagSplitResidual = 4
+
+	knownFlags = FlagDebugZ | FlagModalCorrection | FlagSplitResidual
 )
 
 // FrameSize is the uncompressed size of one body frame and of one

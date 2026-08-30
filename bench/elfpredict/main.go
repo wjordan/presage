@@ -249,7 +249,7 @@ func allMappedPlan(p predictionPlan) predictionPlan {
 
 func runCombined(externalPath string, oldImage, newImage *image, structure predictionPlan, structureBytes, structuralPred []byte, outDir string, reference int) (*combinedReport, planArtifacts, error) {
 	t := startStage("equivalence parse")
-	ep, err := buildEquivalencePlan(externalPath, oldImage, newImage)
+	ep, err := buildEquivalencePlan(externalPath, oldImage, newImage, structure)
 	if err != nil {
 		return nil, planArtifacts{}, err
 	}
