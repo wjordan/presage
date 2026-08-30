@@ -8,7 +8,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/wjordan/go-binsync/release"
+	"github.com/wjordan/presage/release"
 )
 
 // The release cache holds the recent binaries this machine published, so that

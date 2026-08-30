@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/wjordan/go-binsync/delta/gobin"
+	"github.com/wjordan/presage/delta/gobin"
 )
 
 // layout is everything the decoder needs besides the old binary and the

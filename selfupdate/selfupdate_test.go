@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wjordan/go-binsync/release"
+	"github.com/wjordan/presage/release"
 )
 
 // testUpdater builds an Updater whose two process-ending calls are inert and

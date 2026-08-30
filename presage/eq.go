@@ -3,7 +3,7 @@ package presage
 import (
 	"fmt"
 
-	"github.com/wjordan/go-binsync/presage/eqmatch"
+	"github.com/wjordan/presage/presage/eqmatch"
 )
 
 // ModuleEq is the equivalence module: the region is predicted by copying

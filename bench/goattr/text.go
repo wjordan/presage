@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/wjordan/go-binsync/delta/gobin"
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta/gobin"
+	"github.com/wjordan/presage/delta/x86"
 )
 
 // The name normalisation delta/match.go pairs on. It is copied rather than

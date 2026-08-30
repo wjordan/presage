@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wjordan/go-binsync/presage"
-	"github.com/wjordan/go-binsync/presage/gomod"
+	"github.com/wjordan/presage/presage"
+	"github.com/wjordan/presage/presage/gomod"
 )
 
 func main() {

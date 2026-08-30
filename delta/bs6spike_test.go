@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wjordan/go-binsync/delta/internal/lz"
+	"github.com/wjordan/presage/delta/internal/lz"
 )
 
 // TestBS6Spike prices Percival's difference-string modes (thesis 2.7, the

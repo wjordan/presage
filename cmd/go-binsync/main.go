@@ -15,7 +15,7 @@ import (
 
 	// s3:// is a heavy dependency and registers itself; the CLI documents
 	// the scheme, so the CLI is what imports it (docs/DESIGN.md 7).
-	_ "github.com/wjordan/go-binsync/store/s3"
+	_ "github.com/wjordan/presage/store/s3"
 )
 
 // Exit codes (README.md 5).

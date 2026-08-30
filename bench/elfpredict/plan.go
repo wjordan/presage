@@ -9,7 +9,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta/x86"
 )
 
 // EPP5 columnised the function map so that neither the extent of a function

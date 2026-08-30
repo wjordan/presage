@@ -6,9 +6,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/wjordan/go-binsync/codec"
-	"github.com/wjordan/go-binsync/presage"
-	"github.com/wjordan/go-binsync/release"
+	"github.com/wjordan/presage/codec"
+	"github.com/wjordan/presage/presage"
+	"github.com/wjordan/presage/release"
 )
 
 // diff and patch are offline access to the codec, for development and for the

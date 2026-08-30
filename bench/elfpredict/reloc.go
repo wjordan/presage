@@ -7,8 +7,8 @@ import (
 	"os"
 	"slices"
 
-	"github.com/wjordan/go-binsync/delta"
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta"
+	"github.com/wjordan/presage/delta/x86"
 )
 
 // Chrome's .rela.dyn is 26 MB of pure address churn: of the 796,001 slots

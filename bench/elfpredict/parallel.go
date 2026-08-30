@@ -5,7 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta/x86"
 )
 
 // workers is the pool size the per-body passes use: one goroutine per core.

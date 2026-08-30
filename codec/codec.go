@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/wjordan/go-binsync/delta"
-	"github.com/wjordan/go-binsync/presage"
-	"github.com/wjordan/go-binsync/presage/gomod"
+	"github.com/wjordan/presage/delta"
+	"github.com/wjordan/presage/presage"
+	"github.com/wjordan/presage/presage/gomod"
 )
 
 // Options selects how a patch is encoded.

@@ -24,7 +24,7 @@ import (
 	"os/exec"
 	"sync"
 
-	"github.com/wjordan/go-binsync/delta"
+	"github.com/wjordan/presage/delta"
 )
 
 // regionsM is regions() with the merge threshold as a parameter: m is how

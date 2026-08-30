@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wjordan/go-binsync/codec"
-	"github.com/wjordan/go-binsync/release"
+	"github.com/wjordan/presage/codec"
+	"github.com/wjordan/presage/release"
 )
 
 type server struct {

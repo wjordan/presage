@@ -24,7 +24,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/wjordan/go-binsync/presage/gomod"
+	"github.com/wjordan/presage/presage/gomod"
 )
 
 type row struct {

@@ -19,8 +19,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/wjordan/go-binsync/release"
-	"github.com/wjordan/go-binsync/store"
+	"github.com/wjordan/presage/release"
+	"github.com/wjordan/presage/store"
 )
 
 // DefaultMaxSize bounds the release a target is willing to allocate for. The

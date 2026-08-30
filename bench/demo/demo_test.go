@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wjordan/go-binsync/codec"
-	"github.com/wjordan/go-binsync/release"
+	"github.com/wjordan/presage/codec"
+	"github.com/wjordan/presage/release"
 )
 
 // buildAssets writes the smallest possible version of what

@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wjordan/go-binsync/codec"
-	"github.com/wjordan/go-binsync/release"
-	"github.com/wjordan/go-binsync/store"
+	"github.com/wjordan/presage/codec"
+	"github.com/wjordan/presage/release"
+	"github.com/wjordan/presage/store"
 )
 
 // relSize is large enough that a patch between two releases is far smaller

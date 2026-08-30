@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wjordan/go-binsync/codec"
-	"github.com/wjordan/go-binsync/presage"
-	"github.com/wjordan/go-binsync/release"
-	"github.com/wjordan/go-binsync/store"
+	"github.com/wjordan/presage/codec"
+	"github.com/wjordan/presage/presage"
+	"github.com/wjordan/presage/release"
+	"github.com/wjordan/presage/store"
 )
 
 // casAttempts bounds the compare-and-swap loop on the pointer. Two publishers

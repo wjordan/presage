@@ -6,7 +6,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/wjordan/go-binsync/delta/gobin"
+	"github.com/wjordan/presage/delta/gobin"
 )
 
 // ---------------------------------------------------------------- level 8

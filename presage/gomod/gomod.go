@@ -11,11 +11,11 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/wjordan/go-binsync/delta"
-	"github.com/wjordan/go-binsync/internal/cz"
-	"github.com/wjordan/go-binsync/presage"
-	"github.com/wjordan/go-binsync/presage/dwarf"
-	"github.com/wjordan/go-binsync/presage/eqmatch"
+	"github.com/wjordan/presage/delta"
+	"github.com/wjordan/presage/internal/cz"
+	"github.com/wjordan/presage/presage"
+	"github.com/wjordan/presage/presage/dwarf"
+	"github.com/wjordan/presage/presage/eqmatch"
 )
 
 // Module is the Go module. Register it with presage.Registry.Add.

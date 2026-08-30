@@ -8,8 +8,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/wjordan/go-binsync/delta"
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta"
+	"github.com/wjordan/presage/delta/x86"
 )
 
 func TestPlanRoundTripAndCorrection(t *testing.T) {

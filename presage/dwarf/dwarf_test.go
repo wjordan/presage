@@ -5,7 +5,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/wjordan/go-binsync/presage/eqmatch"
+	"github.com/wjordan/presage/presage/eqmatch"
 )
 
 // A DWARF 5 abbreviation table: 1 = compile_unit (name string, stmt_list

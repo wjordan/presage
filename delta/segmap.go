@@ -5,8 +5,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/wjordan/go-binsync/delta/gobin"
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta/gobin"
+	"github.com/wjordan/presage/delta/x86"
 )
 
 // The segment map for resized functions (docs/DESIGN.md 3.2.1).

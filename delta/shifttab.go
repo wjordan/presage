@@ -5,7 +5,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/wjordan/go-binsync/delta/gobin"
+	"github.com/wjordan/presage/delta/gobin"
 	"golang.org/x/arch/x86/x86asm"
 )
 

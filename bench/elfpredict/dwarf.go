@@ -1,9 +1,9 @@
 package main
 
 import (
-	"github.com/wjordan/go-binsync/delta/x86"
-	"github.com/wjordan/go-binsync/presage/dwarf"
-	"github.com/wjordan/go-binsync/presage/eqmatch"
+	"github.com/wjordan/presage/delta/x86"
+	"github.com/wjordan/presage/presage/dwarf"
+	"github.com/wjordan/presage/presage/eqmatch"
 )
 
 // The DWARF field layer is presage/dwarf; this is the harness's adapter to

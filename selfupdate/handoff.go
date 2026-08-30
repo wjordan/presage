@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wjordan/go-binsync/release"
+	"github.com/wjordan/presage/release"
 )
 
 // restart hands the service over to the release installed at Path: it starts

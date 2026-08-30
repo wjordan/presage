@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wjordan/go-binsync/release"
+	"github.com/wjordan/presage/release"
 )
 
 // The whole handoff against a real second build: this process serves, execs

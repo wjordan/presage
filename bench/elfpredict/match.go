@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"slices"
 
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta/x86"
 )
 
 type matchStats struct {

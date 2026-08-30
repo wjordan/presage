@@ -4,8 +4,8 @@ import (
 	"errors"
 	"slices"
 
-	"github.com/wjordan/go-binsync/delta"
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta"
+	"github.com/wjordan/presage/delta/x86"
 )
 
 // predictImage is the whole-image counterpart of predictCombined. The plan is

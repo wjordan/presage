@@ -19,7 +19,7 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/wjordan/go-binsync/presage/eqmatch"
+	"github.com/wjordan/presage/presage/eqmatch"
 )
 
 const (

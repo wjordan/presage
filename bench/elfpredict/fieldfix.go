@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"slices"
 
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta/x86"
 )
 
 // The correction codec treats .text as bytes, but a quarter of what it has to

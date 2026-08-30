@@ -3,8 +3,8 @@ package delta
 import (
 	"encoding/binary"
 
-	"github.com/wjordan/go-binsync/delta/gobin"
-	"github.com/wjordan/go-binsync/delta/internal/lz"
+	"github.com/wjordan/presage/delta/gobin"
+	"github.com/wjordan/presage/delta/internal/lz"
 )
 
 // This file exists for measurement. bench/goattr attributes the residual --

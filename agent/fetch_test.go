@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wjordan/go-binsync/release"
-	"github.com/wjordan/go-binsync/store"
+	"github.com/wjordan/presage/release"
+	"github.com/wjordan/presage/store"
 )
 
 // smallFrames republishes data as a blob of frameLen-byte frames. The frame

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wjordan/go-binsync/release"
+	"github.com/wjordan/presage/release"
 )
 
 // TestOnceFollowsTheChain is the whole loop over a file:// store: two

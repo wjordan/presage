@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta/x86"
 )
 
 // probeEquivalenceValue asks what the equivalence stream is still paying for.

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/wjordan/go-binsync/delta/internal/lz"
-	"github.com/wjordan/go-binsync/internal/cz"
+	"github.com/wjordan/presage/delta/internal/lz"
+	"github.com/wjordan/presage/internal/cz"
 )
 
 // The correction turns a prediction into the real file (docs/DESIGN.md 3.4).

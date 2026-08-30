@@ -12,7 +12,7 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/wjordan/go-binsync/selfupdate"
+	"github.com/wjordan/presage/selfupdate"
 )
 
 // version is stamped by the test's go build; addr is the pair both builds ask

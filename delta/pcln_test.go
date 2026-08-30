@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wjordan/go-binsync/delta/gobin"
+	"github.com/wjordan/presage/delta/gobin"
 )
 
 // rec builds a _func record with the given shape and array values.

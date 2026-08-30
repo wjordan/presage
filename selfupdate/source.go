@@ -3,8 +3,8 @@ package selfupdate
 import (
 	"context"
 
-	"github.com/wjordan/go-binsync/agent"
-	"github.com/wjordan/go-binsync/release"
+	"github.com/wjordan/presage/agent"
+	"github.com/wjordan/presage/release"
 )
 
 // agentSource is the embedded shape's update source: go-binsync/agent, with the

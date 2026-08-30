@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/wjordan/go-binsync/delta"
+	"github.com/wjordan/presage/delta"
 )
 
 func main() {

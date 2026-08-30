@@ -22,8 +22,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/wjordan/go-binsync/delta"
-	"github.com/wjordan/go-binsync/internal/cz"
+	"github.com/wjordan/presage/delta"
+	"github.com/wjordan/presage/internal/cz"
 )
 
 // buckets groups value bytes by the length of the run they belong to;

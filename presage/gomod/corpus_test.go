@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wjordan/go-binsync/delta"
-	"github.com/wjordan/go-binsync/delta/gobin"
-	"github.com/wjordan/go-binsync/presage"
+	"github.com/wjordan/presage/delta"
+	"github.com/wjordan/presage/delta/gobin"
+	"github.com/wjordan/presage/presage"
 )
 
 // The milestone-1 exit (docs/general/presage-core.md §1), over the corpus

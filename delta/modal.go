@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/wjordan/go-binsync/internal/cz"
+	"github.com/wjordan/presage/internal/cz"
 
-	"github.com/wjordan/go-binsync/delta/internal/lz"
+	"github.com/wjordan/presage/delta/internal/lz"
 )
 
 // The modal correction is the positional correction with the transform named

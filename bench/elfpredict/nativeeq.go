@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/wjordan/go-binsync/presage/eqmatch"
+	"github.com/wjordan/presage/presage/eqmatch"
 )
 
 // The whole-image equivalence stream matched here (presage/eqmatch) instead

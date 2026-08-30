@@ -3,9 +3,9 @@ package delta
 import (
 	"sort"
 
-	"github.com/wjordan/go-binsync/delta/gobin"
+	"github.com/wjordan/presage/delta/gobin"
 
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta/x86"
 )
 
 // Far pieces (transform 3). A resized function's aligner finds the parts of

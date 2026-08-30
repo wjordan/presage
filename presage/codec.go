@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/wjordan/go-binsync/delta"
+	"github.com/wjordan/presage/delta"
 )
 
 // Options controls Encode.

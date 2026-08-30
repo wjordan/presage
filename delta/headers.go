@@ -3,7 +3,7 @@ package delta
 import (
 	"encoding/binary"
 
-	"github.com/wjordan/go-binsync/delta/gobin"
+	"github.com/wjordan/presage/delta/gobin"
 )
 
 // The ELF header, the program headers and the section headers are a few

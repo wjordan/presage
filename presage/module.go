@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/wjordan/go-binsync/delta"
+	"github.com/wjordan/presage/delta"
 )
 
 // ErrDeclined is returned by a module's Analyse for an input it does not

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/wjordan/go-binsync/delta/internal/lz"
+	"github.com/wjordan/presage/delta/internal/lz"
 )
 
 // TestBS6LZSpike prices the bsdiff-6 ideas that touch the *matcher* rather

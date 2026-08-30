@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wjordan/go-binsync/agent"
-	"github.com/wjordan/go-binsync/release"
-	"github.com/wjordan/go-binsync/store"
+	"github.com/wjordan/presage/agent"
+	"github.com/wjordan/presage/release"
+	"github.com/wjordan/presage/store"
 )
 
 // fill writes a deterministic pseudo-random stream, so a test binary is

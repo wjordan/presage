@@ -7,7 +7,7 @@ import (
 	"os"
 	"slices"
 
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta/x86"
 )
 
 // .eh_frame is the same shape of problem as .rela.dyn: 98.211% of the new

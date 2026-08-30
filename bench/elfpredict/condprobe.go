@@ -5,7 +5,7 @@ import (
 	"math"
 	"os"
 
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta/x86"
 )
 
 // The byte correction is compressed by xz, which never sees the prediction.

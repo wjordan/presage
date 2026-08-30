@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/wjordan/go-binsync/delta/gobin"
+	"github.com/wjordan/presage/delta/gobin"
 )
 
 // gfBlock and gfTol are the content-map parameters for the stage-1b tables.

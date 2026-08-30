@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wjordan/go-binsync/presage"
+	"github.com/wjordan/presage/presage"
 )
 
 func TestPlanParts(t *testing.T) {

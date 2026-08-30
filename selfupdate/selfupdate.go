@@ -17,8 +17,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wjordan/go-binsync/agent"
-	"github.com/wjordan/go-binsync/release"
+	"github.com/wjordan/presage/agent"
+	"github.com/wjordan/presage/release"
 )
 
 // The bounds README 7 and docs/DESIGN.md 6.3 fix on a handoff.

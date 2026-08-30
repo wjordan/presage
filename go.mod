@@ -1,4 +1,4 @@
-module github.com/wjordan/go-binsync
+module github.com/wjordan/presage
 
 go 1.27
 

@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wjordan/go-binsync/agent"
-	"github.com/wjordan/go-binsync/release"
+	"github.com/wjordan/presage/agent"
+	"github.com/wjordan/presage/release"
 )
 
 // restartTimeout is README.md 5's bound on --restart. The loop imposes none,

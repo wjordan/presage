@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/wjordan/go-binsync/delta"
-	"github.com/wjordan/go-binsync/delta/gobin"
+	"github.com/wjordan/presage/delta"
+	"github.com/wjordan/presage/delta/gobin"
 )
 
 // ---------------------------------------------------------------- level 'a'

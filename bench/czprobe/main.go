@@ -14,8 +14,8 @@ import (
 
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
-	"github.com/wjordan/go-binsync/internal/cz"
-	"github.com/wjordan/go-binsync/presage"
+	"github.com/wjordan/presage/internal/cz"
+	"github.com/wjordan/presage/presage"
 )
 
 func main() {

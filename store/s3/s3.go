@@ -1,7 +1,7 @@
 // Package s3 is the s3:// backend for go-binsync/store. It registers itself from
 // init, so only a program that imports it links the AWS SDK:
 //
-//	import _ "github.com/wjordan/go-binsync/store/s3"
+//	import _ "github.com/wjordan/presage/store/s3"
 //
 // A store URL is s3://bucket/prefix; an object key k lives at prefix + "/" + k.
 // Region and credentials come from the ambient environment (AWS_REGION,
@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/wjordan/go-binsync/store"
+	"github.com/wjordan/presage/store"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta/x86"
 )
 
 // wrongRuns counts both quantities the correction is priced on: the number of

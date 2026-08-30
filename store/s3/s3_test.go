@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wjordan/go-binsync/store"
+	"github.com/wjordan/presage/store"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/wjordan/go-binsync/delta"
-	"github.com/wjordan/go-binsync/internal/cz"
+	"github.com/wjordan/presage/delta"
+	"github.com/wjordan/presage/internal/cz"
 )
 
 func main() {

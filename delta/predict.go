@@ -5,8 +5,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/wjordan/go-binsync/delta/gobin"
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta/gobin"
+	"github.com/wjordan/presage/delta/x86"
 )
 
 // dataBlock is the content-map block size. 16 bytes is small enough to

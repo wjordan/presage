@@ -5,7 +5,7 @@ import (
 	"os"
 	"slices"
 
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta/x86"
 	"golang.org/x/arch/x86/x86asm"
 )
 

@@ -7,7 +7,7 @@ import (
 	"os"
 	"slices"
 
-	"github.com/wjordan/go-binsync/delta/x86"
+	"github.com/wjordan/presage/delta/x86"
 )
 
 // .rodata is the largest non-.text cost at 409,800 XZ, and the shape of its

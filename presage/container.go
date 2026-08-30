@@ -6,7 +6,7 @@ import (
 
 	"github.com/zeebo/blake3"
 
-	"github.com/wjordan/go-binsync/internal/cz"
+	"github.com/wjordan/presage/internal/cz"
 )
 
 // Magic is the first four bytes of every patch.
