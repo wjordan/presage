@@ -6,14 +6,20 @@ it. Read this first; it is a map, not a result.*
 ## Where it stands
 
 A predict-then-correct codec for whole ELF images beats the incumbent by
-**50.05%**: 2,634,264 XZ bytes (was 49.11% / 2,678,488 before §17 fixed the VEX/EVEX RIP-relative gate) against a RELA-aware Zucchini's 5,263,732, on
+**50.19%**: 2,621,664 XZ bytes (2,634,264 before the reference walk moved to
+per-body walking and the correction header widened its shape field; 2,678,488
+before §17 fixed the VEX/EVEX RIP-relative gate) against a RELA-aware
+Zucchini's 5,263,732, on
 Chrome 151.0.7922.169 → .173 (Linux x86-64, 291 MB image, `.text` =
 225,655,845 B). It replays byte-exactly. The decoder holds only the old image
 and the patch.
 
-The prediction is **99.377% byte-correct**, and essentially all of the gain
+The prediction is **99.392% byte-correct**, and essentially all of the gain
 since the first working version came from *encoding* rather than from
-predicting better. Split: plan 1,244,060 + correction 1,434,428.
+predicting better. Split: plan 1,244,736 + correction 1,376,928.
+
+*Re-measured 2026-08-29 on `3150f8c`; the two figures above the split are from
+the same run.*
 
 Two principles paid for almost everything, eleven times between them:
 

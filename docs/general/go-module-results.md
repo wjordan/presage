@@ -201,9 +201,13 @@ Design: SPEC §4.5; research: `dwarf-research.md`.
 
 | pair | presage xz | Zucchini | ratio |
 |---|---:|---:|---:|
-| Chrome 151.0.7922.169 → .173 (stable patch) | 2,634,264 | 5,889,352 | 44.7 % |
+| Chrome 151.0.7922.169 → .173 (stable patch) | 2,621,664 | 5,889,352 | 44.5 % |
 | Chrome 151.0.7922.173 → 152.0.7977.64 (cross-major) | 14,155,296 | 16,592,664 | 85.3 % |
 | Firefox libxul 154.0 → 154.0.1 | 4,064,180 | 9,544,652 | 42.6 % |
+
+Only the first row was re-measured on `3150f8c` (2026-08-29). The other two
+predate the per-body reference walk and the two-bit correction shape field, so
+each is a few thousand bytes high; neither has been re-run.
 
 Two Chrome pairs measured earlier today (152.0.7977.54 → .64, 154.0.8029.0
 → .8030.0) used Chrome-for-Testing binaries with google-chrome debug-info
