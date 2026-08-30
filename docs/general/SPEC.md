@@ -425,22 +425,55 @@ can see what shipping the module would save.
 ### 6.1 Positional correction (length-exact regions)
 
 binsync's stage-2 coder, generalised with Percival's difference modes. Per
-differing region (maximal runs, merged when < 6 B apart):
+differing region (maximal runs, merged when < 32 B apart), with the mode in
+its own column rather than packed into the span:
 
 ```
-gap  span<<2 | mode
-mode 0  literals
-mode 1  local match: (lit, copy, seek) triples over the prediction's own
-        bytes from region start to min(256, end-of-file) past its end
-mode 2  multiprecision difference, little-endian balanced digits
-mode 3  multiprecision difference, big-endian balanced digits
+gaps    gap varint
+spans   span varint
+modes   one byte per region
+  0  literals
+  1  local match: (lit, copy, seek) triples over the prediction's own
+     bytes from region start to min(256, end-of-file) past its end
+  2  want^pred
+  3  want-pred, bytewise
+  4  multiprecision difference, little-endian balanced digits, 4-byte words
+  5  multiprecision difference, little-endian balanced digits, 8-byte words
 ```
 
-Modes 2–3 are new: a mispredicted rel32 costs one or two small bytes
-instead of four literals (thesis §2.7). The encoder tries all modes per
-region and keeps the smallest. Applied in place over the prediction buffer
-(the match window runs forward into untouched bytes), so the decoder holds
-references + one output buffer.
+Modes 2–5 are new. A multiprecision region carries, per word, a significance
+count followed by that many balanced base-256 digits of `want-pred`, low digit
+first, high zero digits dropped: a mispredicted rel32 costs one small byte
+instead of four literals (thesis §2.7). Regions are widened to an 8-byte
+boundary so a word covers a whole field. The **region's digit-stream length is
+not transmitted** — the decoder derives it by walking one significance count
+per word — which is worth 3.8 points of the whole gain on its own
+(`research/bsdiff6-spike.md` §2.4).
+
+Big-endian digits are **not** a mode. Measured against little-endian they lose
+on every pair and width tried (prometheus 50,795 → 52,531 at 8 bytes, 51,175 →
+52,594 at 4; Chrome's `.data.rel.ro` 452,504 → 453,124), because the targets
+are little-endian and the digit that moves is the low one. Reserve the slot for
+a big-endian target if one ever appears.
+
+Applied in place over the prediction buffer (the match window runs forward into
+untouched bytes), so the decoder holds references + one output buffer. Decoding
+is a byte loop: 24.9 ms for a 186 MB file.
+
+The sub-streams are packed one of two ways and the encoder keeps the smaller,
+because which wins is a property of the file. Handing them to the container as
+one buffer lets them share a compression context, which is worth 0.7 % when the
+whole correction is 40 KB and no sub-stream has enough history to stand alone.
+Compressing each on its own is worth 1.75 % when they are large, where an mp8
+digit stream and a `.text` literal stream have nothing to say to each other.
+The two forms are separate shapes so the decoder needs no heuristic.
+
+Built and measured against the shipped two-shape coder (`delta/modal.go`):
+libxul 154.0 → 154.0.1's correction goes 3,291,571 → 2,818,115 (**−14.4 %**),
+its whole patch 4,470,494 → 3,997,038 (**−10.6 %**); prometheus 3.13.1 → 3.13.2
+goes 43,936 → 39,673 (**−9.7 %**) and its patch 74,112 → 69,949 (**−5.6 %**).
+The Go pair gains less because the Go module has already predicted its pointer
+tables structurally, so they are not in the residual at all.
 
 ### 6.2 Shifted delta (length-declared regions)
 
@@ -450,13 +483,23 @@ padded/truncated rather than exact (binsync stage 1a/1b). The module's
 
 ### 6.3 Typed sub-streams and the terminal stage
 
-All regions' residuals go to **four framework-fixed sub-streams** — control
-varints, literal bytes, pointer/operand differences, table payloads — each
-compressed as one stream per 8 MiB frame with the smaller of zstd and
-brotli (binsync D16; quality 11 ≤ 4 MiB, 10 above). Modules may apply a
-declared pre-transform to their residual (xor against prediction, integer
-delta, byte-plane split for fixed-width records — the weights module's
-exponent/mantissa split is this) but not their own entropy coder (R6).
+All regions' residuals go to **framework-fixed sub-streams** — control varints
+and one payload stream **per residual mode** — each compressed as one stream
+per 8 MiB frame with the smaller of zstd and brotli (binsync D16; quality 11
+≤ 4 MiB, 10 above). Routing by mode rather than by region length is worth
+0.7 points on its own, and sharing one payload stream across modes gives back
+3.5 of the 14.4 (`research/bsdiff6-spike.md` §2.4): a 4-byte significance
+column and an 8-byte one are different alphabets and must not be interleaved.
+
+Do **not** cut a sub-stream into smaller pieces for locality. Regions are
+emitted in file order, so a fixed-size cut approximates a section boundary for
+free, and it costs monotonically at every size from 4 MiB down to 64 KiB
+(§2.5). Coder state is not reset at region boundaries.
+
+Modules may apply a declared pre-transform to their residual (xor against
+prediction, integer delta, byte-plane split for fixed-width records — the
+weights module's exponent/mantissa split is this) but not their own entropy
+coder (R6).
 Coder state is not reset at region boundaries.
 
 ### 6.4 Selection
@@ -477,6 +520,25 @@ Plus: hysteresis (a module switch must beat the neighbour's module by more
 than the selector entry costs); cheap-first branch-and-bound (`copy` with
 zero residual ends the search); and the proxy-vs-actual accuracy is
 recorded on the corpus and published, as BtrBlocks did.
+
+Two results from measuring this on the correction's *mode* selection, which is
+the same shape of problem one level down (`research/bsdiff6-spike.md` §2.4).
+They do not transfer automatically to *module* selection, where a switch has a
+real setup cost that a mode switch does not, but they bound what to expect:
+
+- **Score candidates by what their bytes cost, not by how many there are.**
+  Length cannot separate literals, `xor` and `sub` — all three emit one byte
+  per byte — so a length-scored selector silently measures only "is this
+  multiprecision". An order-0 model per destination sub-stream, trained over
+  three passes on what the previous pass picked, doubled the measured win.
+  It is also cheap: on a 186 MB file the three passes cost 3.2 s against the
+  13.9 s of the single compression they replace two of.
+- **Hysteresis bought almost nothing.** A full Viterbi over the region
+  sequence — modes as states, the trained cost as the emission, λ bits per
+  switch — is worth 0.55 points at its best λ and nothing at all once §6.3's
+  per-mode routing is in place, where λ=0 wins. The intuition that a good
+  selector should be sticky did not survive measurement; what looked like
+  stickiness was sub-streams not being mixed.
 
 Cost = selector entry + side tables + marginal residual. This is the Roaring
 rule without Roaring's closed forms: sizes are measured, not modelled.
@@ -607,13 +669,14 @@ small steps — is where every domain's number is large.
 | G3 | Modules referenced by hash, never inlined in a patch | RFC 9842 / Shared Brotli precedent; module ≈ patch size; cache once |
 | G4 | Every module op has a lowering to core ops | a v1 decoder reads every future patch; capability negotiation becomes a byte cost, not a failure |
 | G5 | Hard per-region selection over structural regions, encoder-side | switching-cost theory and every fast system in the survey (R5) |
-| G6 | One terminal residual coder with four typed sub-streams; modules only pre-transform | shared statistics (R6); binsync's 6–7 % from stream choice, 0.1 % from stream splitting |
+| G6 | One terminal residual coder; control varints plus one payload sub-stream per residual mode; modules only pre-transform | shared statistics (R6); binsync's 6–7 % from stream choice; routing payloads by mode rather than by length is 0.7 points and sharing one payload stream across modes gives back 3.5 of 14.4 (`research/bsdiff6-spike.md` §2.4) |
 | G7 | Function/tensor correspondence is shipped, not recovered | encoder has both unstripped artefacts (R7); decoder stays O(metadata) |
 | G8 | Prediction hash is a chunked tree hash | localises divergence to a region/module; enables streaming verification |
 | G9 | Length-exact vs length-declared is a module property that selects the residual coder | D17 in binsync: 66 KB vs 17 KB when the wrong coder is used |
 | G10 | Zucchini-style `refs` op kept under the layout predictor | layout is not always a function of the old file (R9) |
 | G11 | Weights are a second-tier module and not a headline claim | 1.5×/2× measured ceilings (R10) |
 | G12 | Syndrome correction reserved, not built | 7× cost pairwise on Percival's corpus; attractive only after prediction (R11) |
+| G13 | Multiprecision balanced-digit difference is a residual mode, chosen per region alongside its word width, with the digit-stream length derived rather than sent | −10.6 % of the whole patch on a non-Go binary, −5.0 % on a Go one; a relocation predictor in forty lines where no module models the table. Little-endian only, no map/value split, no switching penalty (`research/bsdiff6-spike.md`) |
 
 ## 12. Open questions
 

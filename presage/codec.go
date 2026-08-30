@@ -127,6 +127,10 @@ func Encode(refs [][]byte, target []byte, o Options) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if chosen.Exact() && delta.UsesModalCorrection(res) {
+		h.Flags |= FlagModalCorrection
+		st.Flags = h.Flags
+	}
 	h.Regions = []Region{{Length: int64(len(target)), Module: chosen.ID(), PlanLen: int64(len(plan))}}
 	st.Regions = []RegionStats{{Module: chosen.Name(), Length: int64(len(target)), Plan: len(plan), Residual: len(res), PredictErr: diffBytes(pred, target)}}
 

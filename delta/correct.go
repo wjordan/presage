@@ -3,6 +3,7 @@ package delta
 import (
 	"encoding/binary"
 	"fmt"
+	"sync"
 
 	"github.com/wjordan/go-binsync/delta/internal/lz"
 	"github.com/wjordan/go-binsync/internal/cz"
@@ -53,7 +54,25 @@ const lzRegion = 1
 // those matches.
 var (
 	shipped  = corrShape{merge: mergeGap}
-	nearmiss = corrShape{merge: 32, xor: true, cols: true, bit: 1}
+	nearmiss = corrShape{merge: 32, xor: true, cols: true, bit: shapeNearmiss}
+)
+
+// The shape is carried in the low bits of the region count, under transform
+// 2 and above. Two bits, because a third shape -- the modal correction of
+// modal.go, which names the transform per region -- is worth about a tenth
+// of the patch where no module predicts the pointer tables.
+//
+// A patch containing a shape-2 correction is announced by a header flag, so
+// a build that does not know the shape rejects the patch outright and fetches
+// the blob instead of misreading it (presage/container.go). The trailing
+// stream lengths would fail such a build's parse anyway; the flag is what
+// makes it fail early and by name.
+const (
+	shapeShipped = iota
+	shapeNearmiss
+	modalShape      // sub-streams in one buffer, compressed by the container
+	modalSplitShape // each sub-stream compressed on its own first
+	shapeBits       = 2
 )
 
 // corrShape is one way of laying the same regions out.
@@ -129,7 +148,7 @@ func (sh corrShape) write(pred, want []byte, flagged bool) []byte {
 	w.u(uint64(len(want)))
 	nr := uint64(nregions)
 	if flagged {
-		nr = nr<<1 | sh.bit
+		nr = nr<<shapeBits | sh.bit
 	}
 	w.u(nr)
 	w.u(uint64(len(ctrl)))
@@ -161,16 +180,32 @@ func encodeCorrection(pred, want []byte, adaptive bool) ([]byte, error) {
 	if !adaptive {
 		return a, nil
 	}
-	b := nearmiss.write(pred, want, true)
-	var nb int
-	done := make(chan struct{})
-	go func() { defer close(done); nb = czLen(b) }()
-	na := czLen(a)
-	<-done
-	if nb < na {
-		return b, nil
+	cands := [][]byte{a, nearmiss.write(pred, want, true), encodeModal(pred, want)}
+	sizes := make([]int, len(cands))
+	var wg sync.WaitGroup
+	for i := range cands {
+		wg.Add(1)
+		go func() { defer wg.Done(); sizes[i] = czLen(cands[i]) }()
 	}
-	return a, nil
+	wg.Wait()
+	best := 0
+	for i := range cands {
+		if sizes[i] < sizes[best] {
+			best = i
+		}
+	}
+	return cands[best], nil
+}
+
+// UsesModalCorrection reports whether a stream from EncodeCorrectionAdaptive
+// needs a decoder that reads the modal shape, so the container can set the
+// header flag that makes an older build reject the patch by name.
+func UsesModalCorrection(stream []byte) bool {
+	r := &rbuf{b: stream}
+	r.u()
+	v := r.u()
+	shape := v & (1<<shapeBits - 1)
+	return r.err == nil && (shape == modalShape || shape == modalSplitShape)
 }
 
 // czLen is what a stream will cost once the container compresses it: the
@@ -227,13 +262,20 @@ func applyCorrection(buf, stream []byte, flagged bool) error {
 	n := r.u()
 	maxRegions := uint64(len(buf)) + 1
 	if flagged {
-		maxRegions = maxRegions<<1 | 1
+		maxRegions = maxRegions<<shapeBits | (1<<shapeBits - 1)
 	}
 	v := r.un(maxRegions, "region count")
-	nregions, alt := v, false
+	nregions, shape := v, uint64(shapeShipped)
 	if flagged {
-		nregions, alt = v>>1, v&1 != 0
+		nregions, shape = v>>shapeBits, v&(1<<shapeBits-1)
 	}
+	if n != uint64(len(buf)) {
+		return fmt.Errorf("%w: correction is for a %d-byte file, prediction is %d", errCorrupt, n, len(buf))
+	}
+	if shape == modalShape || shape == modalSplitShape {
+		return applyModal(buf, r, nregions, shape == modalSplitShape)
+	}
+	alt := shape == shapeNearmiss
 	gapLen := r.un(uint64(len(stream)), "control stream length")
 	var spanLen, opLen uint64
 	if alt {
@@ -244,9 +286,6 @@ func applyCorrection(buf, stream []byte, flagged bool) error {
 	gaps, spans, ops, lit := r.take(gapLen), r.take(spanLen), r.take(opLen), r.take(litLen)
 	if err := r.done(); err != nil {
 		return err
-	}
-	if n != uint64(len(buf)) {
-		return fmt.Errorf("%w: correction is for a %d-byte file, prediction is %d", errCorrupt, n, len(buf))
 	}
 
 	var scratch []byte

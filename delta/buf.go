@@ -102,3 +102,17 @@ func (r *rbuf) done() error {
 	}
 	return nil
 }
+
+// byteAt takes one byte, or records the error and returns zero.
+func (r *rbuf) byteAt() byte {
+	if r.err != nil {
+		return 0
+	}
+	if len(r.b) == 0 {
+		r.err = fmt.Errorf("%w: stream ends mid-record", errCorrupt)
+		return 0
+	}
+	b := r.b[0]
+	r.b = r.b[1:]
+	return b
+}

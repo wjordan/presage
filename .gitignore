@@ -11,6 +11,9 @@ bench/goattr/goattr
 # demo build output
 /demo
 
+# CLI build output at the repo root
+/go-binsync
+
 # editor / local agent settings
 .idea/
 .claude/settings.local.json

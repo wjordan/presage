@@ -21,7 +21,14 @@ const (
 	// their compressed debug sections expanded (delta/debugz.go).
 	FlagDebugZ = 1
 
-	knownFlags = FlagDebugZ
+	// FlagModalCorrection marks a patch whose corrections may name the
+	// residual transform per region (delta/modal.go, SPEC 6.1). A build
+	// without that decoder rejects the patch by name here and fetches the
+	// blob, rather than misreading a stream whose region count carries a
+	// shape it does not know.
+	FlagModalCorrection = 2
+
+	knownFlags = FlagDebugZ | FlagModalCorrection
 )
 
 // FrameSize is the uncompressed size of one body frame and of one
