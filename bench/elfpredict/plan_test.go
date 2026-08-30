@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"reflect"
+	"runtime"
 	"slices"
 	"testing"
 
@@ -411,5 +412,49 @@ func TestGoDerivedPlanSerializes(t *testing.T) {
 	}
 	if got.Mode != planGoDerived || !slices.Equal(got.Maps, maps) || got.Prior == nil {
 		t.Errorf("round trip: mode %v, maps %v, prior set %v", got.Mode, got.Maps, got.Prior != nil)
+	}
+}
+
+// TestPredictParallelDeterministic drives predictWith's concurrent Relocate
+// loop with enough independent bodies to spread across workers, and checks that
+// one worker and many workers produce the identical image and stats. Comparing
+// predict against itself keeps the test about the parallelism, not the plan's
+// extent guessing; under -race it also proves the shared address lookup is a
+// read. Each body is `call rel32; ret` so relocation has a real field to
+// rewrite.
+func TestPredictParallelDeterministic(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	const n = 4000
+	fn := []byte{0xe8, 0, 0, 0, 0, 0xc3, 0x90, 0x90}
+	old := make([]byte, 0, n*len(fn))
+	var maps []mapping
+	for i := 0; i < n; i++ {
+		off := uint64(i * len(fn))
+		old = append(old, fn...)
+		maps = append(maps, mapping{Src: off, SrcSize: 6, Dst: off, DstSize: 6, Copy: true})
+	}
+	p := predictionPlan{OldAddr: 0x1000, NewAddr: 0x2000, TargetLen: uint64(len(old)), Maps: maps}
+	b, err := p.marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.GOMAXPROCS(1)
+	serial, serialStats, err := predict(old, b, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.GOMAXPROCS(8)
+	par, parStats, err := predict(old, b, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(serial, par) {
+		t.Fatal("many-worker predict output differs from single-worker")
+	}
+	if serialStats != parStats {
+		t.Fatalf("many-worker stats %+v, single-worker %+v", parStats, serialStats)
+	}
+	if serialStats.Insns == 0 {
+		t.Fatal("no instructions relocated; test not exercising the decoder")
 	}
 }

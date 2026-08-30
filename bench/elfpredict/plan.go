@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime"
 	"slices"
+	"sync"
 
 	"github.com/wjordan/go-binsync/delta/x86"
 )
@@ -670,24 +671,44 @@ func predictWith(old, encodedPlan []byte, relocate bool, lookupFn func(uint64) x
 		lookupFn = newAddressLookup(p).target
 	}
 
-	var stats x86.Stats
-	for i, m := range p.Maps {
+	// One function body per map, relocated concurrently: each writes only its
+	// own disjoint [Dst,Dst+DstSize) span of out and lookupFn is a read of an
+	// immutable plan, so the output and the summed stats match a serial loop.
+	var (
+		errMu sync.Mutex
+		bad   error
+	)
+	stats := parallelStats(len(p.Maps), workers(), func(st *x86.Stats, i int) {
+		m := p.Maps[i]
 		if !m.Copy {
-			continue
+			return
 		}
 		if m.Src > uint64(len(old)) || m.SrcSize > uint64(len(old))-m.Src {
-			return nil, stats, fmt.Errorf("map %d source exceeds old text", i)
+			errMu.Lock()
+			if bad == nil {
+				bad = fmt.Errorf("map %d source exceeds old text", i)
+			}
+			errMu.Unlock()
+			return
 		}
 		if m.Dst > uint64(len(out)) || m.DstSize > uint64(len(out))-m.Dst {
-			return nil, stats, fmt.Errorf("map %d destination exceeds target text", i)
+			errMu.Lock()
+			if bad == nil {
+				bad = fmt.Errorf("map %d destination exceeds target text", i)
+			}
+			errMu.Unlock()
+			return
 		}
 		src := old[m.Src : m.Src+m.SrcSize]
 		dst := out[m.Dst : m.Dst+m.DstSize]
 		if relocate {
-			x86.Relocate(src, dst, p.OldAddr+m.Src, p.NewAddr+m.Dst, lookupFn, &stats, nil)
+			x86.Relocate(src, dst, p.OldAddr+m.Src, p.NewAddr+m.Dst, lookupFn, st, nil)
 		} else {
 			copy(dst, src)
 		}
+	})
+	if bad != nil {
+		return nil, x86.Stats{}, bad
 	}
 	return out, stats, nil
 }

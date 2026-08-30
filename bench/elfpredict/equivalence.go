@@ -594,8 +594,7 @@ func sparseWalkOffsets(structure predictionPlan, textLen uint64) [][2]uint64 {
 }
 
 func retargetEquivalencePrediction(out []byte, ep equivalencePlan, structure predictionPlan, lookup func(uint64) x86.Target) x86.Stats {
-	var stats x86.Stats
-	retargetBody := func(body []byte, dstBase uint64) {
+	retargetBody := func(stats *x86.Stats, body []byte, dstBase uint64) {
 		x86.WalkReferences(body, 0, func(ref x86.Reference) {
 			stats.Refs++
 			fullStart := ep.NewText.Off + dstBase + uint64(ref.Start)
@@ -641,22 +640,27 @@ func retargetEquivalencePrediction(out []byte, ep equivalencePlan, structure pre
 		// Spans are taken in destination order and never overlap: retargeting
 		// rewrites a field in place, so walking any byte twice would decode an
 		// already-rewritten displacement.
+		var stats x86.Stats
 		for _, off := range sparseWalkOffsets(structure, uint64(len(out))) {
-			retargetBody(out[off[0]:off[1]], off[0])
+			retargetBody(&stats, out[off[0]:off[1]], off[0])
 		}
 		return stats
 	}
 	if len(structure.Maps) == 0 {
-		retargetBody(out, 0)
+		var stats x86.Stats
+		retargetBody(&stats, out, 0)
 		return stats
 	}
-	for _, m := range structure.Maps {
+	// One function body per map, retargeted concurrently: each rewrites only
+	// its own disjoint [Dst,Dst+DstSize) span and every lookup is a read, so
+	// the mutated buffer and the summed stats match the serial loop.
+	return parallelStats(len(structure.Maps), workers(), func(stats *x86.Stats, i int) {
+		m := structure.Maps[i]
 		if m.Dst > uint64(len(out)) || m.DstSize > uint64(len(out))-m.Dst {
-			continue
+			return
 		}
-		retargetBody(out[m.Dst:m.Dst+m.DstSize], m.Dst)
-	}
-	return stats
+		retargetBody(stats, out[m.Dst:m.Dst+m.DstSize], m.Dst)
+	})
 }
 
 func (p combinedPlan) marshal() []byte {
