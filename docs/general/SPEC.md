@@ -14,7 +14,7 @@ large *second-order* rewrite of addresses, sizes and tables (Percival 2006,
 `research/percival-thesis.md`). General compressors and byte-level delta
 coders pay for the rewrite; go-binsync showed that a model of the format can
 *regenerate* it from a compact description of the first-order change, for
-28–67× smaller patches than bsdiff on Go binaries
+38–125× smaller patches than bsdiff on stripped Go binaries
 (`research/binsync-lessons.md`). presage makes that architecture generic: a
 fixed **core** (a plan interpreter, one shared residual coder, a hashed
 frame container) plus pluggable **structure modules** that turn an input
@@ -245,7 +245,7 @@ Status: (a) built in the codec (`delta/debugz.go`, container flag
 `debugz`; `bench/dwarfz` is its CLI) and measured end to end on shipped
 files; (b) built in the codec too (`presage/dwarf`, run by the Go module
 as `presage-core.md` §7 describes; the harness is an adapter over it):
-prometheus 3.13.1 → 3.13.2 with DWARF 335,047 on the shipped files.
+prometheus 3.13.1 → 3.13.2 with DWARF 332,414 on the shipped files.
 Research: `dwarf-research.md`; measurements: `go-module-results.md` "DWARF
 builds". The problem it answers: a default `go build` keeps DWARF — 13 MB
 of zlib-compressed sections on the 43 MB synthetic, 75 MB plaintext in
@@ -469,9 +469,9 @@ digit stream and a `.text` literal stream have nothing to say to each other.
 The two forms are separate shapes so the decoder needs no heuristic.
 
 Built and measured against the shipped two-shape coder (`delta/modal.go`):
-libxul 154.0 → 154.0.1's correction goes 3,291,571 → 2,818,115 (**−14.4 %**),
-its whole patch 4,470,494 → 3,997,038 (**−10.6 %**); prometheus 3.13.1 → 3.13.2
-goes 43,936 → 39,673 (**−9.7 %**) and its patch 74,112 → 69,949 (**−5.6 %**).
+libxul 154.0 → 154.0.1's correction goes 3,208,624 → 2,799,008 (**−12.8 %**),
+its whole patch 4,387,547 → 3,977,931 (**−9.3 %**); prometheus 3.13.1 → 3.13.2
+goes 43,936 → 39,673 (**−9.7 %**) and its patch 74,177 → 70,195 (**−5.4 %**).
 The Go pair gains less because the Go module has already predicted its pointer
 tables structurally, so they are not in the residual at all.
 
@@ -609,7 +609,7 @@ domain notes:
 
 | rank | domain | metadata a predictor uses | expected gain (small changes) | status of evidence |
 |---|---|---|---|---|
-| 1 | **Go binaries** (existing) | pclntab, moduledata, `.go.type` | 28–67× vs bsdiff, measured | done; port to module form |
+| 1 | **Go binaries** (existing) | pclntab, moduledata, `.go.type` | 38–125× vs bsdiff, measured | done; port to module form |
 | 2 | **ELF C/C++/Rust PIE** | `.eh_frame_hdr` boundaries (95 % of functions in a Rust sample), `.rela.dyn`/RELR complete pointer map, `.dynsym`; encoder-side `.symtab` for the match | same class as Go for code churn, lower ceiling (fewer tables to regenerate); *estimate* | `domain-executables.md` §2, §6.3 |
 | 3 | **PE x64** | `.pdata` boundaries with sizes, `.reloc`, CFG, imports/exports | must beat MSDelta (disassembly + pdata aware), not bsdiff | `domain-executables.md` §2 |
 | 4 | **Container layers / packages** | gzip/zstd frame → tar (pairing by path, predicted headers) → members dispatched to formats 1–3; a `recompress` correction for Go's deflate | Go-service image patch release ≈ 0.1–0.5 MB vs 2–10 MB bsdiff on the raw layer vs 10–30 MB pull (*estimate*); Python/Java images 1.5–6× like Play file-by-file | `domain-containers-packages.md` §7 |
@@ -642,8 +642,8 @@ small steps — is where every domain's number is large.
 2. **Layered Go region.** *Built* (`presage-core.md` §7): the Go module
    lays per-section equivalence runs and the DWARF field layer over its
    prediction, choosing per pair by price. Exit met: the DWARF prometheus
-   pair 335,047 (harness 323,744, within 3.6 %), stripped unchanged
-   (74,112), corpus gate green. The container-level region DAG (§5.2)
+   pair 332,414 (harness 323,744), stripped unchanged (70,195), corpus
+   gate green. The container-level region DAG (§5.2)
    stays deferred until a second consumer needs an input edge.
 3. **Portable path.** Build the `go:pclntab` op to wasm from the same
    source; run under wazero compiler and interpreter on the 30 MB and 94 MB
@@ -676,7 +676,7 @@ small steps — is where every domain's number is large.
 | G10 | Zucchini-style `refs` op kept under the layout predictor | layout is not always a function of the old file (R9) |
 | G11 | Weights are a second-tier module and not a headline claim | 1.5×/2× measured ceilings (R10) |
 | G12 | Syndrome correction reserved, not built | 7× cost pairwise on Percival's corpus; attractive only after prediction (R11) |
-| G13 | Multiprecision balanced-digit difference is a residual mode, chosen per region alongside its word width, with the digit-stream length derived rather than sent | −10.6 % of the whole patch on a non-Go binary, −5.0 % on a Go one; a relocation predictor in forty lines where no module models the table. Little-endian only, no map/value split, no switching penalty (`research/bsdiff6-spike.md`) |
+| G13 | Multiprecision balanced-digit difference is a residual mode, chosen per region alongside its word width, with the digit-stream length derived rather than sent | −9.3 % of the whole patch on a non-Go binary, −5.4 % on a Go one; a relocation predictor in forty lines where no module models the table. Little-endian only, no map/value split, no switching penalty (`research/bsdiff6-spike.md`) |
 
 ## 12. Open questions
 

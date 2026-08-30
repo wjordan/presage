@@ -149,12 +149,12 @@ repository's `delta` package, including its patch header and frame table:
 
 | Pair (toolchain) | bsdiff | hdiffz -p-8 | prototype | v1 | **presage** | vs bsdiff |
 |---|---:|---:|---:|---:|---:|---:|
-| one-line (`v1→v2c`, 29.6 MB, Go 1.27) | 150,475 | 176,929 | 2,207 | 2,262 | **1,201** | 125× |
+| one-line (`v1→v2c`, 29.6 MB, Go 1.27) | 150,475 | 176,929 | 2,207 | 2,262 | **1,202** | 125× |
 | +3-byte string (`v1→v2l`, 1.27) | 24,874 | 33,713 | 566 | 438 | **545** | 46× |
-| multi-package (`v1→v4`, 1.27) | 145,205 | 171,760 | 2,733 | 2,745 | **1,704** | 85× |
+| multi-package (`v1→v4`, 1.27) | 145,205 | 171,760 | 2,733 | 2,745 | **1,705** | 85× |
 | `v3→v4` (1.27) | 30,196 | 40,523 | 578 | 440 | **580** | 52× |
-| prometheus 3.13.1→3.13.2, built with Go 1.27 (94 MB) | 2,691,644 | 2,719,152 | 111,552 | 95,366 | **74,112** | **36×** |
-| prometheus 3.13.1→3.13.2, default build with DWARF (181 MB) | 4,832,993 | — | — | 8,714,361 | **335,047** | 14× |
+| prometheus 3.13.1→3.13.2, built with Go 1.27 (94 MB) | 2,691,644 | 2,719,152 | 111,552 | 95,366 | **70,195** | **38×** |
+| prometheus 3.13.1→3.13.2, default build with DWARF (181 MB) | 4,832,993 | — | — | 8,714,361 | **332,414** | 15× |
 
 The **presage** column is what `go-binsync` ships today: the same transform
 as one module of the presage codec (`docs/general/presage-core.md`), with the
@@ -163,8 +163,10 @@ segment maps, far pieces, pointer consensus and the header prediction of
 (§3.5, `presage/dwarf`). The two smallest pairs are above v1 by the presage
 container's ~100 B — a region record, a frame table and the prediction's
 32-byte hash — which the per-pair corpus gate accepts (within 2 % + 64 B of
-`delta.Encode`). The v1 column and the discussion below are the history of
-how the transform got there.
+`delta.Encode`). 3,982 B of the real pair's presage figure is the modal
+correction (`docs/general/SPEC.md` §6.1): the same encoder without it writes
+74,177 B, and 1,101 B of the DWARF row is the same lever. The v1 column and
+the discussion below are the history of how the transform got there.
 
 The real pair is 14 % below the prototype and within 1 % of the 94,470 B that
 an hdiffz stage 2 reached (the range §3.4 was aiming for), from an encoder
@@ -1136,7 +1138,8 @@ remain).
 
 The last question §3.3 asked — whether the local match inside changed regions
 lands nearer the 94,470 B of a hdiffz stage 2 than the 111,552 B of purely
-positional runs — is answered: 95,366 B (§3.2). What remains:
+positional runs — is answered: v1 reached 95,366 B and presage now reaches
+70,195 B (§3.2), below the hdiffz bound rather than beside it. What remains:
 
 1. **`.go.type` residual.** 45,170 B of the prometheus/1.27 patch is type
    descriptors: ~31.6 KB are genuinely new descriptors (inherent), ~7.9 KB

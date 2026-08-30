@@ -26,22 +26,28 @@ constant.
 | xdelta3 -9 | 15,194,011 | 31,118,515 |
 | `zstd --patch-from -19 --long=31` | 8,479,550 | 26,326,367 |
 | bsdiff 4.3 | 2,691,644 | 12,348,560 |
-| presage before this work | 74,112 (36.3× bsdiff) | ~4,470,494 (2.76×) |
-| **presage with `delta/modal.go`** | **69,949 (−5.6 %)**, 38.5× | **3,997,038 (−10.6 %)**, 3.09× |
+| presage before this work | 74,177 (36.3× bsdiff) | ~4,387,547 (2.81×) |
+| **presage with `delta/modal.go`** | **70,195 (−5.4 %)**, 38.3× | **3,977,931 (−9.3 %)**, 3.10× |
 
 Built and shipped 2026-08-29, not projected: the correction goes 43,936 →
-39,673 on `p2` and 3,291,571 → 2,818,115 on `libxul`, both replayed byte for
-byte. See `SPEC.md` §6.1 for the format and G13 for the decision.
+39,673 on `p2` and 3,208,624 → 2,799,008 on `libxul`, both replayed byte for
+byte. See `SPEC.md` §6.1 for the format and G13 for the decision. (Both rows
+are re-measured against the build that also made `internal/cz` use brotli
+quality 11 on every stream rather than dropping to 10 above 4 MiB. That change
+is worth 2.5 % of `libxul`'s correction on its own and shows up here as a
+better *baseline*, which is why the modal gain reads narrower than the
+−14.4 %/−10.6 % first measured against the quality-10 tier.)
 
 Note how differently the same change lands. On a Go binary the Go module has
 already predicted the pointer tables structurally, so the residual is thin and
 the gain is 5 %; on a shared object with no such module the tables are the
-residual, and it is 10.6 %. The general codec is where this pays.
+residual, and it is 9.3 %. The general codec is where this pays.
 
 `libxul` has no shipped patch number, so its denominator is
 `bench/elfpredict`'s `corrected-fields` rung: the plan compresses to 1,178,923
-and the correction to 3,302,134. `p2`'s 74,112 is the real patch, of which the
-correction is 43,836.
+and the correction to 3,208,624. `p2`'s 74,177 is the real patch with the
+modal candidate ablated out of the encoder, of which the correction is 43,936;
+with it the patch is 70,195.
 
 The change is: write a differing region's bytes as balanced base-256 digits of
 `want-pred` instead of as literals, let each region name which transform and
@@ -103,7 +109,7 @@ Three pairs carry the measurements. `syn` is the 30 MB one-line-change pair
 (`bench/build.sh` v1 → v2c, Go 1.27); `p2` is prometheus 3.13.1 → 3.13.2
 stripped, 94 MB, the patch release; `p14` is prometheus 3.13.2 → 3.14.0,
 97 MB, the minor release. Reference points: bsdiff 4.3 gets 150,475 on `syn`
-and 2,691,644 on `p2`; presage ships 1,201 and 74,112.
+and 2,691,644 on `p2`; presage ships 1,202 and 70,195.
 
 ## 2. Difference-string modes in the correction — **the find**
 

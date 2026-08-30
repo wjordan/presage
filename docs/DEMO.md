@@ -23,7 +23,7 @@ the demo is about distance, so the default should not be next door.
 
 ```
 1. fetch pointer    latest.json                                        1 round trip     0.28 s  (jnb)
-2. fetch patch      patches/<from8>-<to8>.bsz    95 KB   ── measured ──▶                 0.9 s
+2. fetch patch      patches/<from8>-<to8>.bsz    70 KB   ── measured ──▶                 0.9 s
 3. apply            old + patch → new           on the Machine (1a) / in the browser (1b) 0.9 s
 4. verify           BLAKE3(new) == pointer.head.hash                   ✔ b3:9e207efb…
 ```
@@ -55,7 +55,7 @@ environment). That is the whole page.
 Machine runs the decoder against its local copy of the old binary and returns
 apply time, hash and verification result. The bytes the viewer watched cross
 the world are exactly the bytes a real target would fetch. **Phase 1b** moves
-the apply into the browser (WASM) as a trust upgrade — "the 112 KB you just
+the apply into the browser (WASM) as a trust upgrade — "the 70 KB you just
 watched download, plus the old binary, is the new binary" — once the decoder
 fits a tab (§4).
 
@@ -71,9 +71,9 @@ are the bytes actually served, measured:
 
 | Pair | Old | Patch (go-binsync) | hdiffz | Full download (blob) |
 |---|---:|---:|---:|---:|
-| one-line change, `testsrv` | 29,995,235 | **2,262** | 176,199 | 8,555,312 |
-| multi-package edit, `testsrv` | 29,995,235 | **2,745** | 172,002 | 8,556,056 |
-| prometheus 3.13.1 → 3.13.2 | 93,741,283 | **95,366** | 2,719,152 | 20,336,968 |
+| one-line change, `testsrv` | 29,995,235 | **1,080** | 176,199 | 8,555,312 |
+| multi-package edit, `testsrv` | 29,995,235 | **1,583** | 172,002 | 8,556,056 |
+| prometheus 3.13.1 → 3.13.2 | 93,741,283 | **70,195** | 2,719,152 | 20,336,968 |
 
 Each pair is a **real go-binsync store**, built by publishing the old release
 into an empty `file://` store and then publishing the new one: the page fetches
@@ -90,7 +90,7 @@ viewer (see §1).
 fly.toml       app = go-binsync-demo; [http_service] internal_port 8080, force_https,
                auto_stop_machines = "suspend", min_machines_running = 0
 regions        jnb, nrt, gru, syd  (+ ord as the nearby control)
-machine        shared-cpu-2x, 2 GB (the decoder peaks at ≈ 0.92 GB on the 94 MB pair,
+machine        shared-cpu-2x, 2 GB (the decoder peaks at ≈ 0.97 GB on the 94 MB pair,
                so applies are serialised one at a time per Machine)
 image          scratch + the demo server (one static Go binary) + the assets
 ```

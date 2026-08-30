@@ -177,9 +177,9 @@ Exit: the DWARF prometheus pair (`prom-3.13.{1,2}-Dz`, applied to the
 shipped compressed file) within 10 % of the harness's 323,744, and the
 stripped pair unchanged; corpus gate green.
 
-*Status: built and met.* prometheus DWARF pair 335,047 (from 8,716,505;
-3.6 % above the harness), synthetic 2,002 (harness 2,652), stripped
-prometheus 74,112, corpus gate green. Two things the measurement forced:
+*Status: built and met.* prometheus DWARF pair 332,414 (from 8,480,958),
+synthetic 2,065 (harness 2,652), stripped prometheus 70,195, corpus gate
+green. Two things the measurement forced:
 the unallocated sections are not in the transform's layout, so the DWARF
 plan carries their geometry; and the layer is priced against the bare
 prediction where the bare misprediction is under 1 MiB, because

@@ -21,7 +21,7 @@ one-line change to a 30 MB Go binary — patch bytes on the wire, linear scale
 
   hdiffz -p-8  ████████████████████████████████████████████████  176,929
   bsdiff       ████████████████████████████████████████▊         150,475
-  go-binsync   ▏                                                   1,201   ← 125× smaller than bsdiff
+  go-binsync   ▏                                                   1,202   ← 125× smaller than bsdiff
 ```
 
 bsdiff and hdiffz are the strongest general-purpose binary differs available.
@@ -59,7 +59,7 @@ from Go's own function table, which a stripped binary still carries.
 The library, the CLI and the public demo are implemented, and every number in
 this README is measured on them. The demo is live at
 <https://go-binsync-demo.fly.dev> — pick a region, watch a real 94 MB release
-arrive as a 95 KB patch and verify (`bench/demo` builds and serves it). The one
+arrive as a 70 KB patch and verify (`bench/demo` builds and serves it). The one
 piece that is not done is the decoder's memory footprint (`docs/DESIGN.md`
 §11.3).
 
@@ -82,16 +82,16 @@ built with Go 1.27, fetched over a medium-quality link: 20 Mbit/s, 200 ms RTT,
 
 | | Full download (`zstd -19`) | Generic delta (hdiffz) | go-binsync (Go-aware delta) |
 |---|---:|---:|---:|
-| Bytes sent | 20.6 MB | 2.7 MB | **0.074 MB** |
-| Encode time · peak memory | 9 s · 0.36 GB | 7 s · 0.39 GB | **6.1 s** · 0.97 GB |
-| Apply on the target | 0.1 s · 13 MB | 0.1 s · 25 MB | 1.0 s · 0.92 GB |
+| Bytes sent | 20.6 MB | 2.7 MB | **0.070 MB** |
+| Encode time · peak memory | 9 s · 0.36 GB | 7 s · 0.39 GB | **5.3 s** · 0.94 GB |
+| Apply on the target | 0.1 s · 13 MB | 0.1 s · 25 MB | 1.0 s · 0.97 GB |
 | Transfer on that link | ≈ 2.4 min (≈ 20 s with 8 parallel ranges) | ≈ 15 s | **≈ 0.8 s** |
 
 Bytes dominate as the link degrades: with 1 % loss a single TCP stream carries
 about 1.2 Mbit/s whatever the link rate, so the full download takes minutes and
 the generic patch a quarter of a minute, while go-binsync's patch fits in a
-couple of round trips — 274× less than the 20.3 MB blob a cold target would
-take, and 36× less than the best generic delta. (go-binsync fetches that blob
+couple of round trips — 290× less than the 20.3 MB blob a cold target would
+take, and 38× less than the best generic delta. (go-binsync fetches that blob
 with parallel ranged requests, which recovers most of the loss penalty; a small
 patch never pays it in the first place.) The encoder builds no suffix array over the
 file; its time goes to running the decoder's prediction to price it. Memory is the weak
@@ -104,13 +104,13 @@ decode → byte-exact compare, with every table counted inside the patch:
 
 | Pair (all built with Go 1.27) | bsdiff | hdiffz | go-binsync | vs bsdiff |
 |---|---:|---:|---:|---:|
-| one-line change, 30 MB | 150,475 | 176,929 | **1,201** | **125×** |
+| one-line change, 30 MB | 150,475 | 176,929 | **1,202** | **125×** |
 | +3-byte string literal, 30 MB | 24,874 | 33,713 | **545** | 46× |
-| multi-package edit (+2.3 KB code), 30 MB | 145,205 | 171,760 | **1,704** | 85× |
+| multi-package edit (+2.3 KB code), 30 MB | 145,205 | 171,760 | **1,705** | 85× |
 | second multi-package step (v3 → v4), 30 MB | 30,196 | 40,523 | **580** | 52× |
-| prometheus 3.13.1 → 3.13.2, 94 MB | 2,691,644 | 2,719,152 | **74,112** | 36× |
-| prometheus 3.13.1 → 3.13.2, default build with DWARF, 181 MB | 4,832,993 | — | **335,047** | 14× |
-| one-line change, default build with DWARF, 59 MB | 476,887 | — | **2,002** | 238× |
+| prometheus 3.13.1 → 3.13.2, 94 MB | 2,691,644 | 2,719,152 | **70,195** | 38× |
+| prometheus 3.13.1 → 3.13.2, default build with DWARF, 181 MB | 4,832,993 | — | **332,414** | 15× |
+| one-line change, default build with DWARF, 59 MB | 476,887 | — | **2,065** | 231× |
 
 The two DWARF rows are the files as `go build` ships them, zlib-compressed
 debug sections and all; the patch is applied back to the exact file. The
@@ -119,9 +119,10 @@ the 32-byte hash of the prediction — which is where the 3-byte edit's ratio
 goes.
 
 On a minor release with thousands of new functions the patch is dominated by
-the new content and the gain drops to about 1.6×. That is the expected result:
-prediction removes the cost of the layout shift, and genuinely new code still
-has to be sent.
+the new content and the gain drops: prometheus 3.13.1 → 3.14.0 is 1,398,749 B
+against bsdiff's 6,308,532 and hdiffz's 5,149,355 — 4.5×, not 38×. That is the
+expected result: prediction removes the cost of the layout shift, and
+genuinely new code still has to be sent.
 
 ### 1.1 Why a Go-aware delta
 
@@ -140,7 +141,7 @@ for that. Each rung below understands more of the binary than the one above it:
 | `xdelta3 -9` | 1.93 MB | 15.2 MB |
 | `zstd --patch-from` | 538 KB | 8.5 MB |
 | bsdiff / hdiffz | 150 / 177 KB | 2.69 / 2.72 MB |
-| **go-binsync** | **1,201 B** | **74,112 B** |
+| **go-binsync** | **1,202 B** | **70,195 B** |
 
 A chunk store re-sends 93 % of a fresh archive on the one-liner and *more*
 than one on the real release, because almost no chunk survives the shift and
@@ -159,10 +160,11 @@ encoder never builds a whole-file suffix array — the step that makes bsdiff ne
 9–12× the input in RAM and minutes of CPU above 100 MB.
 
 The prediction covers code, data, the pclntab with its pc tables, and the type
-descriptors. On the prometheus release it is wrong in 120,852 bytes — 0.13 % of
-the file — and what the patch carries is mostly real change: 63,179 B of changed
-code, 45,170 B of type descriptors (two-thirds of them genuinely new), 17,441 B
-of pc tables for the functions that changed, and 10,379 B of layout tables.
+descriptors. On the prometheus release it is wrong in 54,520 bytes — 0.058 % of
+the file — and what it gets wrong is mostly real change: 31,895 B in `.text`,
+11,421 B of type descriptors, 3,567 B of pclntab, 3,572 B of `.rodata`, 2,568 B
+of `.go.func` and 1,497 B across the small data sections. The plan that buys
+that is 280,959 B before compression.
 Design and measurements: `docs/DESIGN.md` §3; the research behind it:
 `docs/research/go-aware-transform.md`.
 
@@ -337,10 +339,10 @@ CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o s
 
 | Knob | Effect |
 |---|---|
-| `-ldflags=-s -w` (strip DWARF + symtab) | **Recommended** (`publish` warns). The codec expands compressed DWARF before diffing, projects the debug sections' reference fields through its own function map, and recompresses exactly on apply, so an unstripped prometheus patch release is 335 KB rather than the 4.8 MB bsdiff ships (29 MB for Zucchini); stripped it is 74 KB, and the binary ~50 % smaller. |
+| `-ldflags=-s -w` (strip DWARF + symtab) | **Recommended** (`publish` warns). The codec expands compressed DWARF before diffing, projects the debug sections' reference fields through its own function map, and recompresses exactly on apply, so an unstripped prometheus patch release is 332 KB rather than the 4.8 MB bsdiff ships (29 MB for Zucchini); stripped it is 70 KB, and the binary ~50 % smaller. |
 | `-ldflags=-buildid=` | removes the ~80 always-changing bytes; identical sources give identical binaries on any build box |
 | `-trimpath`, `CGO_ENABLED=0` | reproducible builds — the head hash is derivable from source |
-| `-buildmode=exe` or `-buildmode=pie` | either; a PIE binary is ~10 % larger and its patches are the same size (one-line change: 1,156 B PIE, 1,201 B exe) |
+| `-buildmode=exe` or `-buildmode=pie` | either; a PIE binary is ~10 % larger and its patches are the same size (one-line change: 1,157 B PIE, 1,202 B exe) |
 | PGO | freeze the profile across releases you intend to delta |
 
 ## 9. Supported inputs and fallbacks
