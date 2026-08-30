@@ -493,9 +493,26 @@ func writeDisplacement(body []byte, ref x86.Reference, disp int64) bool {
 // what makes the relocation table predictable. rp is nil for the .text-only
 // rungs, which keeps their behaviour, and therefore their measurements,
 // exactly as they were.
+// oracleParts holds the two derived structures every oracle is built from, so
+// a caller that needs several oracles -- predictImage builds five -- sorts the
+// 925k-mapping lookup and clips the equivalence list once instead of per
+// oracle. Both parts are immutable after construction.
+type oracleParts struct {
+	ep equivalencePlan
+	lk *addressLookup
+	sm sourceEquivalenceMapper
+}
+
+func newOracleParts(ep equivalencePlan, structure predictionPlan) oracleParts {
+	return oracleParts{ep: ep, lk: newAddressLookup(structure), sm: newSourceEquivalenceMapper(ep)}
+}
+
 func newImageOracle(ep equivalencePlan, structure predictionPlan, rp *relocPlan) func(uint64) x86.Target {
-	structuralLookup := newAddressLookup(structure)
-	sourceMapper := newSourceEquivalenceMapper(ep)
+	return newOracleParts(ep, structure).image(rp)
+}
+
+func (o oracleParts) image(rp *relocPlan) func(uint64) x86.Target {
+	ep, structuralLookup, sourceMapper := o.ep, o.lk, o.sm
 	return func(addr uint64) x86.Target {
 		if addr >= ep.OldText.Addr && addr < ep.OldText.Addr+ep.OldText.Size {
 			oldFile := ep.OldText.Off + addr - ep.OldText.Addr
@@ -529,8 +546,11 @@ func newImageOracle(ep equivalencePlan, structure predictionPlan, rp *relocPlan)
 // million addends this ordering is the difference between 78.760% and 99.075%
 // exact.
 func newPointerOracle(ep equivalencePlan, structure predictionPlan, rp *relocPlan) func(uint64) x86.Target {
-	structuralLookup := newAddressLookup(structure)
-	sourceMapper := newSourceEquivalenceMapper(ep)
+	return newOracleParts(ep, structure).pointer(rp)
+}
+
+func (o oracleParts) pointer(rp *relocPlan) func(uint64) x86.Target {
+	structuralLookup, sourceMapper := o.lk, o.sm
 	return func(addr uint64) x86.Target {
 		if t := structuralLookup.pointTarget(addr); t.Known {
 			return t

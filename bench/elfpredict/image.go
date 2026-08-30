@@ -81,9 +81,10 @@ func predictImage(old []byte, encoded []byte) ([]byte, combinedStats, error) {
 		}
 		rp = &parsed
 	}
-	oracle := newImageOracle(ep, structure, rp)
+	parts := newOracleParts(ep, structure)
+	oracle := parts.image(rp)
 	if rp != nil && rp.NewSize != 0 {
-		st, err := applyReloc(out, old, *rp, newPointerOracle(ep, structure, rp))
+		st, err := applyReloc(out, old, *rp, parts.pointer(rp))
 		if err != nil {
 			return nil, combinedStats{}, err
 		}
@@ -110,7 +111,7 @@ func predictImage(old []byte, encoded []byte) ([]byte, combinedStats, error) {
 		if err != nil {
 			return nil, combinedStats{}, err
 		}
-		st, err := applyDwarf(out, old, dp, ep, newPointerOracle(ep, structure, rp), funcSizeDeltas(structure))
+		st, err := applyDwarf(out, old, dp, ep, parts.pointer(rp), funcSizeDeltas(structure))
 		if err != nil {
 			return nil, combinedStats{}, err
 		}
@@ -139,7 +140,7 @@ func predictImage(old []byte, encoded []byte) ([]byte, combinedStats, error) {
 			e, ok := extents[addr]
 			return e.old, e.new, ok
 		}
-		stats.EhFrame = applyEhFrame(out, old, ep, fp, rp.OldSecs, newPointerOracle(ep, structure, rp), extentOf)
+		stats.EhFrame = applyEhFrame(out, old, ep, fp, rp.OldSecs, parts.pointer(rp), extentOf)
 	}
 	if len(cp.RoData) != 0 {
 		rd, err := unmarshalRoDataPlan(cp.RoData)
@@ -152,7 +153,7 @@ func predictImage(old []byte, encoded []byte) ([]byte, combinedStats, error) {
 		if rp == nil {
 			return nil, combinedStats{}, errors.New("rodata plan needs the section geometry the relocation plan carries")
 		}
-		stats.RoData = applyRoData(out, old, rd, newSourceEquivalenceMapper(ep), newPointerOracle(ep, structure, rp))
+		stats.RoData = applyRoData(out, old, rd, parts.sm, parts.pointer(rp))
 	}
 	text := out[ep.NewText.Off : ep.NewText.Off+ep.NewText.Size]
 	stats.Relocation = retargetEquivalencePrediction(text, ep, structure, oracle)
@@ -163,7 +164,7 @@ func predictImage(old []byte, encoded []byte) ([]byte, combinedStats, error) {
 		return nil, combinedStats{}, errors.New("combined choice stream has the wrong size")
 	}
 	oldText := old[ep.OldText.Off : ep.OldText.Off+ep.OldText.Size]
-	structural, _, err := predict(oldText, cp.Structure, true, goMapDeriver(old, cp.GoTables, ep.OldText, ep.NewText))
+	structural, _, err := predictDecoded(oldText, structure, true, parts.lk.target)
 	if err != nil {
 		return nil, combinedStats{}, err
 	}

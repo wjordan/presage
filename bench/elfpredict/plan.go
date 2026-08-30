@@ -660,6 +660,13 @@ func predictWith(old, encodedPlan []byte, relocate bool, lookupFn func(uint64) x
 	if err != nil {
 		return nil, x86.Stats{}, err
 	}
+	return predictDecoded(old, p, relocate, lookupFn)
+}
+
+// predictDecoded is predictWith for a caller that already decoded the plan --
+// predictImage holds both the plan and the sorted lookup, so re-deriving them
+// from the encoded bytes would only repeat work.
+func predictDecoded(old []byte, p predictionPlan, relocate bool, lookupFn func(uint64) x86.Target) ([]byte, x86.Stats, error) {
 	if p.TargetLen > uint64(int(^uint(0)>>1)) {
 		return nil, x86.Stats{}, errors.New("prediction is too large")
 	}
