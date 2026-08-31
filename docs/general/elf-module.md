@@ -7,6 +7,36 @@ module behind the `Module` seam of `presage/module.go`, so that
 non-Go ELF x86-64 image end to end. Design authority: `SPEC.md` §4–6, §10
 item 3; template: `presage/gomod` (`presage-core.md` §4, §7).*
 
+## Status (2026-08-31c): the plan side
+
+Two changes to the plan, `presage.Version` 4 (research/pgo-churn.md §8.2).
+
+1. **The remap basis** (`fieldfix.go`). A remapped field's new target is
+   stated as an index into the addresses the prediction already points at
+   plus the function starts the map placed, escaping to the old shift where
+   the target is not one of them. The encoder prices both bases per window
+   and ships the smaller under a basis byte. Free at decode.
+2. **The plan's columns under the CM coder** (`planpack.go`,
+   `delta/cmplan.go`). The largest columns are carved out of the plan blob
+   and coded on their own under varint contexts, each carrying its own
+   codec and context byte; the rest stays in the body's joint blob. Which
+   columns are coded is encoder policy only (`PRESAGE_PLAN_CM=off|reloc|<gain>`,
+   default `2000`) — the decoder follows the table it is given.
+
+| pair | v3 | + basis | + plan CM (gain≥2000) | (gain≥1000) |
+|---|---:|---:|---:|---:|
+| Chrome 151 .169 → .173 | 2,291,929 | 2,278,289 | **2,256,358** | 2,248,931 |
+| libxul 154.0 → 154.0.1 | 2,691,589 | 2,679,613 | **2,665,810** | 2,663,297 |
+
+Encode is flat across tiers, 57.9–60.7 s (the columns are coded in parallel
+and the encoder reuses the plan it just packed rather than decoding it
+back). Apply pays the coder over the carved columns — 1.27 MB of Chrome's
+3.64 MB plan at the default tier, 1.69 MB at gain≥1000 — at 1.8 MB/s for a
+varint column and 4 MB/s for an opaque one, median of five interleaved
+runs: Chrome 6.20 → 6.89 s (7.12 at gain≥1000), libxul 5.01 → 5.87 (6.08).
+That is why the tier is a knob and not a constant; the full frontier is in
+research/pgo-churn.md §8.2.
+
 ## Status (2026-08-31b): the prediction-conditioned coder
 
 The residual's terminal stage now offers a context-mixing arithmetic coder

@@ -577,3 +577,85 @@ not the signal, that kills it. B's free decoder-derivable sort is worth
 (569,676 sorted-xz vs 522,858 unsorted-CM), so it's moot in production.
 Caveat on all rows: the harness CM is a toy engine (no SSE); a stronger
 engine may already capture part of these deltas.
+
+### 8.2 The plan side: a denser basis, then the coder
+
+The cmix probe's question asked of the *plan* (`plancm.go`, `fieldfix.go`'s
+`probe remap basis`): the plan is coded by a compressor that knows nothing
+about it either, and its bytes are far more structured than the
+correction's — almost every one is a byte of a LEB128 varint in a known
+column. Two answers, ported to production as container v4, both measured
+through the CLI and `cmp`-verified on Chrome .169→.173 and libxul
+154.0→154.0.1.
+
+**The basis first, because it is free.** A remapped field's new target was
+stated as a *shift* in bytes. But the corrected target is usually not an
+arbitrary address: 45 % of the time it is one the prediction already points
+at or a function start the map placed, and that set (`remapTargets`) is
+three orders of magnitude denser than the address space it indexes. Stating
+an index into it, escaping to the shift where it is not in it, with one tag
+bit per entry (`presage/elfmod/fieldfix.go`, basis byte in the field plan;
+the encoder prices both bases and ships the smaller):
+
+| column, cz-compressed | shift basis | index + escape + tag |
+|---|---:|---:|
+| Chrome (67,228 entries, 45 % in set) | 101,803 | **88,733** |
+| libxul (64,121, 40 %) | 100,946 | **89,040** |
+
+Two rungs measured and rejected: a flagless floor-index + residual form
+(Chrome 108,620, libxul 109,119 — the floor index of an arbitrary target is
+noisier than the escape it saves), and escapes delta-coded against the
+previous escape or the previous entry (49,448 → 53,928 / 56,236: absolute
+shifts win). The same question asked of the per-field *delta* column
+answers no — Chrome +821, libxul −810, noise — so that column keeps its
+basis. End to end: Chrome 2,291,929 → **2,278,289**, libxul 2,691,589 →
+**2,679,613**. Zero decode cost.
+
+**Then the coder** (`presage/elfmod/planpack.go`, `delta/cmplan.go`). The
+plan's largest columns are carved out of the blob and coded on their own
+under varint contexts — position within the varint, the previous values'
+magnitudes, the partial value — with a cross-column arm that codes a value
+column against the index column that ships before it. Each carved column
+carries its own codec and context byte, so *which* columns are coded is
+pure encoder policy (`PRESAGE_PLAN_CM`): the decoder follows the table. The
+envelope ships each column's byte offset in the plan, so unpacking is a
+splice — a column list that is wrong costs compression and cannot cost
+correctness.
+
+Apply time is the real currency; the frontier, measured (patch bytes from
+the tier's own encode, apply the median of five interleaved runs):
+
+| tier | Chrome | apply | libxul | apply |
+|---|---:|---:|---:|---:|
+| joint blob (off) | 2,278,971 | 6.20 s | 2,679,713 | 5.01 s |
+| reloc only | 2,269,349 (−9,622) | 6.36 (+0.16) | 2,679,713 (nothing won) | 5.03 (+0.02) |
+| gain≥2000 (default) | **2,256,358** (−22,613) | 6.89 (+0.69) | **2,665,810** (−13,903) | 5.87 (+0.86) |
+| gain≥1000 | **2,248,931** (−30,040) | 7.12 (+0.92) | **2,663,297** (−16,416) | 6.08 (+1.07) |
+
+Read as bytes bought per second of apply, the tiers are not equal: Chrome's
+`reloc` column alone is 60 K B/s, the rest of the gain≥2000 set 33 K B/s,
+and the gain≥1000 step 32 K B/s; libxul, whose `reloc` column wins nothing,
+buys at 16 K and 12 K B/s. Encode is flat across every tier (57.9–60.7 s):
+the columns are coded in parallel, and the encoder reuses the plan it just
+packed instead of decoding it back.
+
+At gain≥1000 Chrome codes eight columns (1,691,451 raw bytes to decode):
+`reloc` −11,779, `eq src-residual` −8,001, `field remap-index` −2,938,
+`point index-delta` −2,571, `eq dst-skip` −1,603, `field field-index`
+−1,259, `field remap-target` −1,188, `derived suppression` −1,216. libxul
+codes eight for −28,080, one of them — `eq copy-len`, −9,782 — on the
+cross-column arm, which is the only place in either pair where knowing the
+index column beats knowing only the column itself, and only at the tier
+where its index column is also carved.
+
+**The two parts interact, and the second one loses.** The probe measured
+−47.8 K/pair for per-stream CM over the plan as it then was; production
+gets −30.0 K on Chrome at the same tier, because §8.2's first half already
+took ~13 K out of the same column — the remap basis change and the coder
+are two ways of spending one pile of entropy, and the cheap one goes first.
+Total against the v3 line: Chrome −35,571 (−1.55 %) at the default tier,
+−42,998 (−1.88 %) at gain≥1000; libxul −25,779 / −28,292.
+
+One accounting oddity worth recording: the packing's one-byte mode prefix,
+with no column coded at all, moves Chrome +682 and libxul +100 — brotli's
+response to a one-byte shift of a 6 MB blob, not a cost of the design.

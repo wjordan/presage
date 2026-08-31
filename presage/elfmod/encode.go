@@ -248,7 +248,7 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 	}
 
 	// 9. What the decoder will build.
-	plan := cp.marshal()
+	plan, planNote := packPlan(cp.marshal())
 	out, ps, err := predictImage(old, cp)
 	if err != nil {
 		return nil, nil, fmt.Errorf("elf: %w", err)
@@ -267,6 +267,7 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 	st.Notes = append(st.Notes, fmt.Sprintf("plan %d B (eq %d, structure %d, choices %d, reloc %d, eh %d, rodata %d, fields %d, dwarf %d); %d mispredicted bytes, %d in .text",
 		len(plan), len(cp.Equivalences), len(cp.Structure), len(cp.Choices), len(cp.Reloc), len(cp.EhFrame), len(cp.RoData), len(cp.Fields), len(cp.Dwarf),
 		st.PredictErr, st.TextPredictErr))
+	st.Notes = append(st.Notes, planNote)
 	st.Notes = append(st.Notes, sectionErrNote(out, target, ni, st.PredictErr))
 	return plan, out, nil
 }

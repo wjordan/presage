@@ -354,11 +354,18 @@ const CMSelMax = 8
 //     within the instruction, from an x86 walk of the prediction under the
 //     piece's DispContext (dispfield.go). They separate a call target's high
 //     byte from its low one, which no byte-history context can.
+//   - Varint marks a plan column instead: the coder runs the LEB128 contexts
+//     of cmplan.go, and Pair, when set, is the paired index column's values.
+//     Neither is per-position side information, so neither is length-checked;
+//     they select a model set, and a stream decoded under the wrong one comes
+//     back wrong, which the container's hashes catch.
 type CMSide struct {
-	Pred []byte
-	Sel  []byte
-	Cls  []byte
-	Off  []byte
+	Pred   []byte
+	Sel    []byte
+	Cls    []byte
+	Off    []byte
+	Varint bool
+	Pair   []uint64
 }
 
 func (s *CMSide) check(n int) error {
@@ -387,6 +394,7 @@ type cmCoder struct {
 	hashes []uint32
 	npred  int // index of the first Pred-conditioned bank, or -1
 	ncls   int // index of the first Cls-conditioned bank, or -1
+	vs     varintState
 }
 
 // bankBits sizes the tables to the stream, so a 4 KiB stream does not
@@ -411,7 +419,9 @@ func matchBits(n int) uint {
 func newCMCoder(n int, side *CMSide) *cmCoder {
 	c := &cmCoder{side: side, npred: -1, ncls: -1}
 	nb := 4
-	if side != nil && side.Pred != nil {
+	if side != nil && side.Varint {
+		nb = cmPlanBanks
+	} else if side != nil && side.Pred != nil {
 		c.npred = nb
 		nb += 2
 	}
@@ -479,8 +489,12 @@ func (c *cmCoder) code(src []byte, enc *arEncoder, dec *arDecoder, dst []byte) {
 	if dec != nil {
 		data = dst
 	}
+	set := c.setByte
+	if c.side != nil && c.side.Varint {
+		set = c.setBytePlan
+	}
 	for i := range data {
-		sel := int(c.setByte(i, data))
+		sel := int(set(i, data))
 		for j, b := range c.banks {
 			b.base = c.hashes[j]
 		}

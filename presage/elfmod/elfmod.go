@@ -57,7 +57,11 @@ func (p planStreams) marshal() []byte {
 	return b
 }
 
-func parsePlanStreams(b []byte) (planStreams, error) {
+func parsePlanStreams(packed []byte) (planStreams, error) {
+	b, err := unpackPlan(packed)
+	if err != nil {
+		return planStreams{}, err
+	}
 	r := &planReader{b: b}
 	var p planStreams
 	for _, s := range []*[]byte{&p.Equivalences, &p.Structure, &p.Choices, &p.Reloc, &p.EhFrame, &p.RoData, &p.Fields, &p.Dwarf} {

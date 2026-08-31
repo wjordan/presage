@@ -3,10 +3,12 @@ package elfmod
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"runtime"
 	"slices"
 
 	"github.com/wjordan/presage/delta/x86"
+	"github.com/wjordan/presage/internal/cz"
 )
 
 // The correction codec treats .text as bytes, but a quarter of what it has to
@@ -78,16 +80,43 @@ func (s fieldSite) put(text []byte, textAddr, target uint64) {
 	binary.LittleEndian.PutUint32(text[s.off:], uint32(int32(int64(target)-int64(textAddr)-int64(s.next))))
 }
 
+// The basis the remap layer states a new target on.
+//
+// remapShiftBasis says how far the address moved, in bytes. But an address the
+// oracle got wrong is almost never corrected to an arbitrary place: 45 % of the
+// time the right answer is an address the prediction already points at or a
+// function start the map placed, and that set -- remapTargets -- is three
+// orders of magnitude denser than the address space it indexes.
+// remapIndexBasis names the target by its index in that set where it is in it,
+// escapes to the shift where it is not, and carries one bit per entry to say
+// which. Measured on the plan's own column, cz-compressed: Chrome 101,803 ->
+// 88,733, libxul 100,946 -> 89,040. The same question asked of the per-field
+// delta column answers no (Chrome +821, libxul -810: noise), so that column
+// keeps its basis.
+const (
+	remapShiftBasis byte = 0
+	remapIndexBasis byte = 1
+)
+
 // fieldPlan is the serialized form of both layers.
 type fieldPlan struct {
+	Basis                  byte
 	RemapIndex, RemapShift []byte
+	// Escape and Tag are the index basis's other two columns: the shifts of
+	// the entries whose target is not in the set, and the bitmap saying which
+	// entries those are.
+	RemapEscape, RemapTag  []byte
 	FieldIndex, FieldDelta []byte
 }
 
 func (p fieldPlan) marshal() []byte {
-	var b []byte
+	b := []byte{p.Basis}
 	b = appendStream(b, p.RemapIndex)
 	b = appendStream(b, p.RemapShift)
+	if p.Basis == remapIndexBasis {
+		b = appendStream(b, p.RemapEscape)
+		b = appendStream(b, p.RemapTag)
+	}
 	b = appendStream(b, p.FieldIndex)
 	b = appendStream(b, p.FieldDelta)
 	return b
@@ -95,11 +124,19 @@ func (p fieldPlan) marshal() []byte {
 
 func unmarshalFieldPlan(b []byte) (fieldPlan, error) {
 	r := &planReader{b: b}
-	ri, rs, fi, fd := r.stream(), r.stream(), r.stream(), r.stream()
+	p := fieldPlan{Basis: r.byteAt()}
+	if r.err != nil || (p.Basis != remapShiftBasis && p.Basis != remapIndexBasis) {
+		return fieldPlan{}, fmt.Errorf("unsupported remap basis %d in field plan", p.Basis)
+	}
+	p.RemapIndex, p.RemapShift = r.stream().b, r.stream().b
+	if p.Basis == remapIndexBasis {
+		p.RemapEscape, p.RemapTag = r.stream().b, r.stream().b
+	}
+	p.FieldIndex, p.FieldDelta = r.stream().b, r.stream().b
 	if r.err != nil || len(r.b) != 0 {
 		return fieldPlan{}, errors.New("invalid field plan")
 	}
-	return fieldPlan{RemapIndex: ri.b, RemapShift: rs.b, FieldIndex: fi.b, FieldDelta: fd.b}, nil
+	return p, nil
 }
 
 type fieldStats struct {
@@ -119,6 +156,30 @@ func remapDomain(text []byte, textAddr uint64, sites []fieldSite) []uint64 {
 		out[i] = s.addr(text, textAddr)
 	}
 	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// remapTargets is the address set a remapped field's new target is named
+// against: the addresses the prediction already points at, plus the function
+// starts the map placed. Both sides build it from the prediction and the plan,
+// so both name the same index.
+func remapTargets(domain []uint64, maps []mapping, textAddr uint64) []uint64 {
+	extra := make([]uint64, len(maps))
+	for i, m := range maps {
+		extra[i] = textAddr + m.Dst
+	}
+	slices.Sort(extra)
+	out := make([]uint64, 0, len(domain)+len(extra))
+	i, j := 0, 0
+	for i < len(domain) && j < len(extra) {
+		if domain[i] <= extra[j] {
+			out, i = append(out, domain[i]), i+1
+		} else {
+			out, j = append(out, extra[j]), j+1
+		}
+	}
+	out = append(out, domain[i:]...)
+	out = append(out, extra[j:]...)
 	return slices.Compact(out)
 }
 
@@ -187,7 +248,10 @@ func encodeFieldFix(text, want []byte, textAddr uint64, maps []mapping) (fieldPl
 	}
 
 	var p fieldPlan
-	prevIdx, prevShift := 0, int64(0)
+	targets := remapTargets(domain, maps, textAddr)
+	var shiftCol, idxCol, escCol, tagCol []byte
+	var tag byte
+	prevIdx, prevShift, prevTarget := 0, int64(0), 0
 	for _, from := range slices.Sorted(mapKeys(chosen)) {
 		i, ok := slices.BinarySearch(domain, from)
 		if !ok {
@@ -195,9 +259,33 @@ func encodeFieldFix(text, want []byte, textAddr uint64, maps []mapping) (fieldPl
 		}
 		shift := int64(chosen[from]) - int64(from)
 		p.RemapIndex = appendS(p.RemapIndex, int64(i-prevIdx))
-		p.RemapShift = appendS(p.RemapShift, shift-prevShift)
+		shiftCol = appendS(shiftCol, shift-prevShift)
 		prevIdx, prevShift = i, shift
+		// The index basis, built alongside so the two are priced on the same
+		// entries and the smaller one ships.
+		ti, _ := slices.BinarySearch(targets, from)
+		tj, ok := slices.BinarySearch(targets, chosen[from])
+		if ok {
+			idxCol = appendS(idxCol, int64(tj-ti)-int64(prevTarget))
+			prevTarget = tj - ti
+		} else {
+			escCol = appendS(escCol, shift)
+			tag |= 1 << (st.Remaps % 8)
+		}
+		if st.Remaps%8 == 7 {
+			tagCol = append(tagCol, tag)
+			tag = 0
+		}
 		st.Remaps++
+	}
+	if st.Remaps%8 != 0 {
+		tagCol = append(tagCol, tag)
+	}
+	p.Basis, p.RemapShift = remapShiftBasis, shiftCol
+	indexed := append(append(slices.Clone(idxCol), escCol...), tagCol...)
+	if cz.SizeProxy(indexed) < cz.SizeProxy(shiftCol) {
+		p.Basis, p.RemapShift = remapIndexBasis, idxCol
+		p.RemapEscape, p.RemapTag = escCol, tagCol
 	}
 
 	// Apply the remaps to a scratch copy so the per-field layer corrects what
@@ -235,22 +323,48 @@ func applyFieldFix(text []byte, textAddr uint64, maps []mapping, b []byte) (fiel
 	st.Domain = len(domain)
 
 	idxr, shr := &planReader{b: p.RemapIndex}, &planReader{b: p.RemapShift}
+	escr := &planReader{b: p.RemapEscape}
+	var targets []uint64
+	if p.Basis == remapIndexBasis {
+		targets = remapTargets(domain, maps, textAddr)
+	}
 	remap := map[uint64]uint64{}
-	idx, shift := 0, int64(0)
+	idx, shift, prevTarget := 0, int64(0), 0
 	for !idxr.done() {
 		idx += int(idxr.s())
-		shift += shr.s()
-		if idxr.err != nil || shr.err != nil || idx < 0 || idx >= len(domain) {
+		if idxr.err != nil || idx < 0 || idx >= len(domain) {
 			return st, errors.New("invalid address remap entry")
 		}
-		// Addresses wrap: this is a position-independent image, so a
-		// displacement can point below zero and both sides must agree to let
-		// it. Nothing here indexes memory by the result -- put truncates it to
-		// the field's four bytes -- so wrapping is safe as well as necessary.
-		remap[domain[idx]] = uint64(int64(domain[idx]) + shift)
+		from := domain[idx]
+		var to uint64
+		switch {
+		case p.Basis == remapShiftBasis:
+			shift += shr.s()
+			// Addresses wrap: this is a position-independent image, so a
+			// displacement can point below zero and both sides must agree to
+			// let it. Nothing here indexes memory by the result -- put
+			// truncates it to the field's four bytes -- so wrapping is safe as
+			// well as necessary.
+			to = uint64(int64(from) + shift)
+		case st.Remaps/8 < len(p.RemapTag) && p.RemapTag[st.Remaps/8]&(1<<(st.Remaps%8)) != 0:
+			to = uint64(int64(from) + escr.s())
+		default:
+			i, _ := slices.BinarySearch(targets, from)
+			prevTarget += int(shr.s())
+			j := i + prevTarget
+			if shr.err != nil || j < 0 || j >= len(targets) {
+				return st, errors.New("address remap target out of range")
+			}
+			to = targets[j]
+		}
+		if shr.err != nil || escr.err != nil {
+			return st, errors.New("invalid address remap entry")
+		}
+		remap[from] = to
 		st.Remaps++
 	}
-	if !shr.done() {
+	if !shr.done() || !escr.done() ||
+		(p.Basis == remapIndexBasis && len(p.RemapTag) != (st.Remaps+7)/8) {
 		return st, errors.New("trailing address remap data")
 	}
 	for _, s := range sites {

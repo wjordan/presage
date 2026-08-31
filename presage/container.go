@@ -24,7 +24,15 @@ const Magic = "PSG1"
 // codec a split residual's stream table may name (SPEC G6). The id is
 // refused by name where it is not known, but the format is pre-release and
 // the same up-front refusal is cheaper than discovering it mid-stream.
-const Version = 3
+//
+// 4: the ELF module's plan states a remapped field's target as an index into
+// the addresses the prediction already points at (a new basis byte), and ships
+// its largest columns coded on their own under the plan contexts rather than
+// as one blob in the body (a new plan packing). Both are self-announcing — an
+// unknown basis, packing, codec or context is refused by name — but the format
+// is pre-release and the up-front refusal is cheaper than discovering it
+// mid-plan.
+const Version = 4
 
 // Header flags.
 const (
