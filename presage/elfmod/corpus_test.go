@@ -1,12 +1,13 @@
 //go:build corpus
 
-// The ELF module's gate (docs/general/elf-module.md §7): the Chrome,
-// libxul and rustc-nightly pairs encode, apply and compare byte-exactly, under a parity
-// budget (the harness's own -native-equivalences number, proving the port)
-// and a product budget (the comparison table), the latter behind
-// PRESAGE_ELF_PRODUCT_GATE=1 until the matcher track lands. Minutes to run:
+// The ELF module's gate (docs/general/elf-module.md §7): the Chrome pair
+// encodes, applies and compares byte-exactly under a ratchet budget, plus
+// self-prediction on every corpus pair and the no-symbols path. Subtests
+// run in parallel; the whole gate is ~3 minutes wall. There is deliberately
+// no full multi-pair round-trip tier — per-pair headline sizes are a CLI
+// measurement (presage diff), paid only when a number is wanted:
 //
-//	go test -tags corpus ./presage/elfmod -run 'TestPairs|TestSelfPrediction|TestNoSymbols' -timeout 30m
+//	go test -tags corpus ./presage/elfmod -run 'TestPairs|TestSelfPrediction|TestNoSymbols' -timeout 10m
 package elfmod
 
 import (
@@ -39,7 +40,9 @@ var pairs = []pair{
 		new:     home(".cache", "presage-chrome-zucchini", "chrome-151.0.7922.173"),
 		oldSyms: home(".cache", "presage-chrome-zucchini", "symbols-151.0.7922.169", "debug-info", "chrome.debug"),
 		newSyms: home(".cache", "presage-chrome-zucchini", "symbols-151.0.7922.173", "debug-info", "chrome.debug"),
-		parity:  4823576, product: 2634264,
+		// parity is the measured patch at container v3 (derived map +
+		// displacement columns + CM coder), a ratchet against regression.
+		parity: 2303210, product: 2634264,
 	},
 	{
 		name:    "libxul-154.0-154.0.1",
@@ -131,28 +134,31 @@ func roundTrip(t *testing.T, old, new []byte, syms [2]symbols.Reader) (int, pres
 	return len(patch), r
 }
 
+// TestPairs round-trips the Chrome pair only — the cheapest encode, and the
+// one exercising every structural path (derived map, displacement columns,
+// CM coder). The other pairs' sizes are CLI measurements, not tests.
 func TestPairs(t *testing.T) {
-	for _, p := range pairs {
-		t.Run(p.name, func(t *testing.T) {
-			old, new, syms := p.files(t, true)
-			size, _ := roundTrip(t, old, new, syms)
-			if limit := p.parity * 103 / 100; size > limit {
-				t.Errorf("parity: %d B > %d (1.03 × harness %d)", size, limit, p.parity)
-			}
-			if os.Getenv("PRESAGE_ELF_PRODUCT_GATE") == "" {
-				t.Logf("product gate skipped (PRESAGE_ELF_PRODUCT_GATE unset): %d vs %d", size, p.product)
-				return
-			}
-			if size > p.product {
-				t.Errorf("product: %d B > %d", size, p.product)
-			}
-		})
+	t.Parallel()
+	p := pairs[0]
+	old, new, syms := p.files(t, true)
+	size, _ := roundTrip(t, old, new, syms)
+	if limit := p.parity * 103 / 100; size > limit {
+		t.Errorf("ratchet: %d B > %d (1.03 × %d)", size, limit, p.parity)
+	}
+	if os.Getenv("PRESAGE_ELF_PRODUCT_GATE") == "" {
+		t.Logf("product gate skipped (PRESAGE_ELF_PRODUCT_GATE unset): %d vs %d", size, p.product)
+		return
+	}
+	if size > p.product {
+		t.Errorf("product: %d B > %d", size, p.product)
 	}
 }
 
 func TestSelfPrediction(t *testing.T) {
+	t.Parallel()
 	for _, p := range pairs {
 		t.Run(p.name, func(t *testing.T) {
+			t.Parallel()
 			old, _, syms := p.files(t, true)
 			// The target is the old image with its own symbols on both sides;
 			// copy would claim it, so the module is named explicitly.
@@ -181,6 +187,7 @@ func TestSelfPrediction(t *testing.T) {
 }
 
 func TestNoSymbols(t *testing.T) {
+	t.Parallel()
 	p := pairs[1]
 	old, new, _ := p.files(t, false)
 	size, _ := roundTrip(t, old, new, [2]symbols.Reader{})
