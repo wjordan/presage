@@ -2,6 +2,7 @@ package presage
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/wjordan/presage/delta"
 	"github.com/wjordan/presage/internal/cz"
@@ -47,8 +48,12 @@ func splitResidual(pred, target []byte, cuts []int64, disp *delta.DispContext) (
 		if len(cols) != delta.ColumnarStreams {
 			colKind = pieceColumnarDisp
 		}
+		sides, err := delta.CMColumnarSides(pred[a:b], cols[0], cols[1])
+		if err != nil {
+			return nil, false, 0, err
+		}
 		kind, streams := pieceLZ, [][]byte{corr}
-		zl, cl := compressAll(streams), compressAll(cols)
+		zl, cl := compressAll(streams, nil), compressAll(cols, colSides(sides))
 		if total(cl) < total(zl) {
 			kind, streams, zl = colKind, cols, cl
 		} else {
@@ -86,10 +91,44 @@ type zstream struct {
 	b     []byte
 }
 
-func compressAll(streams [][]byte) []zstream {
+// codecCM names the prediction-conditioned context-mixing coder
+// (delta/cmcoder.go) in a piece's stream table. It is not a cz tag: every cz
+// codec is context-free and this one is not, so split.go dispatches it here
+// and cz never sees it. An id neither side knows is refused by name in
+// applySplitResidual.
+const codecCM byte = 3
+
+// cmMinStream is the smallest stream the CM coder is offered. It runs at
+// about 1 MB/s each way; below a few kilobytes its adaptive models have not
+// paid for themselves and the attempt is only encode time.
+const cmMinStream = 4 << 10
+
+// colSides maps the per-bucket side information onto the columnar stream
+// table, where the buckets start after the gaps and lens columns.
+func colSides(buckets []*delta.CMSide) []*delta.CMSide {
+	sides := make([]*delta.CMSide, 2+len(buckets))
+	copy(sides[2:], buckets)
+	return sides
+}
+
+// compressAll compresses each stream with cz. When sides is non-nil the
+// large streams are additionally offered to the CM coder, under whatever
+// per-position conditioning they have, and the smaller of the two ships:
+// the coder is a candidate, never a commitment.
+func compressAll(streams [][]byte, sides []*delta.CMSide) []zstream {
 	out := make([]zstream, len(streams))
 	for i, s := range streams {
 		out[i].codec, out[i].b = cz.Compress(s)
+		if sides == nil || len(s) < cmMinStream {
+			continue
+		}
+		var side *delta.CMSide
+		if i < len(sides) {
+			side = sides[i]
+		}
+		if c, err := delta.CMEncode(s, side); err == nil && len(c) < len(out[i].b) {
+			out[i] = zstream{codecCM, c}
+		}
 	}
 	return out
 }
@@ -136,19 +175,54 @@ func applySplitResidual(out, stream []byte, disp func() *delta.DispContext) erro
 	}
 	var at uint64
 	for _, p := range ps {
-		streams := make([][]byte, len(p.raw))
+		blobs := make([][]byte, len(p.raw))
 		for j := range p.raw {
-			z := r.take(p.zlen[j])
+			blobs[j] = r.take(p.zlen[j])
 			if r.err != nil {
 				return r.err
 			}
-			s, err := cz.Decompress(p.codec[j], z, int(p.raw[j]))
+		}
+		span := out[at : at+p.length]
+		streams := make([][]byte, len(p.raw))
+		var sides []*delta.CMSide
+		get := func(j int) error {
+			var side *delta.CMSide
+			if j < len(sides) {
+				side = sides[j]
+			}
+			s, err := decodeStream(p.codec[j], blobs[j], int(p.raw[j]), side)
 			if err != nil {
 				return fmt.Errorf("%w: piece: %v", ErrCorrupt, err)
 			}
 			streams[j] = s
+			return nil
 		}
-		span := out[at : at+p.length]
+		// A byte bucket coded by the CM coder is conditioned on the
+		// prediction under each of its bytes, which the gaps and lens
+		// columns before it fix. So those two are decoded first and the
+		// conditioning derived from them and from span, which still holds
+		// the prediction.
+		lead := len(streams)
+		if p.kind != pieceLZ {
+			lead = min(lead, 2)
+		}
+		for j := 0; j < lead; j++ {
+			if err := get(j); err != nil {
+				return err
+			}
+		}
+		if lead == 2 && slices.Contains(p.codec[2:], codecCM) {
+			buckets, err := delta.CMColumnarSides(span, streams[0], streams[1])
+			if err != nil {
+				return fmt.Errorf("%w: piece: %v", ErrCorrupt, err)
+			}
+			sides = colSides(buckets)
+		}
+		for j := lead; j < len(streams); j++ {
+			if err := get(j); err != nil {
+				return err
+			}
+		}
 		var err error
 		switch {
 		case p.kind == pieceLZ && len(streams) == 1:
@@ -166,6 +240,15 @@ func applySplitResidual(out, stream []byte, disp func() *delta.DispContext) erro
 		at += p.length
 	}
 	return r.done()
+}
+
+// decodeStream reverses one entry of a piece's stream table. An id neither
+// cz nor the CM coder knows is refused by name.
+func decodeStream(codec byte, z []byte, n int, side *delta.CMSide) ([]byte, error) {
+	if codec == codecCM {
+		return delta.CMDecode(z, n, side)
+	}
+	return cz.Decompress(codec, z, n)
 }
 
 // frameCost is what a stream costs once the container frames and

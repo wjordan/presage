@@ -520,6 +520,47 @@ weights module's exponent/mantissa split is this) but not their own entropy
 coder (R6).
 Coder state is not reset at region boundaries.
 
+**The prediction-conditioned coder (amends G6).** The terminal stage is still
+one coder per stream chosen by the encoder, but the choice now includes a
+context-mixing arithmetic coder (`delta/cmcoder.go`) alongside zstd, brotli
+and raw. It exists because codec principle #1 — *the decoder already holds
+the prediction* — had been arriving everywhere except the entropy stage. A
+general LZ coder cannot be told that byte *k* of a replacement stream lands at
+a known offset in bytes the decoder is holding; this one is: its strongest
+model is the prediction's byte at that same position, keyed with the byte's
+column within its run. Around it sit order-1/2, a sparse *i*−4 context, and a
+match model, mixed by one logistic mixer selected by column and bit index.
+
+The conditioning must be free on both sides, so the coder is offered only to
+streams whose positions the decoder can fix before it decodes them: in a split
+residual's columnar piece (§6.1) the gaps and lens columns come first in the
+stream table, so by the time a byte bucket is read both sides know where each
+of its bytes lands and the span still holds the prediction. The derivation is
+one function called by encoder and decoder alike, so they cannot disagree.
+
+It is a candidate, never a commitment. The encoder codes every stream above
+4 KiB both ways and ships the smaller under a per-stream codec id
+(`presage/split.go`), and an id neither cz nor the CM coder claims is refused
+by name. Generic context mixing is *not* what pays: without the prediction
+context the same engine loses to xz by 92 K on Chrome's `.text` correction,
+and the pred[*i*] model is 89 % of the gain — the reason this is a decision
+change and not a compressor swap.
+
+The price is decode speed: roughly 1.5 MB/s of residual against brotli's
+hundreds. Measured end to end against the same build with the coder switched
+off, apply goes 5.1 s → 6.1 s on Chrome and 2.4 s → 4.4 s on libxul, for
+−109 K and −237 K. That is affordable only because the residual is megabytes
+where the image is hundreds of them; it would not be affordable anywhere else
+in the pipeline. The coder is entirely integer — squash and stretch are
+tables, not `math.Exp` — so a patch coded on one machine decodes identically
+on every other.
+
+Concatenating a piece's byte buckets into one coded stream, which is worth
+−2,960 against xz in the harness, *loses* here (+10,862 on Chrome, +1,321 on
+its `.rodata` piece alone): separate streams already give each bucket its own
+model bank, which is more separation than a shared coder's context can buy
+back.
+
 ### 6.4 Selection
 
 Per region, the encoder chooses among candidate modules by measured size,
@@ -694,7 +735,7 @@ it out by rule.
 | G3 | Modules referenced by hash, never inlined in a patch | RFC 9842 / Shared Brotli precedent; module ≈ patch size; cache once |
 | G4 | Every module op has a lowering to core ops | a v1 decoder reads every future patch; capability negotiation becomes a byte cost, not a failure |
 | G5 | Hard per-region selection over structural regions, encoder-side | switching-cost theory and every fast system in the survey (R5) |
-| G6 | One terminal residual coder; control varints plus one payload sub-stream per residual mode; modules only pre-transform | shared statistics (R6); binsync's 6–7 % from stream choice; routing payloads by mode rather than by length is 0.7 points and sharing one payload stream across modes gives back 3.5 of 14.4 (`research/bsdiff6-spike.md` §2.4) |
+| G6 | One terminal residual coder; control varints plus one payload sub-stream per residual mode; modules only pre-transform. **Amended (§6.3):** the terminal stage offers one further codec, a prediction-conditioned context-mixing coder, chosen per stream by the encoder only where it beats the incumbent | shared statistics (R6); binsync's 6–7 % from stream choice; routing payloads by mode rather than by length is 0.7 points and sharing one payload stream across modes gives back 3.5 of 14.4 (`research/bsdiff6-spike.md` §2.4). The amendment: the prediction is the one thing the general compressors cannot be told, and it is 89 % of the gain — generic context mixing loses to xz by 92 K. Chrome −109 K, libxul −237 K, librustc_driver −512 K, for +1.0 s / +1.9 s of apply |
 | G7 | Function/tensor correspondence is shipped, not recovered | encoder has both unstripped artefacts (R7); decoder stays O(metadata) |
 | G8 | Prediction hash is a chunked tree hash | localises divergence to a region/module; enables streaming verification |
 | G9 | Length-exact vs length-declared is a module property that selects the residual coder | D17 in binsync: 66 KB vs 17 KB when the wrong coder is used |

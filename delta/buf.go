@@ -11,6 +11,10 @@ import (
 // against what remains, every offset against the buffer it indexes.
 var errCorrupt = errors.New("delta: corrupt patch")
 
+func wrapCorrupt(f string, a ...any) error {
+	return fmt.Errorf("%w: "+f, append([]any{errCorrupt}, a...)...)
+}
+
 type wbuf struct{ b []byte }
 
 func (w *wbuf) u(v uint64) {

@@ -7,6 +7,46 @@ module behind the `Module` seam of `presage/module.go`, so that
 non-Go ELF x86-64 image end to end. Design authority: `SPEC.md` §4–6, §10
 item 3; template: `presage/gomod` (`presage-core.md` §4, §7).*
 
+## Status (2026-08-31b): the prediction-conditioned coder
+
+The residual's terminal stage now offers a context-mixing arithmetic coder
+conditioned on the prediction byte under each correction byte
+(`delta/cmcoder.go`, `SPEC.md` §6.3 amending G6). It is a per-stream
+candidate: the encoder codes every piece stream above 4 KiB both ways and
+ships whichever is smaller under a codec id in the piece's stream table.
+Measured through the CLI, applied and `cmp`-verified:
+
+| pair | before | + CM coder |
+|---|---:|---:|
+| Chrome 151 .169 → .173 | 2,412,635 | **2,303,210** (−109,425) |
+| libxul 154.0 → 154.0.1 | 2,942,865 | **2,705,570** (−237,295) |
+| librustc_driver 08-27 → 08-28 | 6,564,155 | **6,052,023** (−512,132) |
+
+Where it goes on Chrome: the `.text` piece's five byte buckets are 1,219,717
+raw and 640,616 under brotli; the coder takes them to 533,643 (−106,973), and
+with the piece's other columns the whole `.text` piece falls 1,064,564 →
+952,890. That is the harness's rung-4 result arriving intact through a
+different correction shape. The encoder chose CM for 28 of 34 offered streams
+on Chrome and 41 of 46 on libxul, including several with no positional
+conditioning at all — the lens column, the displacement tags — where the
+match model alone beats brotli. It correctly declined Chrome's 377,872-byte
+`gaps` column (272,617 brotli, 274,220 coded), which §8 of `pgo-churn.md`
+called CM-proof. libxul gains more than Chrome because more of its correction
+is long runs of replacement bytes, which is where a prediction byte under
+each one is worth most.
+
+Encode is unchanged within noise (Chrome 108.1 s → 106.9 s, libxul 169.9 s →
+171.8 s): the CM attempt is a couple of megabytes against a two-minute
+encode. Apply pays the coder's speed, roughly 1.5 MB/s of residual: measured
+against the same build with the coder switched off, Chrome goes 5.1 s →
+6.1 s and libxul 2.4 s → 4.4 s. Both no-coder builds reproduce the previous
+column's numbers to the byte, so nothing else in this change moved bytes.
+`presage.Version` is 3; an older build refuses every patch by name.
+
+Concatenating a piece's byte buckets into one coded stream, worth −2,960
+against xz in the harness, loses here (+10,862 on Chrome): five separate
+streams already give the coder five separate model banks.
+
 ## Status (2026-08-31)
 
 The derived function map (§2.1) and the residual's displacement columns

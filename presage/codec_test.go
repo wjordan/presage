@@ -274,3 +274,85 @@ func TestDispResidualRoundTrip(t *testing.T) {
 	reg.Add(m)
 	roundTrip(t, [][]byte{old}, target, Options{Registry: reg})
 }
+
+// pieceCodecs reads the codec byte of every stream of a split residual.
+func pieceCodecs(t *testing.T, stream []byte) []byte {
+	t.Helper()
+	r := &rbuf{b: stream}
+	n := r.u()
+	var codecs []byte
+	for i := uint64(0); i < n; i++ {
+		r.u() // piece length
+		r.byte()
+		ns := r.u()
+		for j := uint64(0); j < ns; j++ {
+			r.u()
+			r.u()
+			codecs = append(codecs, r.byte())
+		}
+	}
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	return codecs
+}
+
+// TestSplitResidualCM exercises the CM codec through the split residual's
+// stream table: a correction of four-byte runs whose bytes are each one more
+// than the prediction's is noise to a general compressor and nearly free to a
+// coder conditioned on the prediction, so the encoder must choose it, and the
+// decoder must derive the same conditioning from the columns before it.
+func TestSplitResidualCM(t *testing.T) {
+	const n = 64 << 10
+	r := rand.New(rand.NewSource(3))
+	pred := make([]byte, n)
+	for i := range pred {
+		pred[i] = byte(r.Uint32())
+	}
+	// A fixed derangement of the byte values: noise to a general compressor,
+	// and a single deterministic step to a coder that sees the prediction.
+	var perm [256]byte
+	for i := range perm {
+		perm[i] = byte(i)
+	}
+	r.Shuffle(256, func(i, j int) { perm[i], perm[j] = perm[j], perm[i] })
+	for i := range perm {
+		if perm[i] == byte(i) {
+			perm[i] = perm[(i+1)%256]
+			perm[(i+1)%256] = byte(i)
+		}
+	}
+	target := append([]byte(nil), pred...)
+	for off := 0; off+4 <= n; off += 16 {
+		for k := 0; k < 4; k++ {
+			target[off+k] = perm[pred[off+k]]
+		}
+	}
+	cuts := cutModule{}.Cuts(target)
+	stream, _, size, err := splitResidual(pred, target, cuts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codecs := pieceCodecs(t, stream)
+	if !bytes.Contains(codecs, []byte{codecCM}) {
+		t.Fatalf("codecs %v: the CM coder was not chosen", codecs)
+	}
+	out := append([]byte(nil), pred...)
+	if err := applySplitResidual(out, stream, func() *delta.DispContext { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out, target) {
+		t.Fatal("the CM-coded residual did not reproduce the target")
+	}
+	t.Logf("%d-byte region, %d-byte residual, kinds %v, codecs %v", n, size, pieceKinds(t, stream), codecs)
+}
+
+// An id no codec claims is refused by name, not misread.
+func TestSplitResidualUnknownCodec(t *testing.T) {
+	// One piece, one stream, codec 99.
+	stream := []byte{1, 10, pieceLZ, 1, 4, 1, 99, 0}
+	err := applySplitResidual(make([]byte, 10), stream, func() *delta.DispContext { return nil })
+	if err == nil || !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("unknown codec gave %v", err)
+	}
+}
