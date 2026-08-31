@@ -33,13 +33,13 @@ Every row is `presage diff`, then `presage patch`, then a byte-exact compare.
 
 | pair | presage | Zucchini | bsdiff | xdelta3 | zstd `--patch-from` |
 |---|---:|---:|---:|---:|---:|
-| one-line change, 30 MB Go binary | **1,202** | 173,060 | 150,475 | 1,390,889 | 538,493 |
-| prometheus 3.13.1 → 3.13.2, Go, 94 MB | **70,195** | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
+| one-line change, 30 MB Go binary | **1,129** | 173,060 | 150,475 | 1,390,889 | 538,493 |
+| prometheus 3.13.1 → 3.13.2, Go, 94 MB | **69,933** | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
 | Chrome 151.0.7922.169 → .173, C++, 291 MB | **2,581,091** | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
 | Firefox libxul 154.0 → 154.0.1, C++, 186 MB | **3,010,960** | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
 
 The one-line change is the extreme case and the clearest picture of what
-prediction buys: 125× smaller than bsdiff, because almost the whole patch is
+prediction buys: 133× smaller than bsdiff, because almost the whole patch is
 displacement that presage recomputes rather than sends. The ratio falls as the
 pair grows further apart, to 38× on a Go patch release, 7× on the Chrome
 pair and 4× on libxul. That is expected: prediction removes displacement, and

@@ -55,8 +55,8 @@ around 40% on the smaller pairs. Earlier drafts of the README quoted
 
 | pair | presage | Zucchini | bsdiff | xdelta3 | zstd `--patch-from` |
 |---|---:|---:|---:|---:|---:|
-| one-line change, 30 MB | 1,202 | 173,060 | 150,475 | 1,390,889 | 538,493 |
-| prometheus 3.13.1 → 3.13.2 | 70,195 | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
+| one-line change, 30 MB | 1,129 | 173,060 | 150,475 | 1,390,889 | 538,493 |
+| prometheus 3.13.1 → 3.13.2 | 69,933 | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
 | Chrome 151.0.7922.169 → .173 | 2,581,091 | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
 | libxul 154.0 → 154.0.1 | 3,010,960 | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
 
@@ -71,7 +71,7 @@ The shipped patch is an mbsdiff at 10,779,184, whose blocks the MAR container
 compresses with XZ rather than bzip2, so it beats local bsdiff; presage is
 3.6× smaller again. See `research/firefox-partial-mar.md`.
 
-On the one-line row the shipped patch is 1,202 B, of which 166 B is the
-container header (three 32-byte hashes) and 132 B is random (two build IDs and
-the FIPS hash); `go-module-results.md` §"Where the numbers come from" has the
-rest of the ledger.
+On the one-line row the shipped patch is 1,129 B, of which 134 B is the
+container header and 100 B is random (the two build-ID notes; a `-buildid=`
+build is 970 B, and the FIPS sum the decoder now recomputes);
+`research/one-liner-floor.md` has the full ledger.

@@ -112,19 +112,19 @@ repository's `delta` package, including its patch header and frame table:
 
 | Pair (toolchain) | bsdiff | hdiffz -p-8 | prototype | v1 | **presage** | vs bsdiff |
 |---|---:|---:|---:|---:|---:|---:|
-| one-line (`v1→v2c`, 29.6 MB, Go 1.27) | 150,475 | 176,929 | 2,207 | 2,262 | **1,202** | 125× |
-| +3-byte string (`v1→v2l`, 1.27) | 24,874 | 33,713 | 566 | 438 | **545** | 46× |
-| multi-package (`v1→v4`, 1.27) | 145,205 | 171,760 | 2,733 | 2,745 | **1,705** | 85× |
-| `v3→v4` (1.27) | 30,196 | 40,523 | 578 | 440 | **580** | 52× |
-| prometheus 3.13.1→3.13.2, built with Go 1.27 (94 MB) | 2,691,644 | 2,719,152 | 111,552 | 95,366 | **70,195** | **38×** |
-| prometheus 3.13.1→3.13.2, default build with DWARF (181 MB) | 4,832,993 | — | — | 8,714,361 | **332,414** | 15× |
+| one-line (`v1→v2c`, 29.6 MB, Go 1.27) | 150,475 | 176,929 | 2,207 | 2,262 | **1,129** | 133× |
+| +3-byte string (`v1→v2l`, 1.27) | 24,874 | 33,713 | 566 | 438 | **459** | 54× |
+| multi-package (`v1→v4`, 1.27) | 145,205 | 171,760 | 2,733 | 2,745 | **1,635** | 89× |
+| `v3→v4` (1.27) | 30,196 | 40,523 | 578 | 440 | **479** | 63× |
+| prometheus 3.13.1→3.13.2, built with Go 1.27 (94 MB) | 2,691,644 | 2,719,152 | 111,552 | 95,366 | **69,933** | **38×** |
+| prometheus 3.13.1→3.13.2, default build with DWARF (181 MB) | 4,832,993 | — | — | 8,714,361 | **330,557** | 15× |
 
 The **presage** column is what the shipped CLI writes: the same transform,
 driven as one module of the presage codec (`docs/general/presage-core.md`),
 with the segment maps, far pieces, pointer consensus and the header prediction of
 §2.2–§2.4 landed after v1, and for a default build the DWARF field layer
 (§2.5, `presage/dwarf`). The two smallest pairs are above v1 by the presage
-container's ~100 B — a region record, a frame table and the prediction's
+container's ~40 B — a region record, a frame table and the prediction's
 32-byte hash — which the per-pair corpus gate accepts (within 2 % + 64 B of
 `delta.Encode`). 3,982 B of the real pair's presage figure is the modal
 correction (`docs/general/SPEC.md` §6.1): the same encoder without it writes

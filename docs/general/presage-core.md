@@ -43,6 +43,8 @@ header  uvarint len, then:
         b3 target[32], uvarint target_size
         uvarint nregions, per region: uvarint length, u8 module, uvarint plan_len
         uvarint nframes, per frame: uvarint off, len, zlen, u8 codec, b3[32]
+        (the b3 omitted when nframes = 1: the frame is the whole body and
+        the target hash checks it)
 frames  independently decodable, ≤ 8 MiB each, concatenating to the body
 body    when debugz: uvarint expanded_target_size
         per region, in order: plan bytes, b3 root of the prediction's chunk
