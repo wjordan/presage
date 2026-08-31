@@ -310,6 +310,55 @@ average), and that average is also the build's sharpest lesson:
   join fidelity can degrade over a chain of patches. −135,868 is a
   first-patch number; the steady state is unmeasured.
 
+### 5.1c No sidecar after all: the derived enumeration
+
+The carried table is a real adoption barrier — the standard contract is
+"vN binary + patch → vN+1", stateless. The `derivedmap` probe
+(`derivedmap.go`, 2026-08-31, reproduced across runs) asked whether the
+table's decode-side role — a shared ordered enumeration of old function
+boundaries; the name hashes work encoder-side — can be served from the
+old image alone. `.eh_frame_hdr` is refuted first (31,794 FDEs vs 925,590
+units; Chrome builds most code without unwind tables). Three
+decoder-derivable evidence sources measured against the true unit list:
+
+| evidence | recall | spurious inside units |
+|---|---:|---:|
+| call rel32 targets (E1) | 47.7 % | **3** |
+| `.rela.dyn` targets in `.text` (E2) | 29.7 % | 122 |
+| padding starts (E3, `detectBoundaries` rule) | 95.4 % | 55,224 |
+| **E1+E2+E3** | **99.11 %** | 55,349 |
+| adding jmp/jcc targets | 99.81 % | 1.4 M–5.0 M (poison) |
+
+Call and relocation targets are near-perfect precision; padding starts
+carry the recall; jump targets are block-level noise that costs far more
+than the +0.7 pp they add. The re-keyed stream (E1+E2+E3, spurious
+entries suppressed by a shipped bitmap — suppression wins because a
+spurious entry inside a body corrupts the padding-rule *size*, not
+because the bitmap beats drop-runs) with the map-reconstruction gate
+still exact:
+
+| | stream xz | plan xz | vs baseline | carried file |
+|---|---:|---:|---:|---|
+| map columns (today) | 237,044 repl. | 1,244,728 | — | none |
+| carried sidecar (§5.1b) | 101,104 | 1,108,860 | −135,868 | 12.4 MB |
+| **derived enumeration** | 141,292 | 1,148,952 | **−95,776** | **none** |
+
+**70.5 % of the sidecar's win survives with no client-side state.** The
+40 K gap is the suppression bitmap (34,380), boundary exceptions
+(13,248) and size fixups (9,244), less the join layer that disappears
+(the encoder codes correspondence directly against the positional
+cursor — no hashes anywhere). Decoder cost: one extra linear sweep of
+old `.text` plus a `.rela.dyn` scan, both deterministic and before the
+map is needed; the decoder already walks old `.text` twice. Misses do
+not conveniently avoid live code (1,726 of them are map-sourced
+functions), they are simply cheap to except.
+
+Strategic consequence: the **stateless derived variant is the headline**
+(works under the standard patch contract, no bootstrap, no roll-forward
+decay — the enumeration re-derives from the patched bytes); the carried
+table survives as an optional ~−40 K refinement for managed updaters
+that can hold per-install state.
+
 ### 5.2 The block-map probe, measured dead
 
 `bench/elfpredict -probes blocksidecar` (`blocksidecar.go`), run
