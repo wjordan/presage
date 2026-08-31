@@ -390,6 +390,27 @@ both pairs, byte-identical predictions, byte-exact replay:
 704 bytes; 684 bytes better than the probe's splice (stream framing
 shifted xz context favourably).
 
+**Ported to production** (`presage/elfmod/derived.go`, `delta/dispfield.go`,
+2026-08-31): both stateless wins landed in `presage diff -symbols` as
+container version 2 — the derived map as a per-window structural-plan mode,
+the displacement column as split-residual piece kind 2 behind a new
+`presage.FieldRefiner` module seam. Byte-exact `presage patch` + `cmp` on
+all corpus pairs:
+
+| pair | before | +derived map | +disp column | total |
+|---|---:|---:|---:|---:|
+| chrome .169→.173 | 2,537,338 | 2,427,719 | **2,412,635** | −124,703 (−4.9 %) |
+| libxul 154.0→154.0.1 | 2,996,042 | 2,959,645 | **2,942,865** | −53,177 (−1.8 %) |
+| librustc_driver | 6,597,439 | — | **6,564,155** | −33,284 |
+
+The derived map beats the harness's −96,468 on Chrome (−109,619; the
+production window model expresses it better); the displacement column
+under-delivers vs the harness's −20,032 (−15,084) because elfmod's
+field-fix layer already recovers part of those fields. Encode flat
+(+1.7 s Chrome); apply +1.9 s for the enumeration sweep and residual
+re-walk. The carried-table refinement (§5.1b, ~−40 K more) is *not* in
+the wire format — reaching it later is a format change, by choice.
+
 ### 5.2 The block-map probe, measured dead
 
 `bench/elfpredict -probes blocksidecar` (`blocksidecar.go`), run
@@ -478,3 +499,32 @@ verified against LLVM/GCC sources 2026-08-31:
   answers §4's direction 4 (equivalence-run locality): the locality is
   real (51 % of runs) and already cheap (2.56 xz bytes/run), and no
   structural basis beats it.
+
+## 8. The terminal coder, probed: prediction-conditioned CM
+
+`bench/elfpredict -probes cmix` (`cmcoder.go`/`cmprobe.go`, 2026-08-31): a
+deliberately minimal adaptive binary arithmetic coder with logistic mixing,
+every rung decoded by a real decoder and verified byte-exact, priced against
+the shipped five-bucket xz correction (1,356,896 on .169→.173).
+
+| model | coded bytes | note |
+|---|---:|---|
+| generic CM (o0/o1/o2/sparse) | 763,043 | **loses to xz by 92 K** — no generic win exists |
+| + `pred[i]` (prediction byte at position) | 560,932 | 89 % of the total gain |
+| + field class/offset contexts | 542,458 | "field-aware" is only 17.5 % of the win |
+| + match model | **522,858** | −110,235 vs the five xz buckets |
+
+The mechanism is principle #1 arriving at the entropy stage: condition the
+coder on the byte the prediction already holds. Patch implications:
+2,505,164 → 2,394,929 stateless (harness numbers). A serious engine (SSE,
+bit histories) plausibly reaches ~−130 K.
+
+The cost is the decision: 0.89 MB/s serial decode — ~135× slower than xz
+on that stage, ~1.4 s added apply time. That is a G6/SPEC amendment (an
+optional, capability-gated coder for the correction streams, ending
+like-for-like xz comparability), not a free flag. Two side findings:
+concatenating the five bucket streams under one xz context is a free −2,960
+today (the five-way split predates `-dispcol`, which drained the noise the
+split separated — re-run that decision); and the 286 K `gaps` column is
+CM-proof — its lever is instruction-quantized positions (§16.1), not a
+better coder.
