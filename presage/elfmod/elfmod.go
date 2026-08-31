@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/wjordan/presage/delta"
 	"github.com/wjordan/presage/delta/x86"
 	"github.com/wjordan/presage/presage"
 	"github.com/wjordan/presage/presage/eqmatch"
@@ -87,6 +88,68 @@ func (Module) Materialise(refs [][]byte, plan []byte, length int64) ([]byte, err
 	return out, nil
 }
 
+// DispContext implements presage.FieldRefiner: the PC-relative fields the
+// correction's long runs contain, named by walking the repaired bytes of
+// every mapped function body (delta/dispfield.go). Both sides build it from
+// the old image and the plan alone, so the two walks see the same fields.
+func (Module) DispContext(refs [][]byte, plan []byte, length int64) *delta.DispContext {
+	cp, err := parsePlanStreams(plan)
+	if err != nil {
+		return nil
+	}
+	windows, structures, err := planMaps(refs[0], cp)
+	if err != nil {
+		return nil
+	}
+	var bodies []delta.DispBody
+	var starts []uint64
+	for i, w := range windows {
+		for _, m := range structures[i].Maps {
+			if m.DstSize == 0 || m.Dst > w.New.Size || m.DstSize > w.New.Size-m.Dst {
+				continue
+			}
+			off := int64(w.New.Off + m.Dst)
+			if off+int64(m.DstSize) > length {
+				continue
+			}
+			bodies = append(bodies, delta.DispBody{Off: int(off), Size: int(m.DstSize), PC: w.New.Addr + m.Dst})
+			starts = append(starts, w.New.Addr+m.Dst)
+		}
+	}
+	if len(bodies) == 0 {
+		return nil
+	}
+	return delta.NewDispContext(bodies, starts)
+}
+
+// planMaps parses the plan's code windows and their structural plans. It is
+// the front of predictImage, split out so the correction's field context can
+// be rebuilt without predicting the image again.
+func planMaps(old []byte, cp planStreams) ([]codeWindow, []predictionPlan, error) {
+	ep, err := parseEquivalencePlan(cp.Equivalences)
+	if err != nil {
+		return nil, nil, err
+	}
+	if uint64(len(old)) != ep.OldLen {
+		return nil, nil, errors.New("old image does not match the equivalence plan")
+	}
+	structures := make([]predictionPlan, len(ep.Windows))
+	sr := &planReader{b: cp.Structure}
+	for i, w := range ep.Windows {
+		b := sr.stream()
+		if sr.err != nil {
+			return nil, nil, errors.New("invalid structure stream")
+		}
+		if structures[i], err = unmarshalPlan(b.b, old, w.Old); err != nil {
+			return nil, nil, err
+		}
+	}
+	if !sr.done() {
+		return nil, nil, errors.New("structure stream does not match the code windows")
+	}
+	return ep.Windows, structures, nil
+}
+
 // predStats is what one prediction reports back to the encoder.
 type predStats struct {
 	Relocation                       x86.Stats
@@ -113,7 +176,7 @@ func predictImage(old []byte, cp planStreams) ([]byte, predStats, error) {
 		if sr.err != nil {
 			return nil, st, errors.New("invalid structure stream")
 		}
-		if structures[i], err = unmarshalPlan(b.b, bytesOf(old, w.Old)); err != nil {
+		if structures[i], err = unmarshalPlan(b.b, old, w.Old); err != nil {
 			return nil, st, err
 		}
 		if structures[i].TargetLen != w.New.Size || structures[i].OldAddr != w.Old.Addr || structures[i].NewAddr != w.New.Addr {

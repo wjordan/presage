@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/wjordan/presage/delta"
 )
@@ -38,6 +39,16 @@ type Module interface {
 type Finaliser interface {
 	MaskResidual(plan, pred, target []byte) []byte
 	Finalise(plan, out []byte) error
+}
+
+// A FieldRefiner is an exact module whose residual's long runs contain
+// PC-relative fields both sides can re-derive rather than ship as literal
+// bytes (delta/dispfield.go). The context is built from the references and
+// the region's plan alone, so the decoder derives exactly the one the
+// encoder used; a module that cannot build one returns nil and the
+// correction is coded as it was before.
+type FieldRefiner interface {
+	DispContext(refs [][]byte, plan []byte, length int64) *delta.DispContext
 }
 
 // Core module ids. Ids above 15 are for admitted modules.
@@ -142,7 +153,7 @@ func (copyModule) Materialise(refs [][]byte, plan []byte, length int64) ([]byte,
 // where the module cuts the target and that is smaller (split.go); declared
 // regions use the shifted delta, whose stream replaces the prediction by
 // the target outright.
-func residual(m Module, pred, target []byte) ([]byte, byte, error) {
+func residual(m Module, refs [][]byte, plan, pred, target []byte) ([]byte, byte, error) {
 	if !m.Exact() {
 		return delta.DiffLZ(pred, target), 0, nil
 	}
@@ -165,7 +176,11 @@ func residual(m Module, pred, target []byte) ([]byte, byte, error) {
 	if len(cuts) == 0 {
 		return whole, flags, nil
 	}
-	split, modal, size, err := splitResidual(pred, target, cuts)
+	var disp *delta.DispContext
+	if fr, ok := m.(FieldRefiner); ok {
+		disp = fr.DispContext(refs, plan, int64(len(target)))
+	}
+	split, modal, size, err := splitResidual(pred, target, cuts, disp)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -179,7 +194,7 @@ func residual(m Module, pred, target []byte) ([]byte, byte, error) {
 	return split, flags, nil
 }
 
-func applyResidual(m Module, pred, stream []byte, length int64, flags byte) ([]byte, error) {
+func applyResidual(m Module, refs [][]byte, plan, pred, stream []byte, length int64, flags byte) ([]byte, error) {
 	if !m.Exact() {
 		return delta.PatchLZ(pred, stream, length)
 	}
@@ -188,7 +203,13 @@ func applyResidual(m Module, pred, stream []byte, length int64, flags byte) ([]b
 	}
 	out := append([]byte(nil), pred...)
 	if flags&FlagSplitResidual != 0 {
-		if err := applySplitResidual(out, stream); err != nil {
+		// Built only if a piece actually carries displacement columns: the
+		// context costs a second parse of the plan.
+		disp := func() *delta.DispContext { return nil }
+		if fr, ok := m.(FieldRefiner); ok {
+			disp = sync.OnceValue(func() *delta.DispContext { return fr.DispContext(refs, plan, length) })
+		}
+		if err := applySplitResidual(out, stream, disp); err != nil {
 			return nil, err
 		}
 		return out, nil

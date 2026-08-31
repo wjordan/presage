@@ -43,6 +43,7 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 	var structureBytes []byte
 	var ms matchStats
 	var oldUnitCount, newUnitCount int
+	var derived []derivedStats
 	for i, w := range windows {
 		oldCode, newCode := bytesOf(old, w.Old), bytesOf(target, w.New)
 		var oldUnits, newUnits []codeUnit
@@ -64,7 +65,15 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 		ms.CopyBytes += wms.CopyBytes
 		st.Mappings += len(structures[i].Maps)
 		st.Points += len(structures[i].Points)
-		b, err := structures[i].marshal(oldCode)
+		// The map columns are the plan's largest row, and most of what they
+		// say the decoder can derive from the old image alone (derived.go).
+		// A window the derived form cannot express falls back to the dense
+		// columns; both forms decode to the same map.
+		ds, dst, ok := buildDerivedForm(structures[i], old, w.Old, oldUnits, newUnits)
+		if ok {
+			derived = append(derived, dst)
+		}
+		b, err := structures[i].marshalMode(oldCode, ds)
 		if err != nil {
 			return nil, nil, fmt.Errorf("elf: %w", err)
 		}
@@ -78,6 +87,24 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 	st.Notes = append(st.Notes, fmt.Sprintf("windows: %d code (%s)", len(windows), windowSummary(oi, windows)))
 	st.Notes = append(st.Notes, fmt.Sprintf("map: %d functions (%d by name, %d by content, %d canonical-equal), %d reference points",
 		st.Mappings, ms.NameMapped, ms.ContentMapped, ms.CopyUnits, st.Points))
+	if len(derived) != 0 {
+		var d derivedStats
+		for _, w := range derived {
+			d.Enumerated += w.Enumerated
+			d.Units += w.Units
+			d.Dropped += w.Dropped
+			d.Runs += w.Runs
+			d.Reorders += w.Reorders
+			d.Resizes += w.Resizes
+			d.Inserts += w.Inserts
+			d.Fixes += w.Fixes
+			d.Boundary += w.Boundary
+			d.Unrepresentable += w.Unrepresentable
+			d.Align = max(d.Align, w.Align)
+		}
+		st.Notes = append(st.Notes, fmt.Sprintf("derived map: %d/%d windows; %d enumerated -> %d units (%d boundary exceptions); %d dropped in %d runs, %d reorders, %d resizes, %d inserts, %d layout fixups at align %d, %d unrepresentable",
+			len(derived), len(windows), d.Enumerated, d.Units, d.Boundary, d.Dropped, d.Runs, d.Reorders, d.Resizes, d.Inserts, d.Fixes, d.Align, d.Unrepresentable))
+	}
 
 	// 2. Whole-image equivalences, matched on canonical code windows so
 	// moved targets do not break runs; sources coded against the map.

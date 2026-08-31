@@ -55,7 +55,7 @@ func TestStructurePlanRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := unmarshalPlan(b, oldText)
+	got, err := unmarshalPlan(b, oldText, section{Size: uint64(len(oldText))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestStructurePlanRoundTrip(t *testing.T) {
 		t.Fatalf("round trip differs: %+v vs %+v", got, p)
 	}
 	for n := 0; n < len(b); n++ {
-		if _, err := unmarshalPlan(b[:n], oldText); err == nil {
+		if _, err := unmarshalPlan(b[:n], oldText, section{Size: uint64(len(oldText))}); err == nil {
 			t.Fatalf("truncated plan of %d bytes accepted", n)
 		}
 	}

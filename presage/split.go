@@ -24,7 +24,7 @@ type Cutter interface {
 // suit them. It is chosen only where it beats the single stream.
 //
 //	u(npieces) { u(len) byte(kind) u(nstreams) { u(rawLen) u(zLen) byte(codec) }* }* z...
-func splitResidual(pred, target []byte, cuts []int64) (stream []byte, modal bool, size int, err error) {
+func splitResidual(pred, target []byte, cuts []int64, disp *delta.DispContext) (stream []byte, modal bool, size int, err error) {
 	bounds := append([]int64{0}, cuts...)
 	bounds = append(bounds, int64(len(target)))
 	w := &wbuf{}
@@ -39,14 +39,18 @@ func splitResidual(pred, target []byte, cuts []int64) (stream []byte, modal bool
 		if err != nil {
 			return nil, false, 0, err
 		}
-		cols, err := delta.EncodeColumnar(pred[a:b], target[a:b])
+		cols, err := delta.EncodeColumnarDisp(pred[a:b], target[a:b], disp.Restrict(int(a), int(b)))
 		if err != nil {
 			return nil, false, 0, err
+		}
+		colKind := pieceColumnar
+		if len(cols) != delta.ColumnarStreams {
+			colKind = pieceColumnarDisp
 		}
 		kind, streams := pieceLZ, [][]byte{corr}
 		zl, cl := compressAll(streams), compressAll(cols)
 		if total(cl) < total(zl) {
-			kind, streams, zl = pieceColumnar, cols, cl
+			kind, streams, zl = colKind, cols, cl
 		} else {
 			modal = modal || delta.UsesModalCorrection(corr)
 		}
@@ -72,8 +76,9 @@ func splitResidual(pred, target []byte, cuts []int64) (stream []byte, modal bool
 
 // Piece kinds.
 const (
-	pieceLZ       byte = 0 // one stream: the flagged adaptive correction
-	pieceColumnar byte = 1 // delta.ColumnarStreams streams
+	pieceLZ           byte = 0 // one stream: the flagged adaptive correction
+	pieceColumnar     byte = 1 // delta.ColumnarStreams streams
+	pieceColumnarDisp byte = 2 // and delta.DispStreams displacement columns
 )
 
 type zstream struct {
@@ -99,7 +104,7 @@ func total(zs []zstream) int {
 
 // applySplitResidual is splitResidual's decoder: each piece is decompressed
 // and applied in place over its span of out, which holds the prediction.
-func applySplitResidual(out, stream []byte) error {
+func applySplitResidual(out, stream []byte, disp func() *delta.DispContext) error {
 	r := &rbuf{b: stream}
 	n := r.un(1<<20, "piece count")
 	type piece struct {
@@ -114,7 +119,7 @@ func applySplitResidual(out, stream []byte) error {
 		var p piece
 		p.length = r.un(uint64(len(out)), "piece length")
 		p.kind = r.byte()
-		ns := r.un(delta.ColumnarStreams, "piece stream count")
+		ns := r.un(delta.ColumnarStreams+delta.DispStreams, "piece stream count")
 		for j := uint64(0); j < ns && r.err == nil; j++ {
 			p.raw = append(p.raw, r.un(uint64(len(out))*4+1<<16, "piece stream length"))
 			p.zlen = append(p.zlen, r.un(uint64(len(stream)), "piece compressed length"))
@@ -150,6 +155,8 @@ func applySplitResidual(out, stream []byte) error {
 			err = delta.ApplyFlaggedCorrection(span, streams[0])
 		case p.kind == pieceColumnar:
 			err = delta.ApplyColumnar(span, streams)
+		case p.kind == pieceColumnarDisp:
+			err = delta.ApplyColumnarDisp(span, streams, disp().Restrict(int(at), int(at)+int(p.length)))
 		default:
 			err = fmt.Errorf("%w: piece kind %d with %d streams", ErrCorrupt, p.kind, len(streams))
 		}

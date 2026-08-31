@@ -170,6 +170,16 @@ func targetIndex(targets []uint64, addr uint64) int {
 // marshal writes the structural plan: geometry, then the six map columns,
 // the three point columns and the ranges (elf-module.md §2).
 func (p predictionPlan) marshal(oldText []byte) ([]byte, error) {
+	return p.marshalMode(oldText, nil)
+}
+
+// marshalMode is marshal with an optional derived stream: when ds is
+// non-nil the five map columns go out empty and the stream sits where they
+// were, immediately after the copy bitmap. Everything downstream — the
+// reference points, the ranges — is byte for byte what the dense form
+// emits, because the decoder reconstructs the same map and so derives the
+// same reference-target basis (derived.go).
+func (p predictionPlan) marshalMode(oldText []byte, ds *derivedStream) ([]byte, error) {
 	maps := slices.Clone(p.Maps)
 	slices.SortFunc(maps, func(a, b mapping) int {
 		if a.Dst != b.Dst {
@@ -186,7 +196,11 @@ func (p predictionPlan) marshal(oldText []byte) ([]byte, error) {
 	b = appendU(b, p.OldAddr)
 	b = appendU(b, p.NewAddr)
 	b = appendU(b, p.TargetLen)
-	b = append(b, 0) // mode: dense
+	mode := byte(planDense)
+	if ds != nil {
+		mode = planDerived
+	}
+	b = append(b, mode)
 	b = appendU(b, uint64(len(maps)))
 	detected := detectBoundaries(oldText)
 	var srcIndexDeltas, srcOffsets, extentResiduals, sizeDeltas, startResiduals []byte
@@ -208,12 +222,18 @@ func (p predictionPlan) marshal(oldText []byte) ([]byte, error) {
 		}
 		prevDstEnd, prevIdx = m.Dst+m.DstSize, idx
 	}
+	if ds != nil {
+		srcIndexDeltas, srcOffsets, extentResiduals, sizeDeltas, startResiduals = nil, nil, nil, nil, nil
+	}
 	b = appendStream(b, srcIndexDeltas)
 	b = appendStream(b, srcOffsets)
 	b = appendStream(b, extentResiduals)
 	b = appendStream(b, sizeDeltas)
 	b = appendStream(b, startResiduals)
 	b = appendStream(b, copyBits)
+	if ds != nil {
+		b = append(b, ds.marshal()...)
+	}
 	points := slices.Clone(p.Points)
 	slices.SortFunc(points, func(a, b addressPoint) int { return cmpU(a.Old, b.Old) })
 	b = appendU(b, uint64(len(points)))
@@ -258,18 +278,36 @@ func (p predictionPlan) marshal(oldText []byte) ([]byte, error) {
 	return b, nil
 }
 
-// unmarshalPlan decodes a structural plan against the old .text.
-func unmarshalPlan(b, oldText []byte) (predictionPlan, error) {
+// unmarshalPlan decodes a structural plan for one code window of the old
+// image. The whole old file is needed because the derived map mode reads the
+// relocation table as one of its three evidence sources (derived.go).
+func unmarshalPlan(b, oldFile []byte, win section) (predictionPlan, error) {
+	if win.Off > uint64(len(oldFile)) || win.Size > uint64(len(oldFile))-win.Off {
+		return predictionPlan{}, errors.New("code window lies outside the old image")
+	}
+	oldText := oldFile[win.Off : win.Off+win.Size]
 	r := &planReader{b: b}
 	p := predictionPlan{OldAddr: r.u(), NewAddr: r.u(), TargetLen: r.u()}
-	if mode := r.byteAt(); r.err != nil || mode != 0 {
+	mode := r.byteAt()
+	if r.err != nil || (mode != planDense && mode != planDerived) {
 		return predictionPlan{}, errors.New("unsupported map mode in structural plan")
 	}
+	// A dense mapping costs at least a byte in each of five columns; a
+	// derived one can cost nothing at all, so its floor is the window that
+	// supplies the sources plus whatever the stream itself carries.
 	n := r.u()
-	if n > uint64(len(b)) {
+	limit := uint64(len(b))
+	readMaps := readDenseMaps
+	if mode == planDerived {
+		limit += win.Size
+		readMaps = func(r *planReader, p *predictionPlan, n uint64, _ []byte) error {
+			return readDerivedMaps(r, p, n, oldFile, win)
+		}
+	}
+	if n > limit {
 		return predictionPlan{}, errors.New("implausible mapping count")
 	}
-	if err := readDenseMaps(r, &p, n, oldText); err != nil {
+	if err := readMaps(r, &p, n, oldText); err != nil {
 		return predictionPlan{}, err
 	}
 	if err := readPointsAndRanges(r, &p, len(b), oldText); err != nil {

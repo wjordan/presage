@@ -127,7 +127,7 @@ func Encode(refs [][]byte, target []byte, o Options) ([]byte, error) {
 	if f, ok := chosen.(Finaliser); ok {
 		predRes = f.MaskResidual(plan, pred, target)
 	}
-	res, rflags, err := residual(chosen, predRes, target)
+	res, rflags, err := residual(chosen, refs, plan, predRes, target)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +224,7 @@ func Apply(refs [][]byte, patch []byte, reg *Registry, w io.Writer) error {
 		if predictionHash(pred) != root {
 			return &ErrPredictionDiverged{Region: i, Module: m.Name()}
 		}
-		bytes, err := applyResidual(m, pred, res, rg.Length, h.Flags)
+		bytes, err := applyResidual(m, refs, plan, pred, res, rg.Length, h.Flags)
 		if err != nil {
 			return err
 		}

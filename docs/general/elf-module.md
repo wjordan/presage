@@ -7,6 +7,25 @@ module behind the `Module` seam of `presage/module.go`, so that
 non-Go ELF x86-64 image end to end. Design authority: `SPEC.md` §4–6, §10
 item 3; template: `presage/gomod` (`presage-core.md` §4, §7).*
 
+## Status (2026-08-31)
+
+The derived function map (§2.1) and the residual's displacement columns
+(§2.2) are ported from the harness. Measured through the CLI on this tree,
+applied and `cmp`-verified:
+
+| pair | before | + derived map | + displacement columns |
+|---|---:|---:|---:|
+| Chrome 151 .169 → .173 | 2,537,338 | 2,427,719 (−109,619) | **2,412,635** (−15,084) |
+| libxul 154.0 → 154.0.1 | 2,996,042 | 2,959,645 (−36,397) | **2,942,865** (−16,780) |
+
+Encode is unchanged within noise (Chrome 106.0 s → 107.7 s, libxul 168.4 s →
+171.5 s); apply pays the enumeration sweep and the residual re-walk (Chrome
+4.5 s → 6.4 s, libxul 2.4 s → 2.7 s). The corpus gate's third pair,
+librustc_driver (four code windows, Rust v0 symbols), moves 6,597,439 →
+6,564,155. Both changes alter the wire format, so
+`presage.Version` is 2 and every patch an older build wrote is refused by
+name.
+
 ## Status (2026-08-30)
 
 Built and shipped: `presage/elfmod` (tracks T1–T4 of §8), `presage/symbols`,
@@ -126,13 +145,62 @@ changes listed.
 | stream | format | transmitted | derived on both sides | change from harness |
 |---|---|---|---|---|
 | `eq` | `EQP2`: `OldLen NewLen OldText{Addr,Off,Size} NewText{…} predicted:u8` then streams `SrcSkip SrcResidual DstSkip CopyLen` (`equivalence.go:332`) | run columns, geometry | which source column each run uses (from the map) | drop the magic; keep the rest |
-| `structure` | `EPPB`: `OldAddr NewAddr TargetLen mode:u8 n` + columns `srcIndexDelta srcOffset extentResidual sizeDelta startResidual copyBits`, then points `n idxDelta offset shiftDelta`, then ranges `n (oldΔ newΔ size)` (`plan.go:237`) | map columns, points, ranges | boundary list, extents, reference-target list (`plan.go:134,164,192`) | drop the magic; `mode` must be `planDense` (0) — `planSparse`/`planGoDerived` are not written and are rejected on read |
+| `structure` | `EPPB`: `OldAddr NewAddr TargetLen mode:u8 n` + columns `srcIndexDelta srcOffset extentResidual sizeDelta startResidual copyBits`, then points `n idxDelta offset shiftDelta`, then ranges `n (oldΔ newΔ size)` (`plan.go:237`) | map columns, points, ranges | boundary list, extents, reference-target list (`plan.go:134,164,192`) | drop the magic; `mode` is `planDense` (0) or `planDerived` (1, §2.1) — `planSparse`/`planGoDerived` are not written and are rejected on read |
 | `choices` | bitmap, one bit per mapping in destination order (`equivalence.go:856`) | | | none |
 | `reloc` | `OldOff OldSize NewOff NewSize RelCount TailCount Anchor`, old and new section maps (`(addrΔ offΔ size)*`), streams `gap addend tail` (each a `delta.EncodeCorrection` stream), optional flags word (`reloc.go:184`) | geometry, three column corrections | predicted columns | `PairByRow`/`NoAddends`/`DerivedGeometry` flags are not written (experiment rungs); `HeadCount` kept behind its flag (Go-linker PIE tables) |
 | `ehframe` | nine uvarints of geometry (`ehframe.go:42`) | geometry | FDE list, `.eh_frame_hdr` contents | none |
 | `rodata` | eight uvarints of geometry, `n Keep[n]` (`rodata.go:48`) | geometry, one bit per (span, variant) | candidate spans | none |
 | `fields` | streams `RemapIndex RemapShift FieldIndex FieldDelta` (`fieldfix.go:89`) | | site list, remap domain | none |
 | `dwarf` | `presage/dwarf` `Plan.Marshal()`; the runs are *not* carried (`Plan.MarshalRuns`) — the decoder clips the whole-image equivalences per section (`dwarf.go:48`) exactly as the harness does | | | none |
+
+### 2.1 The derived function map (`mode = planDerived`)
+
+`presage/elfmod/derived.go`, ported from the harness's `derived-map` rung
+(`bench/elfpredict/derivedrung.go`, `derivedmap.go`;
+`research/pgo-churn.md` §5.1c). The five map columns go out **empty** and a
+delta stream sits immediately after the copy bitmap, where they were —
+everything downstream is byte for byte what the dense form emits, because
+the decoder reconstructs the same map and so derives the same
+reference-target basis.
+
+```
+derived := Derived:u  Boundary Suppress SizeFixIdx SizeFixVal
+           NewUnits:u Align:u Maps:u
+           DropRuns OrderIndex OrderSrc SizeIndex SizeDelta
+           InsertPos InsertSize FixIndex FixDelta Raw
+           each column: uvarint(len) bytes
+```
+
+Both sides derive an ordered enumeration of old function starts from the old
+image alone — call `rel32` targets, relocation addends landing in the window,
+and `detectBoundaries`' padding rule — suppress the spurious entries with the
+shipped bitmap, add the starts the derivation missed (`Boundary`), size each
+entry by the padding rule with `SizeFix*` where the rule is wrong, then
+replay the delta stream: drop runs, a positional walk with order exceptions,
+size deltas, inserts and a layout replay at the shipped alignment. `Derived`
+is the enumeration's length, so a divergent derivation refuses the plan
+rather than decoding a shifted map. Nothing is carried between patches.
+
+Two harness layers are **absent** by construction, not dropped: there is no
+carried symbol table, so no insert carries a name hash, and no hash join, so
+the correspondence-exception columns have nothing to say — the encoder codes
+the shipped map's own correspondence directly against the positional cursor.
+A window with no symbols, or one the unit model cannot express, falls back to
+`planDense`; per-window, so a multi-window image may mix the two.
+
+### 2.2 The displacement columns of the residual
+
+`delta/dispfield.go` and `presage/split.go`, ported from
+`bench/elfpredict/dispfield.go` and its `correction.go` changes. A columnar
+piece of the split residual may carry four more streams — `Tags Idx Loc Far`,
+piece kind 2 — holding every PC-relative field that lies wholly inside one of
+the piece's long (5+ byte) wrong runs. The encoder zeroes those fields in the
+byte column; the decoder places the replacement bytes, re-walks the repaired
+buffer through `x86.WalkReferences` over the function map's bodies, and
+refills each field from its class: an index into the new function-start
+domain, a local displacement, or an absolute address. The module supplies the
+context through `presage.FieldRefiner`, built from the old image and the
+plan alone. A piece with no such field ships the seven columns it always did.
 
 Section geometry appears in `eq` (text), `reloc` (every allocated section
 with file bytes, both images), `ehframe`, `rodata` and `dwarf`. Old-side

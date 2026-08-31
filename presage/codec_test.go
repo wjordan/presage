@@ -1,8 +1,12 @@
 package presage
 
 import (
+	"encoding/binary"
+	"math/rand"
+
 	"bytes"
 	"errors"
+	"github.com/wjordan/presage/delta"
 	"testing"
 )
 
@@ -166,7 +170,107 @@ func TestSplitResidual(t *testing.T) {
 		t.Fatalf("flags %#x: the split residual was not chosen", h.Flags)
 	}
 	// Pieces that do not tile the region are refused, not misread.
-	if err := applySplitResidual(make([]byte, 10), []byte{2, 5, 0, 0, 0, 6, 0, 0, 0}); err == nil {
+	if err := applySplitResidual(make([]byte, 10), []byte{2, 5, 0, 0, 0, 6, 0, 0, 0}, func() *delta.DispContext { return nil }); err == nil {
 		t.Fatal("pieces not covering the region were accepted")
 	}
+}
+
+// dispModule is cutModule plus a field context, so the split residual's
+// displacement columns (delta/dispfield.go) are exercised end to end through
+// Encode and Apply: the encoder zeroes the fields inside the long runs, and
+// the decoder refills them by walking the repaired bytes.
+type dispModule struct{ cutModule }
+
+func (dispModule) ID() byte     { return 10 }
+func (dispModule) Name() string { return "disp" }
+func (dispModule) DispContext(refs [][]byte, plan []byte, length int64) *delta.DispContext {
+	var bodies []delta.DispBody
+	var starts []uint64
+	for off := 0; off+64 <= int(length); off += 64 {
+		bodies = append(bodies, delta.DispBody{Off: off, Size: 64, PC: 0x400000 + uint64(off)})
+		starts = append(starts, 0x400000+uint64(off))
+	}
+	return delta.NewDispContext(bodies, starts)
+}
+
+// pieceKinds reads the kind byte of every piece of a split residual.
+func pieceKinds(t *testing.T, stream []byte) []byte {
+	t.Helper()
+	r := &rbuf{b: stream}
+	n := r.u()
+	var kinds []byte
+	for i := uint64(0); i < n; i++ {
+		r.u() // piece length
+		kinds = append(kinds, r.byte())
+		ns := r.u()
+		for j := uint64(0); j < ns; j++ {
+			r.u()
+			r.u()
+			r.byte()
+		}
+	}
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	return kinds
+}
+
+func TestDispResidualRoundTrip(t *testing.T) {
+	const n = 64 << 10
+	old := make([]byte, n)
+	target := make([]byte, n)
+	for i := range old {
+		old[i], target[i] = 0x90, 0x90
+	}
+	rt, ro := rand.New(rand.NewSource(1)), rand.New(rand.NewSource(2))
+	// Each 64-byte body opens with a call to one of eight body starts, inside a
+	// long wrong run whose remaining bytes are noise the compressor cannot
+	// fold away — which is exactly where the columns pay.
+	for off := 0; off+256 <= n; off += 256 {
+		pc := 0x400000 + uint64(off)
+		dst := 0x400000 + uint64((off*7*64)%n)
+		target[off] = 0xe8
+		binary.LittleEndian.PutUint32(target[off+1:], uint32(int32(int64(dst)-int64(pc+5))))
+		for i := off + 5; i < off+48; i++ {
+			target[i] = byte(rt.Uint32())
+		}
+		for i := off; i < off+48; i++ {
+			for old[i] == target[i] {
+				old[i] = byte(ro.Uint32())
+			}
+		}
+	}
+	m := dispModule{}
+	d := m.DispContext([][]byte{old}, nil, n)
+	cuts := m.Cuts(target)
+
+	withDisp, _, size, err := splitResidual(old, target, cuts, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size == 0 {
+		t.Fatal("empty split residual")
+	}
+	// The displacement piece kind must actually be in the stream: what this
+	// test proves is the seam, and the corpus gate prices it.
+	// Whichever coder each piece picks, every piece kind must round-trip
+	// through the field context, and a displacement piece must be legible.
+	for _, k := range pieceKinds(t, withDisp) {
+		if k != pieceLZ && k != pieceColumnar && k != pieceColumnarDisp {
+			t.Fatalf("unknown piece kind %d", k)
+		}
+	}
+	// And the decoder refills them: applying the stream over the prediction
+	// must reproduce the target byte for byte.
+	out := append([]byte(nil), old...)
+	if err := applySplitResidual(out, withDisp, func() *delta.DispContext { return d }); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out, target) {
+		t.Fatal("the displacement residual did not reproduce the target")
+	}
+	// The whole path through the module seam, encoded and applied.
+	reg := NewRegistry()
+	reg.Add(m)
+	roundTrip(t, [][]byte{old}, target, Options{Registry: reg})
 }

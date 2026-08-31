@@ -13,7 +13,13 @@ import (
 const Magic = "PSG1"
 
 // Version is the container version this build writes and the newest it reads.
-const Version = 1
+//
+// 2: the ELF module's derived function map (a new structural-plan mode) and
+// the displacement columns of the split residual (a new piece kind). Both
+// are self-announcing — an unknown mode or piece kind is rejected — but the
+// module is pre-release and the version bump refuses every patch an older
+// build wrote up front, by name, rather than at the point of use.
+const Version = 2
 
 // Header flags.
 const (
