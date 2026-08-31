@@ -32,6 +32,23 @@ type columnarCorrection struct {
 	Gaps  []byte
 	Lens  []byte
 	Bytes [correctionBuckets][]byte
+	// The displacement columns of §14, empty unless the encoder was given a
+	// dispContext. Tags carries one class byte per field pulled out of the
+	// last bucket; Idx, Loc and Far carry that class's value. See
+	// dispfield.go.
+	Tags, Idx, Loc, Far []byte
+}
+
+// streams lists every column in the order a patch would ship them.
+func (c columnarCorrection) streams() [][]byte {
+	s := append([][]byte{c.Gaps, c.Lens}, c.Bytes[:]...)
+	if len(c.Tags) == 0 {
+		// An empty column still costs an xz header, so a correction with no
+		// displacement fields must not ship four of them: the shipped format's
+		// price has to stay exactly what it was.
+		return s
+	}
+	return append(s, c.Tags, c.Idx, c.Loc, c.Far)
 }
 
 // bucketOf groups runs by length, with everything from correctionBuckets bytes
@@ -39,10 +56,19 @@ type columnarCorrection struct {
 func bucketOf(n int) int { return min(n, correctionBuckets) - 1 }
 
 func encodeColumnar(pred, target []byte) (columnarCorrection, error) {
+	return encodeColumnarDisp(pred, target, nil)
+}
+
+// encodeColumnarDisp is encodeColumnar plus, when d is non-nil, §14's
+// displacement column: every PC-relative field lying wholly inside a long run
+// is zeroed in the replacement bytes and shipped in a column of its own.
+func encodeColumnarDisp(pred, target []byte, d *dispContext) (columnarCorrection, error) {
 	if len(pred) != len(target) {
 		return columnarCorrection{}, errors.New("columnar correction needs equal lengths")
 	}
 	var c columnarCorrection
+	var runs []dispRun
+	last := correctionBuckets - 1
 	prevEnd := 0
 	for i := 0; i < len(target); {
 		if pred[i] == target[i] {
@@ -56,15 +82,51 @@ func encodeColumnar(pred, target []byte) (columnarCorrection, error) {
 		c.Gaps = binary.AppendUvarint(c.Gaps, uint64(i-prevEnd))
 		c.Lens = binary.AppendUvarint(c.Lens, uint64(j-i))
 		b := bucketOf(j - i)
+		if b == last && d != nil {
+			runs = append(runs, dispRun{i, j, len(c.Bytes[last])})
+		}
 		c.Bytes[b] = append(c.Bytes[b], target[i:j]...)
 		prevEnd, i = j, j
+	}
+	if d == nil {
+		return c, nil
+	}
+	var prevIdx, prevFar int64
+	for _, s := range d.sites(target, runs) {
+		v := readDisp(target[s.off : s.off+s.n])
+		abs := uint64(int64(s.next) + v)
+		cl := d.class(s, abs)
+		c.Tags = append(c.Tags, byte(cl))
+		switch cl {
+		case dispHit:
+			i, _ := slices.BinarySearch(d.starts, abs)
+			c.Idx = appendS(c.Idx, int64(i)-prevIdx)
+			prevIdx = int64(i)
+		case dispLocal:
+			c.Loc = appendS(c.Loc, v)
+		default:
+			c.Far = appendS(c.Far, int64(abs)-prevFar)
+			prevFar = int64(abs)
+		}
+		clear(c.Bytes[last][s.at : s.at+s.n])
 	}
 	return c, nil
 }
 
 func (c columnarCorrection) apply(buf []byte) error {
+	return c.applyDisp(buf, nil)
+}
+
+// applyDisp places the replacement bytes and then, when the correction carries
+// displacement columns, walks the repaired buffer and fills the zeroed fields
+// back in. The walk happens after every run is placed, because an instruction
+// may span a run boundary and only then are all its bytes present.
+func (c columnarCorrection) applyDisp(buf []byte, d *dispContext) error {
 	gaps, lens := &planReader{b: c.Gaps}, &planReader{b: c.Lens}
 	src, at := c.Bytes, 0
+	var runs []dispRun
+	last := correctionBuckets - 1
+	placed := 0
 	for !gaps.done() {
 		gap, n := gaps.u(), lens.u()
 		if gaps.err != nil || lens.err != nil || n == 0 {
@@ -79,6 +141,10 @@ func (c columnarCorrection) apply(buf []byte) error {
 			return errors.New("columnar correction run runs past the buffer")
 		}
 		copy(buf[at:at+int(n)], src[b][:n])
+		if b == last && d != nil {
+			runs = append(runs, dispRun{at, at + int(n), placed})
+			placed += int(n)
+		}
 		src[b], at = src[b][n:], at+int(n)
 	}
 	if !lens.done() {
@@ -89,18 +155,59 @@ func (c columnarCorrection) apply(buf []byte) error {
 			return errors.New("trailing columnar correction bytes")
 		}
 	}
+	if d == nil {
+		if len(c.Tags) != 0 {
+			return errors.New("columnar correction carries displacement columns with no context")
+		}
+		return nil
+	}
+	idx, loc, far := &planReader{b: c.Idx}, &planReader{b: c.Loc}, &planReader{b: c.Far}
+	var prevIdx, prevFar int64
+	tags := c.Tags
+	for _, s := range d.sites(buf, runs) {
+		if len(tags) == 0 {
+			return errors.New("columnar correction ran out of displacement tags")
+		}
+		cl := int(tags[0])
+		tags = tags[1:]
+		var abs uint64
+		var v int64
+		switch cl {
+		case dispHit:
+			prevIdx += idx.s()
+			if prevIdx < 0 || prevIdx >= int64(len(d.starts)) {
+				return errors.New("displacement index outside the function-start domain")
+			}
+			abs = d.starts[prevIdx]
+			v = int64(abs) - int64(s.next)
+		case dispLocal:
+			v = loc.s()
+		case dispFar:
+			prevFar += far.s()
+			v = prevFar - int64(s.next)
+		default:
+			return errors.New("invalid displacement class")
+		}
+		if idx.err != nil || loc.err != nil || far.err != nil {
+			return errors.New("invalid displacement column stream")
+		}
+		writeDisp(buf[s.off:s.off+s.n], v)
+	}
+	if len(tags) != 0 || !idx.done() || !loc.done() || !far.done() {
+		return errors.New("trailing displacement column data")
+	}
 	return nil
 }
 
 // columnarXZ reports what the columnar form costs, or 0 if it does not
 // round-trip -- which must never happen, and is checked rather than assumed.
-func columnarXZ(pred, target []byte) (int, error) {
-	c, err := encodeColumnar(pred, target)
+func columnarXZ(pred, target []byte, d *dispContext) (int, error) {
+	c, err := encodeColumnarDisp(pred, target, d)
 	if err != nil {
 		return 0, err
 	}
 	check := append([]byte(nil), pred...)
-	if err := c.apply(check); err != nil {
+	if err := c.applyDisp(check, d); err != nil {
 		return 0, err
 	}
 	for i := range check {
@@ -109,8 +216,11 @@ func columnarXZ(pred, target []byte) (int, error) {
 		}
 	}
 	total := 0
-	for _, n := range xzSizes(append([][]byte{c.Gaps, c.Lens}, c.Bytes[:]...)...) {
+	for _, n := range xzSizes(c.streams()...) {
 		total += n
+	}
+	if d != nil {
+		reportDispColumns(c)
 	}
 	return total, nil
 }
@@ -147,7 +257,7 @@ func correctionCuts(secs map[string]section, n int) [][2]int {
 // The cuts are independent, so they are measured concurrently; the xz bound in
 // xz.go keeps the process count sane. Results are collected in cut order so the
 // pick string still reads left to right across the image.
-func bestCorrectionXZ(pred, target []byte, secs map[string]section) (int, string, error) {
+func bestCorrectionXZ(pred, target []byte, secs map[string]section, d *dispContext) (int, string, error) {
 	cuts := correctionCuts(secs, len(target))
 	type result struct {
 		size int
@@ -174,7 +284,7 @@ func bestCorrectionXZ(pred, target []byte, secs map[string]section) (int, string
 			var inner sync.WaitGroup
 			inner.Add(2)
 			go func() { defer inner.Done(); lz = xzSize(corr) }()
-			go func() { defer inner.Done(); col, colErr = columnarXZ(p, t) }()
+			go func() { defer inner.Done(); col, colErr = columnarXZ(p, t, d.restrict(c[0], c[1])) }()
 			inner.Wait()
 			if colErr != nil {
 				out[i].err = colErr

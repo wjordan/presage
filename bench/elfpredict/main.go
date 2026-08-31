@@ -142,7 +142,7 @@ func smallestCorrection(pred, target []byte) ([]byte, error) {
 	return a, nil
 }
 
-func measure(pred, target, planBytes []byte, stats x86.Stats, reference int, withXZ bool, secs map[string]section) (stageReport, []byte, error) {
+func measure(pred, target, planBytes []byte, stats x86.Stats, reference int, withXZ bool, secs map[string]section, disp *dispContext) (stageReport, []byte, error) {
 	corr, err := smallestCorrection(pred, target)
 	if err != nil {
 		return stageReport{}, nil, err
@@ -181,8 +181,8 @@ func measure(pred, target, planBytes []byte, stats x86.Stats, reference int, wit
 		go func() { defer wg.Done(); r.JointBrotli = brotliSize(joint) }()
 		go func() { defer wg.Done(); r.PlanXZ = xzSize(planBytes) }()
 		go func() { defer wg.Done(); r.CorrectionLZXZ = xzSize(corr) }()
-		go func() { defer wg.Done(); r.CorrectionColumnarXZ, colErr = columnarXZ(pred, target) }()
-		go func() { defer wg.Done(); split, pick, splitErr = bestCorrectionXZ(pred, target, secs) }()
+		go func() { defer wg.Done(); r.CorrectionColumnarXZ, colErr = columnarXZ(pred, target, disp) }()
+		go func() { defer wg.Done(); split, pick, splitErr = bestCorrectionXZ(pred, target, secs, disp) }()
 		wg.Wait()
 		if colErr != nil {
 			return stageReport{}, nil, colErr
@@ -291,7 +291,7 @@ func runCombined(externalPath string, oldImage, newImage *image, structure predi
 		if err != nil {
 			return nil, planArtifacts{}, err
 		}
-		eqReport, eqCorr, err := measure(eqPred, newImage.textBytes(), epBytes, x86.Stats{}, reference, true, nil)
+		eqReport, eqCorr, err := measure(eqPred, newImage.textBytes(), epBytes, x86.Stats{}, reference, true, nil, nil)
 		if err != nil {
 			return nil, planArtifacts{}, err
 		}
@@ -307,7 +307,7 @@ func runCombined(externalPath string, oldImage, newImage *image, structure predi
 		if err != nil {
 			return nil, planArtifacts{}, err
 		}
-		derivedReport, derivedCorr, err := measure(derivedPred, newImage.textBytes(), art.Derived, derivedStats.Relocation, reference, true, nil)
+		derivedReport, derivedCorr, err := measure(derivedPred, newImage.textBytes(), art.Derived, derivedStats.Relocation, reference, true, nil, nil)
 		if err != nil {
 			return nil, planArtifacts{}, err
 		}
@@ -330,7 +330,7 @@ func runCombined(externalPath string, oldImage, newImage *image, structure predi
 	t.done("")
 	if wantRung("text-ladder") {
 		t = startStage("rung text-structurally-retargeted")
-		retargetReport, retargetCorr, err := measure(retargetPred, newImage.textBytes(), art.Retarget, retargetStats.Relocation, reference, true, nil)
+		retargetReport, retargetCorr, err := measure(retargetPred, newImage.textBytes(), art.Retarget, retargetStats.Relocation, reference, true, nil, nil)
 		if err != nil {
 			return nil, planArtifacts{}, err
 		}
@@ -370,7 +370,7 @@ func runCombined(externalPath string, oldImage, newImage *image, structure predi
 		if selectedStats.SelectedFunctions != selectedFunctions || selectedStats.SelectedBytes != selectedBytes {
 			return nil, planArtifacts{}, errors.New("combined selection replay disagrees with encoder")
 		}
-		selectedReport, selectedCorr, err := measure(selectedPred, newImage.textBytes(), art.Selected, selectedStats.Relocation, reference, true, nil)
+		selectedReport, selectedCorr, err := measure(selectedPred, newImage.textBytes(), art.Selected, selectedStats.Relocation, reference, true, nil, nil)
 		if err != nil {
 			return nil, planArtifacts{}, err
 		}
@@ -826,6 +826,14 @@ func runWholeImage(oldImage, newImage *image, epBytes, structureBytes, choices, 
 	// The attribution walk needs function spans; take them from the dense map,
 	// which every measured rung ships.
 	attributionMaps := structure.Maps
+	// §14's displacement column walks function bodies, and the decoder has
+	// them here: the function map is decoded above, before any correction is
+	// applied. Both rungs share the correction, so both see the change.
+	var dispCtx *dispContext
+	if dispColumn {
+		dispCtx = newDispContext(structure.Maps, newImage.Text, len(target))
+		fmt.Fprintf(os.Stderr, "dispcol: %d bodies, %d distinct function starts\n", len(dispCtx.bodies), len(dispCtx.starts))
+	}
 	var correctedPrediction []byte
 	if onlyProbes == nil {
 		t = startStage("plan column diagnostics")
@@ -881,7 +889,7 @@ func runWholeImage(oldImage, newImage *image, epBytes, structureBytes, choices, 
 			}
 		}
 		t = startStage("measure " + r.name)
-		rep, corr, err := measure(pred, target, r.plan, stats.Relocation, reference, true, newImage.Sections)
+		rep, corr, err := measure(pred, target, r.plan, stats.Relocation, reference, true, newImage.Sections, dispCtx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "whole image %-24s FAILED: %v\n", r.name, err)
 			continue
@@ -993,6 +1001,12 @@ var goTablesPlan []byte
 // equivalences, to price what the map layer adds over the other layers.
 var noEquivalences bool
 
+// dispColumn selects §14's correction variant. Off, the correction is exactly
+// the format that shipped; on, the last bucket's PC-relative fields move into
+// columns of their own and the decoder walks the repaired bytes to put them
+// back. See dispfield.go.
+var dispColumn bool
+
 // noDwarf keeps the DWARF layer out, to price it.
 var noDwarf bool
 
@@ -1096,6 +1110,7 @@ func run() error {
 	flag.BoolVar(&noDwarf, "no-dwarf", false, "leave the DWARF layer out")
 	flag.BoolVar(&noTextEquivalences, "no-text-equivalences", false, "drop the equivalences that write into .text, keeping the rest")
 	flag.BoolVar(&noEquivalences, "no-equivalences", false, "drop the equivalences, keeping the section geometry they carry")
+	flag.BoolVar(&dispColumn, "dispcol", false, "ship §14's displacement column: zero the PC-relative fields inside the correction's long-run bucket and send them as columns of their own")
 	flag.BoolVar(&noPoints, "no-points", false, "drop the inferred reference points from a Go-derived plan")
 	flag.BoolVar(&noGoText, "no-go-text", false, "keep the Go-table module out of .text when there are no equivalences")
 	noGoTables := flag.Bool("no-go-tables", false, "leave the Go-table module out even for a Go binary")
@@ -1268,7 +1283,7 @@ func run() error {
 			return err
 		}
 		var corr []byte
-		if stableRawReport, corr, err = measure(pred, newText, planBytes, reloc, *reference, true, nil); err != nil {
+		if stableRawReport, corr, err = measure(pred, newText, planBytes, reloc, *reference, true, nil, nil); err != nil {
 			return err
 		}
 		if err := writeFile(*outDir, "stable-raw.correction", corr); err != nil {
@@ -1283,7 +1298,7 @@ func run() error {
 			return err
 		}
 		var corr []byte
-		if stableRelocReport, corr, err = measure(pred, newText, planBytes, reloc, *reference, true, nil); err != nil {
+		if stableRelocReport, corr, err = measure(pred, newText, planBytes, reloc, *reference, true, nil, nil); err != nil {
 			return err
 		}
 		if err := writeFile(*outDir, "stable-relocated.correction", corr); err != nil {
@@ -1313,7 +1328,7 @@ func run() error {
 			return err
 		}
 		var corr []byte
-		if mappedRawReport, corr, err = measure(pred, newText, mappedPlanBytes, stats, *reference, true, nil); err != nil {
+		if mappedRawReport, corr, err = measure(pred, newText, mappedPlanBytes, stats, *reference, true, nil, nil); err != nil {
 			return err
 		}
 		if err := writeFile(*outDir, "all-mapped-raw.correction", corr); err != nil {
@@ -1333,7 +1348,7 @@ func run() error {
 	if wantRung("all-mapped-relocated") {
 		t = startStage("rung all-mapped-relocated")
 		var corr []byte
-		if mappedRelocReport, corr, err = measure(mappedRelocPred, newText, mappedPlanBytes, mappedRelocStats, *reference, true, nil); err != nil {
+		if mappedRelocReport, corr, err = measure(mappedRelocPred, newText, mappedPlanBytes, mappedRelocStats, *reference, true, nil, nil); err != nil {
 			return err
 		}
 		if err := writeFile(*outDir, "all-mapped-relocated.correction", corr); err != nil {
