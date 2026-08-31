@@ -9,14 +9,18 @@ import "github.com/wjordan/presage/delta/x86"
 // new position.
 func retargetEquivalencePrediction(text []byte, ep equivalencePlan, w codeWindow, structure predictionPlan, lookup ImageOracle) x86.Stats {
 	retargetBody := func(stats *x86.Stats, body []byte, dstBase uint64) {
+		// References arrive in ascending address order, and so do the three
+		// probes each one makes, so one cursor over the runs serves the
+		// whole body.
+		runs := newEqCursor(ep.Eqs)
 		x86.WalkReferences(body, 0, func(ref x86.Reference) {
 			stats.Refs++
 			fullStart := w.New.Off + dstBase + uint64(ref.Start)
 			fullField := w.New.Off + dstBase + uint64(ref.Off)
 			fullLast := w.New.Off + dstBase + uint64(ref.Next-1)
-			srcStart, startEq, startOK := ep.sourceAt(fullStart)
-			srcField, fieldEq, fieldOK := ep.sourceAt(fullField)
-			srcLast, lastEq, lastOK := ep.sourceAt(fullLast)
+			srcStart, startEq, startOK := runs.at(fullStart)
+			srcField, fieldEq, fieldOK := runs.at(fullField)
+			srcLast, lastEq, lastOK := runs.at(fullLast)
 			if !startOK || !fieldOK || !lastOK || startEq != fieldEq || startEq != lastEq || srcField < srcStart || srcLast < srcField {
 				stats.Unknown++
 				return

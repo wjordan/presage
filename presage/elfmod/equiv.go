@@ -231,30 +231,20 @@ func parseEquivalencePlan(b []byte) (equivalencePlan, error) {
 	return p, nil
 }
 
-// sourceAt finds the run covering a destination offset.
-func (p equivalencePlan) sourceAt(dst uint64) (uint64, int, bool) {
-	i, ok := slices.BinarySearchFunc(p.Eqs, dst, func(eq equivalence, dst uint64) int {
-		if eq.Dst > dst {
-			return 1
-		}
-		if eq.Dst+eq.N <= dst {
-			return -1
-		}
-		return 0
-	})
-	if !ok {
-		return 0, 0, false
-	}
-	eq := p.Eqs[i]
-	return eq.Src + dst - eq.Dst, i, true
-}
-
 // sourceEquivalenceMapper projects old offsets through the runs, keyed by
 // source; overlapping sources are de-overlapped, the longer run winning.
 type sourceEquivalenceMapper struct {
 	eqs    []equivalence
+	bySrc  *pageIndex
 	oldLen uint64
 	newLen uint64
+}
+
+// after is the number of runs starting at or before off, the index the
+// callers' sort.Search returns.
+func (m sourceEquivalenceMapper) after(off uint64) int {
+	lo, hi := m.bySrc.bounds(off, len(m.eqs))
+	return lo + sort.Search(hi-lo, func(i int) bool { return m.eqs[lo+i].Src > off })
 }
 
 func newSourceEquivalenceMapper(p equivalencePlan) sourceEquivalenceMapper {
@@ -300,13 +290,14 @@ func newSourceEquivalenceMapper(p equivalencePlan) sourceEquivalenceMapper {
 		}
 	}
 	eqs = slices.DeleteFunc(eqs, func(eq equivalence) bool { return eq.N == 0 })
-	return sourceEquivalenceMapper{eqs: eqs, oldLen: p.OldLen, newLen: p.NewLen}
+	bySrc := newPageIndex(len(eqs), func(i int) uint64 { return eqs[i].Src }, nil)
+	return sourceEquivalenceMapper{eqs: eqs, bySrc: bySrc, oldLen: p.OldLen, newLen: p.NewLen}
 }
 
 // within projects an old offset through the run that copies it, or reports
 // false: unlike project it never extrapolates.
 func (m sourceEquivalenceMapper) within(off uint64) (uint64, bool) {
-	i := sort.Search(len(m.eqs), func(i int) bool { return m.eqs[i].Src > off })
+	i := m.after(off)
 	if i == 0 || off >= m.eqs[i-1].Src+m.eqs[i-1].N {
 		return 0, false
 	}
@@ -318,7 +309,7 @@ func (m sourceEquivalenceMapper) project(off uint64) (uint64, bool) {
 	if off >= m.oldLen || len(m.eqs) == 0 || m.newLen == 0 {
 		return 0, false
 	}
-	i := sort.Search(len(m.eqs), func(i int) bool { return m.eqs[i].Src > off })
+	i := m.after(off)
 	if i > 0 && (i == len(m.eqs) || off < m.eqs[i-1].Src+m.eqs[i-1].N || off-(m.eqs[i-1].Src+m.eqs[i-1].N) < m.eqs[i].Src-off) {
 		i--
 	}

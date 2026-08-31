@@ -26,6 +26,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"runtime"
+	"sort"
+	"sync"
+	"sync/atomic"
 )
 
 // Run is one equivalence: N bytes of the destination at Dst predicted by
@@ -119,13 +123,27 @@ func (p Params) withDefaults() Params {
 	return p
 }
 
-// seedIndex maps a seed's hash to the source offsets carrying it, most
-// recent first: head[h] is an offset, next[o] the previous offset in the
-// same bucket, and -1 ends a chain.
+// seedIndex maps a seed's hash to the source offsets carrying it. The
+// offsets of one hash are packed together in ascending order, so the
+// matcher both walks a bucket most-recent-first (from the back) and finds
+// the offsets near where the map expects the source without touching the
+// ones in between. A chained table would answer the first question just as
+// well and the second only by walking, which on a binary's hot seeds —
+// padding, zero runs, common relocation shapes — is thousands of dependent
+// cache misses per destination offset.
 type seedIndex struct {
-	head []int32
-	next []int32
-	mask uint32
+	// end[h] is where bucket h ends in items; it starts where h-1 ends.
+	end   []int32
+	items []int32
+	mask  uint32
+}
+
+func (x *seedIndex) bucket(h uint32) []int32 {
+	var lo int32
+	if h != 0 {
+		lo = x.end[h-1]
+	}
+	return x.items[lo:x.end[h]]
 }
 
 // seedHash mixes the seed's first and last eight bytes; both loads are
@@ -139,21 +157,66 @@ func seedHash(b []byte, i, k int) uint32 {
 	return uint32(h >> 32)
 }
 
+// buildSeedIndex counts each hash's offsets, turns the counts into bucket
+// bounds, then places the offsets. The counting pass is the price of the
+// packed layout, and it buys back an order of magnitude in the walk.
 func buildSeedIndex(src []byte, k int) *seedIndex {
 	bits := 16
 	for 1<<bits < len(src)/4 && bits < 26 {
 		bits++
 	}
-	idx := &seedIndex{head: make([]int32, 1<<bits), next: make([]int32, len(src)), mask: 1<<bits - 1}
-	for i := range idx.head {
-		idx.head[i] = -1
+	n := len(src) - k + 1
+	idx := &seedIndex{end: make([]int32, 1<<bits+1), items: make([]int32, n), mask: 1<<bits - 1}
+	end := idx.end
+	buf := make([]uint32, min(n, 1<<22))
+	eachSeedHash(src, k, n, idx.mask, buf, func(_ int, hashes []uint32) {
+		for _, h := range hashes {
+			end[h+1]++
+		}
+	})
+	for h := 1; h < len(end); h++ {
+		end[h] += end[h-1]
 	}
-	for i := 0; i+k <= len(src); i++ {
-		h := seedHash(src, i, k) & idx.mask
-		idx.next[i] = idx.head[h]
-		idx.head[h] = int32(i)
-	}
+	// end[h] is bucket h's start here, and its end once the bucket is full.
+	eachSeedHash(src, k, n, idx.mask, buf, func(base int, hashes []uint32) {
+		for i, h := range hashes {
+			idx.items[end[h]] = int32(base + i)
+			end[h]++
+		}
+	})
 	return idx
+}
+
+// eachSeedHash hands do the masked hash of every seed in ascending order, a
+// chunk at a time. The hashing runs across the pool — it is the one part of
+// the build that parallelizes, since both passes over the counts are
+// order-dependent — and the chunk buffer keeps the build from holding a
+// hash per source byte, which on a whole image is another gigabyte.
+func eachSeedHash(src []byte, k, n int, mask uint32, buf []uint32, do func(base int, hashes []uint32)) {
+	const grain = 1 << 16
+	for base := 0; base < n; base += len(buf) {
+		chunk := buf[:min(len(buf), n-base)]
+		shards := (len(chunk) + grain - 1) / grain
+		var next atomic.Int64
+		var wg sync.WaitGroup
+		for id := min(runtime.GOMAXPROCS(0), shards); id > 0; id-- {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					s := int(next.Add(1)) - 1
+					if s >= shards {
+						return
+					}
+					for i := s * grain; i < min((s+1)*grain, len(chunk)); i++ {
+						chunk[i] = seedHash(src, base+i, k) & mask
+					}
+				}
+			}()
+		}
+		wg.Wait()
+		do(base, chunk)
+	}
 }
 
 // matchForward counts the bytes that agree from the two offsets, up to limit.
@@ -228,6 +291,16 @@ func fuzzyBackward(src []byte, o int, dst []byte, n int, floor int, drop int) in
 	return bestLen
 }
 
+// lowerBound is the first index of the ascending bucket b whose offset is
+// at least v; upperBound the first past v.
+func lowerBound(b []int32, v int) int {
+	return sort.Search(len(b), func(i int) bool { return int(b[i]) >= v })
+}
+
+func upperBound(b []int32, v int) int {
+	return sort.Search(len(b), func(i int) bool { return int(b[i]) > v })
+}
+
 func absInt(x int) int {
 	if x < 0 {
 		return -x
@@ -271,34 +344,28 @@ func Match(src, dst []byte, p Params) []Run {
 			}
 		}
 		if bestLen < accept {
-			h := seedHash(dst, pos, k) & idx.mask
-			seen := 0
-			c := idx.head[h]
-			for ; c >= 0 && seen < chain; c = idx.next[c] {
-				seen++
-				o := int(c)
+			b := idx.bucket(seedHash(dst, pos, k) & idx.mask)
+			// A bucket runs from low offsets up, so the most recent seeds
+			// are at its back.
+			j := len(b) - 1
+			for seen := 0; j >= 0 && seen < chain; j, seen = j-1, seen+1 {
+				o := int(b[j])
 				l := matchForward(src, o, dst, pos, probe)
-				if l < k {
-					continue
-				}
-				if bestSrc < 0 || betterCandidate(l, o, bestLen, bestSrc, expected, p.Slack) {
+				if l >= k && (bestSrc < 0 || betterCandidate(l, o, bestLen, bestSrc, expected, p.Slack)) {
 					bestSrc, bestLen = o, l
 				}
 			}
-			// Chains run from high offsets down; keep walking while the
-			// expected source may still be ahead, looking only near it.
-			if expected >= 0 && (bestSrc < 0 || absInt(bestSrc-expected) > near) {
-				for ; c >= 0 && seen < nearChain && int(c) >= expected-near; c = idx.next[c] {
-					seen++
-					o := int(c)
-					if o > expected+near {
-						continue
-					}
+			// Keep walking while the expected source may still be ahead,
+			// looking only near it. The walk stops below expected-near or
+			// after nearChain offsets in all — so at index len(b)-nearChain,
+			// whatever the first loop consumed — and the offsets above
+			// expected+near cost only their place in that count.
+			if j >= 0 && expected >= 0 && (bestSrc < 0 || absInt(bestSrc-expected) > near) {
+				floor := max(len(b)-nearChain, lowerBound(b, expected-near))
+				for t := min(j, upperBound(b, expected+near)-1); t >= floor; t-- {
+					o := int(b[t])
 					l := matchForward(src, o, dst, pos, probe)
-					if l < k {
-						continue
-					}
-					if bestSrc < 0 || betterCandidate(l, o, bestLen, bestSrc, expected, p.Slack) {
+					if l >= k && (bestSrc < 0 || betterCandidate(l, o, bestLen, bestSrc, expected, p.Slack)) {
 						bestSrc, bestLen = o, l
 					}
 				}

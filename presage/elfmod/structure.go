@@ -446,8 +446,10 @@ func readPointsAndRanges(r *planReader, p *predictionPlan, size int, oldText []b
 // addressLookup answers where an old .text address landed: exact points
 // first, then the function map, then the section shift ranges.
 type addressLookup struct {
-	p     predictionPlan
-	bySrc []mapping
+	p      predictionPlan
+	bySrc  []mapping
+	points *pageIndex
+	maps   *pageIndex
 }
 
 func newAddressLookup(p predictionPlan) *addressLookup {
@@ -458,15 +460,22 @@ func newAddressLookup(p predictionPlan) *addressLookup {
 		}
 		return cmpU(a.Dst, b.Dst)
 	})
-	return &addressLookup{p: p, bySrc: bySrc}
+	return &addressLookup{
+		p:      p,
+		bySrc:  bySrc,
+		points: newPageIndex(len(p.Points), func(i int) uint64 { return p.Points[i].Old }, nil),
+		maps: newPageIndex(len(bySrc), func(i int) uint64 { return bySrc[i].Src },
+			func(i int) uint64 { return bySrc[i].Src + bySrc[i].SrcSize }),
+	}
 }
 
 func (l *addressLookup) pointTarget(addr uint64) x86.Target {
-	i, ok := slices.BinarySearchFunc(l.p.Points, addr, func(point addressPoint, addr uint64) int {
+	lo, hi := l.points.bounds(addr, len(l.p.Points))
+	i, ok := slices.BinarySearchFunc(l.p.Points[lo:hi], addr, func(point addressPoint, addr uint64) int {
 		return cmpU(point.Old, addr)
 	})
 	if ok {
-		return x86.Target{Addr: l.p.Points[i].New, Known: true}
+		return x86.Target{Addr: l.p.Points[lo+i].New, Known: true}
 	}
 	return x86.Target{}
 }
@@ -477,7 +486,8 @@ func (l *addressLookup) mapTarget(addr uint64) x86.Target {
 		return x86.Target{}
 	}
 	off := addr - p.OldAddr
-	i, ok := slices.BinarySearchFunc(l.bySrc, off, func(m mapping, off uint64) int {
+	lo, hi := l.maps.bounds(off, len(l.bySrc))
+	i, ok := slices.BinarySearchFunc(l.bySrc[lo:hi], off, func(m mapping, off uint64) int {
 		if m.Src > off {
 			return 1
 		}
@@ -487,7 +497,7 @@ func (l *addressLookup) mapTarget(addr uint64) x86.Target {
 		return 0
 	})
 	if ok {
-		m := l.bySrc[i]
+		m := l.bySrc[lo+i]
 		delta := off - m.Src
 		if delta < m.DstSize {
 			return x86.Target{Addr: p.NewAddr + m.Dst + delta, Known: true}
