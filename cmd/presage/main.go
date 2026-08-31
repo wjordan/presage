@@ -9,10 +9,10 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -178,22 +178,44 @@ func apply(args []string) error {
 	if fs.NArg() != 2 || *out == "" {
 		usage()
 	}
-	old, err := os.ReadFile(fs.Arg(0))
+	old, unmap, err := readWhole(fs.Arg(0))
 	if err != nil {
 		return err
+	}
+	if unmap != nil {
+		defer unmap()
 	}
 	patch, err := os.ReadFile(fs.Arg(1))
 	if err != nil {
 		return err
 	}
 	start := time.Now()
-	var buf bytes.Buffer
-	if err := presage.Apply([][]byte{old}, patch, modules.Registry(), &buf); err != nil {
+	// Straight to the file: buffering the result first copied the whole image
+	// a third time and held a second 291 MB of it.
+	f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(*out, buf.Bytes(), 0o755); err != nil {
+	w := &countWriter{w: f}
+	if err := presage.Apply([][]byte{old}, patch, modules.Registry(), w); err != nil {
+		f.Close()
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "presage: applied, %d B in %s\n", buf.Len(), time.Since(start).Round(time.Millisecond))
+	if err := f.Close(); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "presage: applied, %d B in %s\n", w.n, time.Since(start).Round(time.Millisecond))
 	return nil
+}
+
+// countWriter reports how many bytes reached the file, for the summary line.
+type countWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
 }

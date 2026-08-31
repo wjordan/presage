@@ -330,27 +330,57 @@ func decodePlanSpans(b []byte) ([]byte, error) {
 	if r.err != nil || uint64(len(residue.b))+covered != planLen {
 		return nil, errors.New("plan residue does not fill the plan")
 	}
+	// The columns form a forest: a ctxPair column is conditioned on an
+	// earlier one and nothing else, every other column on nothing at all.
+	// So they decode concurrently, each waiting only on the column it names
+	// -- at about a megabyte a second, the wall is the depth of the deepest
+	// chain, not the sum of the columns.
 	cols := make([][]byte, len(spans))
-	for i, s := range spans {
-		z := r.take(zlen[i])
+	errs := make([]error, len(spans))
+	ready := make([]chan struct{}, len(spans))
+	zs := make([][]byte, len(spans))
+	for i := range spans {
+		ready[i] = make(chan struct{})
+		zs[i] = r.take(zlen[i])
 		if r.err != nil {
 			return nil, errors.New("truncated plan column")
 		}
-		var side *delta.CMSide
-		switch s.ctx {
-		case ctxVarint:
-			side = &delta.CMSide{Varint: true}
-		case ctxPair:
-			side = &delta.CMSide{Varint: true, Pair: delta.CMParseVarints(cols[s.pair])}
-		}
-		col, err := delta.CMDecode(z, s.n, side)
-		if err != nil {
-			return nil, err
-		}
-		cols[i] = col
 	}
 	if !r.done() {
 		return nil, errors.New("trailing plan column data")
+	}
+	var wg sync.WaitGroup
+	for i, s := range spans {
+		wg.Add(1)
+		go func(i int, s planColumn) {
+			defer wg.Done()
+			defer close(ready[i])
+			var side *delta.CMSide
+			switch s.ctx {
+			case ctxVarint:
+				side = &delta.CMSide{Varint: true}
+			case ctxPair:
+				<-ready[s.pair]
+				if errs[s.pair] != nil {
+					errs[i] = errs[s.pair]
+					return
+				}
+				side = &delta.CMSide{Varint: true, Pair: delta.CMParseVarints(cols[s.pair])}
+			}
+			col, err := delta.CMDecode(zs[i], s.n, side)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			cols[i] = col
+		}(i, s)
+	}
+	wg.Wait()
+	// In column order, so a corrupt plan draws the same error every run.
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
 	}
 	plan := make([]byte, 0, planLen)
 	prev := 0

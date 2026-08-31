@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 
 	"github.com/wjordan/presage/delta"
 	"github.com/wjordan/presage/delta/x86"
@@ -101,10 +102,11 @@ func (Module) DispContext(refs [][]byte, plan []byte, length int64) *delta.DispC
 	if err != nil {
 		return nil
 	}
-	windows, structures, err := planMaps(refs[0], cp)
+	ep, structures, err := cachedPlanMaps(refs[0], cp)
 	if err != nil {
 		return nil
 	}
+	windows := ep.Windows
 	var bodies []delta.DispBody
 	var starts []uint64
 	for i, w := range windows {
@@ -129,29 +131,74 @@ func (Module) DispContext(refs [][]byte, plan []byte, length int64) *delta.DispC
 // planMaps parses the plan's code windows and their structural plans. It is
 // the front of predictImage, split out so the correction's field context can
 // be rebuilt without predicting the image again.
-func planMaps(old []byte, cp planStreams) ([]codeWindow, []predictionPlan, error) {
+func planMaps(old []byte, cp planStreams) (equivalencePlan, []predictionPlan, error) {
 	ep, err := parseEquivalencePlan(cp.Equivalences)
 	if err != nil {
-		return nil, nil, err
+		return ep, nil, err
 	}
 	if uint64(len(old)) != ep.OldLen {
-		return nil, nil, errors.New("old image does not match the equivalence plan")
+		return ep, nil, errors.New("old image does not match the equivalence plan")
 	}
 	structures := make([]predictionPlan, len(ep.Windows))
 	sr := &planReader{b: cp.Structure}
 	for i, w := range ep.Windows {
 		b := sr.stream()
 		if sr.err != nil {
-			return nil, nil, errors.New("invalid structure stream")
+			return ep, nil, errors.New("invalid structure stream")
 		}
 		if structures[i], err = unmarshalPlan(b.b, old, w.Old); err != nil {
-			return nil, nil, err
+			return ep, nil, err
 		}
 	}
 	if !sr.done() {
-		return nil, nil, errors.New("structure stream does not match the code windows")
+		return ep, nil, errors.New("structure stream does not match the code windows")
 	}
-	return ep.Windows, structures, nil
+	return ep, structures, nil
+}
+
+// An apply asks for the same parse twice: once to predict the image and once
+// to name the fields the correction's runs contain. The second ask used to
+// re-run the whole thing -- the map columns, the derived reconstruction, the
+// point replay -- for an answer identical to the first by construction, since
+// both are functions of the old image and the plan alone. So it is memoised
+// on the identity of those two buffers (memo.go). Nothing downstream mutates
+// a parsed plan: the one place that marks maps clones them first
+// (match.go:allMapped).
+type planMapsKey struct{ old, eq, structure bufID }
+
+type planMapsEntry struct {
+	// Every buffer the key names is retained: an address only identifies its
+	// contents for as long as the memory cannot be freed and handed out again.
+	old, eq, structure []byte
+	ep                 equivalencePlan
+	structures         []predictionPlan
+	err                error
+}
+
+var (
+	planMapsMu    sync.Mutex
+	planMapsCache = map[planMapsKey]planMapsEntry{}
+)
+
+func cachedPlanMaps(old []byte, cp planStreams) (equivalencePlan, []predictionPlan, error) {
+	key := planMapsKey{old: idOf(old), eq: idOf(cp.Equivalences), structure: idOf(cp.Structure)}
+	planMapsMu.Lock()
+	e, ok := planMapsCache[key]
+	planMapsMu.Unlock()
+	if ok {
+		return e.ep, e.structures, e.err
+	}
+	ep, structures, err := planMaps(old, cp)
+	planMapsMu.Lock()
+	if len(planMapsCache) > 4 {
+		clear(planMapsCache)
+	}
+	planMapsCache[key] = planMapsEntry{
+		old: old, eq: cp.Equivalences, structure: cp.Structure,
+		ep: ep, structures: structures, err: err,
+	}
+	planMapsMu.Unlock()
+	return ep, structures, err
 }
 
 // predStats is what one prediction reports back to the encoder.
@@ -165,30 +212,18 @@ type predStats struct {
 // plan only, in the order elf-module.md §1 fixes.
 func predictImage(old []byte, cp planStreams) ([]byte, predStats, error) {
 	var st predStats
-	ep, err := parseEquivalencePlan(cp.Equivalences)
+	// One structural plan per code window, in window order.
+	ep, structures, err := cachedPlanMaps(old, cp)
 	if err != nil {
 		return nil, st, err
 	}
-	if uint64(len(old)) != ep.OldLen || ep.NewLen > uint64(int(^uint(0)>>1)) {
+	if ep.NewLen > uint64(int(^uint(0)>>1)) {
 		return nil, st, errors.New("old image does not match the equivalence plan")
 	}
-	// One structural plan per code window, in window order.
-	structures := make([]predictionPlan, len(ep.Windows))
-	sr := &planReader{b: cp.Structure}
 	for i, w := range ep.Windows {
-		b := sr.stream()
-		if sr.err != nil {
-			return nil, st, errors.New("invalid structure stream")
-		}
-		if structures[i], err = unmarshalPlan(b.b, old, w.Old); err != nil {
-			return nil, st, err
-		}
 		if structures[i].TargetLen != w.New.Size || structures[i].OldAddr != w.Old.Addr || structures[i].NewAddr != w.New.Addr {
 			return nil, st, errors.New("structural and equivalence plans describe different code windows")
 		}
-	}
-	if !sr.done() {
-		return nil, st, errors.New("structure stream does not match the code windows")
 	}
 	if ep.Eqs, err = decodeEquivalences(ep, newSrcPredictor(structures, ep.Windows)); err != nil {
 		return nil, st, err
@@ -323,9 +358,7 @@ func predictImage(old []byte, cp planStreams) ([]byte, predStats, error) {
 func layImage(old []byte, ep equivalencePlan) []byte {
 	out := make([]byte, int(ep.NewLen))
 	for _, w := range ep.Windows {
-		for i := w.New.Off; i < w.New.Off+w.New.Size; i++ {
-			out[i] = 0xcc
-		}
+		fill(out[w.New.Off:w.New.Off+w.New.Size], 0xcc)
 	}
 	for _, eq := range ep.Eqs {
 		copy(out[eq.Dst:eq.Dst+eq.N], old[eq.Src:eq.Src+eq.N])

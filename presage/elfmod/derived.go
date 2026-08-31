@@ -6,8 +6,6 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/zeebo/blake3"
-
 	"github.com/wjordan/presage/delta/x86"
 )
 
@@ -51,7 +49,22 @@ func deriveEnumeration(oldFile []byte, win section) []uint64 {
 		return nil
 	}
 	code := oldFile[win.Off : win.Off+win.Size]
-	return unionSorted(callTargets(code, win.Addr), relaWindowTargets(oldFile, win), detectBoundaries(code))
+	// The three enumerations read the old image and nothing else, so they run
+	// concurrently; unionSorted puts them back in one order regardless.
+	var ct, rw, db []uint64
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		rw = relaWindowTargets(oldFile, win)
+	}()
+	go func() {
+		defer wg.Done()
+		db = detectBoundaries(code)
+	}()
+	ct = callTargets(code, win.Addr)
+	wg.Wait()
+	return unionSorted(ct, rw, db)
 }
 
 // callTargets is E1: every rel32 call whose target lands back in the window.
@@ -114,51 +127,49 @@ func relaWindowTargets(oldFile []byte, win section) []uint64 {
 }
 
 func sortUniq(v []uint64) []uint64 {
-	slices.Sort(v)
-	return slices.Compact(v)
+	return sortDedupShards([][]uint64{v})
 }
 
+// unionSorted is the sorted union of its arguments -- which is exactly the
+// parallel sort's shard form, so it hands them straight over rather than
+// concatenating first.
 func unionSorted(vs ...[]uint64) []uint64 {
-	var out []uint64
-	for _, v := range vs {
-		out = append(out, v...)
-	}
-	return sortUniq(out)
+	return sortDedupShards(vs)
 }
 
 // The sweep costs seconds on a 130 MB window and every prediction of one
 // encode wants the same answer, so it is memoised by content. The key is the
 // image's content hash, not its address: a pointer would go stale the moment
 // two images shared a buffer.
+type enumKey struct {
+	file bufID
+	win  section
+}
+
+type enumEntry struct {
+	file []byte // retained, so the key's buffer identity stays meaningful
+	v    []uint64
+}
+
 var (
 	enumMu    sync.Mutex
-	enumCache = map[[32]byte][]uint64{}
+	enumCache = map[enumKey]enumEntry{}
 )
 
 func cachedEnumeration(oldFile []byte, win section) []uint64 {
-	h := blake3.New()
-	h.Write(oldFile)
-	var buf [8]byte
-	for _, v := range []uint64{win.Off, win.Size, win.Addr} {
-		for i := range buf {
-			buf[i] = byte(v >> (8 * i))
-		}
-		h.Write(buf[:])
-	}
-	var key [32]byte
-	copy(key[:], h.Sum(nil))
+	key := enumKey{file: idOf(oldFile), win: win}
 	enumMu.Lock()
-	v, ok := enumCache[key]
+	e, ok := enumCache[key]
 	enumMu.Unlock()
 	if ok {
-		return v
+		return e.v
 	}
-	v = deriveEnumeration(oldFile, win)
+	v := deriveEnumeration(oldFile, win)
 	enumMu.Lock()
 	if len(enumCache) > 8 {
 		clear(enumCache)
 	}
-	enumCache[key] = v
+	enumCache[key] = enumEntry{file: oldFile, v: v}
 	enumMu.Unlock()
 	return v
 }

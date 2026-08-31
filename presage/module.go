@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"unsafe"
 
 	"github.com/wjordan/presage/delta"
 )
@@ -194,14 +195,28 @@ func residual(m Module, refs [][]byte, plan, pred, target []byte) ([]byte, byte,
 	return split, flags, nil
 }
 
-func applyResidual(m Module, refs [][]byte, plan, pred, stream []byte, length int64, flags byte) ([]byte, error) {
+func applyResidual(m Module, refs [][]byte, plan, pred, stream []byte, length int64, flags byte, pf *splitPrefetch) ([]byte, error) {
 	if !m.Exact() {
 		return delta.PatchLZ(pred, stream, length)
 	}
 	if int64(len(pred)) != length {
 		return nil, fmt.Errorf("%w: module %s materialised %d bytes for a %d-byte region", ErrCorrupt, m.Name(), len(pred), length)
 	}
-	out := append([]byte(nil), pred...)
+	// The correction is applied over the prediction in place. Apply hashes the
+	// prediction before this point and never reads it again, and the field
+	// context is rebuilt from the references and the plan rather than from
+	// these bytes -- so the copy this used to make unconditionally was a whole
+	// spare image, 291 MB and a tenth of a second on Chrome.
+	//
+	// It is only unconditionally safe for a module that returns a buffer of
+	// its own, though: Materialise may legitimately return a slice of a
+	// reference (the core lz module's identity case does), and writing through
+	// that would corrupt the caller's input. So the copy is kept exactly where
+	// the prediction still overlaps something it must not touch.
+	out := pred
+	if overlapsAny(pred, refs) || overlaps(pred, stream) {
+		out = append([]byte(nil), pred...)
+	}
 	if flags&FlagSplitResidual != 0 {
 		// Built only if a piece actually carries displacement columns: the
 		// context costs a second parse of the plan.
@@ -209,7 +224,7 @@ func applyResidual(m Module, refs [][]byte, plan, pred, stream []byte, length in
 		if fr, ok := m.(FieldRefiner); ok {
 			disp = sync.OnceValue(func() *delta.DispContext { return fr.DispContext(refs, plan, length) })
 		}
-		if err := applySplitResidual(out, stream, disp); err != nil {
+		if err := applySplitResidual(out, stream, disp, pf); err != nil {
 			return nil, err
 		}
 		return out, nil
@@ -218,4 +233,26 @@ func applyResidual(m Module, refs [][]byte, plan, pred, stream []byte, length in
 		return nil, err
 	}
 	return out, nil
+}
+
+// overlaps reports whether a and b share any byte of backing array. It is the
+// test that lets applyResidual correct a prediction in place: a prediction
+// that shares no memory with the reference it came from, or with the patch
+// body the correction is read out of, can be written through.
+func overlaps(a, b []byte) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	pa := uintptr(unsafe.Pointer(unsafe.SliceData(a)))
+	pb := uintptr(unsafe.Pointer(unsafe.SliceData(b)))
+	return pa < pb+uintptr(len(b)) && pb < pa+uintptr(len(a))
+}
+
+func overlapsAny(a []byte, bs [][]byte) bool {
+	for _, b := range bs {
+		if overlaps(a, b) {
+			return true
+		}
+	}
+	return false
 }

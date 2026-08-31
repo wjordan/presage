@@ -8,6 +8,8 @@ package presage
 import (
 	"fmt"
 	"io"
+	"runtime"
+	"sync"
 
 	"github.com/wjordan/presage/delta"
 )
@@ -170,10 +172,35 @@ func Apply(refs [][]byte, patch []byte, reg *Registry, w io.Writer) error {
 		if int64(len(refs[i])) != r.Size {
 			return fmt.Errorf("presage: reference %d is %d bytes, patch expects %d", i, len(refs[i]), r.Size)
 		}
-		if got := hashOf(refs[i]); got != r.B3 {
-			return fmt.Errorf("presage: reference %d hashes to %s, patch expects %s", i, got, r.B3)
-		}
 	}
+	// The references are verified alongside the prediction rather than ahead
+	// of it: hashing 291 MB is a tenth of a second that has nothing to wait
+	// for. A wrong reference is still the error the caller gets, because this
+	// result is consulted before any error the rest of the apply raises and
+	// before the one place that writes.
+	refsChecked := make(chan error, 1)
+	go func() {
+		for i, r := range h.Refs {
+			if got := hashOf(refs[i]); got != r.B3 {
+				refsChecked <- fmt.Errorf("presage: reference %d hashes to %s, patch expects %s", i, got, r.B3)
+				return
+			}
+		}
+		refsChecked <- nil
+	}()
+	err = applyBody(refs, patch, h, reg, w, refsChecked)
+	if refsErr := <-refsChecked; refsErr != nil {
+		return refsErr
+	}
+	return err
+}
+
+// applyBody is Apply once the header and the reference sizes are known.
+// refsChecked carries the reference verification running alongside it; the
+// body takes it from the channel and puts it back, so Apply can consult it
+// however the body ended.
+func applyBody(refs [][]byte, patch []byte, h *Header, reg *Registry, w io.Writer, refsChecked chan error) error {
+	var err error
 	if reg == nil {
 		reg = NewRegistry()
 	}
@@ -207,7 +234,14 @@ func Apply(refs [][]byte, patch []byte, reg *Registry, w io.Writer) error {
 	if total != size {
 		return fmt.Errorf("%w: regions cover %d bytes, target is %d", ErrCorrupt, total, size)
 	}
-	out := make([]byte, 0, size)
+	// A single region -- what every exact module produces -- hands its own
+	// buffer straight through: concatenating one region into a second
+	// full-size buffer was 291 MB of memory and a tenth of a second of
+	// memmove on Chrome, to produce a copy of what it was given.
+	var out []byte
+	if len(h.Regions) != 1 {
+		out = make([]byte, 0, size)
+	}
 	for i, rg := range h.Regions {
 		m := reg.Get(rg.Module)
 		plan := r.take(uint64(rg.PlanLen))
@@ -217,6 +251,13 @@ func Apply(refs [][]byte, patch []byte, reg *Registry, w io.Writer) error {
 		if r.err != nil {
 			return r.err
 		}
+		// The correction's side-free streams have everything they need
+		// already: they start now and run against the prediction rather than
+		// after it.
+		var pf *splitPrefetch
+		if h.Flags&FlagSplitResidual != 0 {
+			pf = prefetchSplitResidual(res, int(rg.Length))
+		}
 		pred, err := m.Materialise(refs, plan, rg.Length)
 		if err != nil {
 			return err
@@ -224,7 +265,7 @@ func Apply(refs [][]byte, patch []byte, reg *Registry, w io.Writer) error {
 		if predictionHash(pred) != root {
 			return &ErrPredictionDiverged{Region: i, Module: m.Name()}
 		}
-		bytes, err := applyResidual(m, refs, plan, pred, res, rg.Length, h.Flags)
+		bytes, err := applyResidual(m, refs, plan, pred, res, rg.Length, h.Flags, pf)
 		if err != nil {
 			return err
 		}
@@ -233,7 +274,11 @@ func Apply(refs [][]byte, patch []byte, reg *Registry, w io.Writer) error {
 				return err
 			}
 		}
-		out = append(out, bytes...)
+		if len(h.Regions) == 1 {
+			out = bytes
+		} else {
+			out = append(out, bytes...)
+		}
 	}
 	if err := r.done(); err != nil {
 		return err
@@ -249,6 +294,13 @@ func Apply(refs [][]byte, patch []byte, reg *Registry, w io.Writer) error {
 	if got := hashOf(out); got != h.Target {
 		return fmt.Errorf("presage: output hashes to %s, patch promises %s", got, h.Target)
 	}
+	// Nothing has reached w yet, so this is the last moment the reference
+	// check can still stop the write.
+	refsErr := <-refsChecked
+	refsChecked <- refsErr
+	if refsErr != nil {
+		return refsErr
+	}
 	_, err = w.Write(out)
 	return err
 }
@@ -261,11 +313,25 @@ func predictionHash(pred []byte) Hash {
 	if len(pred) <= FrameSize {
 		return hashOf(pred)
 	}
-	var leaves []byte
-	for off := 0; off < len(pred); off += FrameSize {
-		h := hashOf(pred[off:min(off+FrameSize, len(pred))])
-		leaves = append(leaves, h[:]...)
+	// The leaves are independent hashes of fixed chunks, so they are computed
+	// concurrently and written back by index: the leaf string, and so the root,
+	// is what a serial pass produced.
+	n := (len(pred) + FrameSize - 1) / FrameSize
+	leaves := make([]byte, n*len(Hash{}))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
+	for i := range n {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			off := i * FrameSize
+			h := hashOf(pred[off:min(off+FrameSize, len(pred))])
+			copy(leaves[i*len(h):], h[:])
+		}(i)
 	}
+	wg.Wait()
 	return hashOf(leaves)
 }
 

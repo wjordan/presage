@@ -1,5 +1,7 @@
 package delta
 
+import "slices"
+
 // Side information for the columnar correction's byte buckets.
 //
 // The gaps and lens columns come first in the stream table, so by the time a
@@ -46,9 +48,22 @@ func CMColumnarSides(pred, gaps, lens []byte, d *DispContext) ([]*CMSide, error)
 			runs = append(runs, dispRun{at, at + int(n), len(s.Pred)})
 			bucket = append(bucket, b)
 		}
-		for k := 0; k < int(n); k++ {
-			s.Pred = append(s.Pred, pred[at+k])
-			s.Sel = append(s.Sel, byte(min(k, CMSelMax-1)))
+		// Whole runs at a time: the prediction bytes are a contiguous slice
+		// and the selector is the same short ramp followed by a constant for
+		// every run, so both go in as block copies rather than 1.5 M
+		// single-byte appends.
+		s.Pred = append(s.Pred, pred[at:at+int(n)]...)
+		k := min(int(n), CMSelMax)
+		s.Sel = append(s.Sel, selRamp[:k]...)
+		if rest := int(n) - k; rest > 0 {
+			s.Sel = slices.Grow(s.Sel, rest)
+			base := len(s.Sel)
+			s.Sel = s.Sel[:base+rest]
+			tail := s.Sel[base:]
+			tail[0] = CMSelMax - 1
+			for m := 1; m < len(tail); m *= 2 {
+				copy(tail[m:], tail[:m])
+			}
 		}
 		at += int(n)
 	}
@@ -89,3 +104,14 @@ func cmWorthClassifying(sides []*CMSide) bool {
 // at about 1 MB/s each way; below a few kilobytes its adaptive models have not
 // paid for themselves and the attempt is only encode time.
 const CMMinStream = 4 << 10
+
+// selRamp is the head of every run's selector column: byte k of a run is
+// min(k, CMSelMax-1), so the first CMSelMax bytes count up and the rest are
+// the last value.
+var selRamp = func() [CMSelMax]byte {
+	var r [CMSelMax]byte
+	for i := range r {
+		r[i] = byte(i)
+	}
+	return r
+}()

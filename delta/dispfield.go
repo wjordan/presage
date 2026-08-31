@@ -4,7 +4,9 @@ import (
 	"cmp"
 	"encoding/binary"
 	"fmt"
+	"runtime"
 	"slices"
+	"sync"
 
 	"github.com/wjordan/presage/delta/x86"
 )
@@ -92,26 +94,57 @@ func (d *DispContext) sites(buf []byte, runs []dispRun) []dispSite {
 	if d == nil || len(runs) == 0 {
 		return nil
 	}
-	var out []dispSite
-	for _, b := range d.bodies {
-		if b.Off < 0 || b.Size < 0 || b.Off+b.Size > len(buf) {
-			continue
-		}
-		// Skip a body no run touches, which is most of them.
-		k, _ := slices.BinarySearchFunc(runs, b.Off, func(r dispRun, v int) int { return cmp.Compare(r.end, v) })
-		if k >= len(runs) || runs[k].start >= b.Off+b.Size {
-			continue
-		}
-		lo, hi := b.PC, b.PC+uint64(b.Size)
-		x86.WalkReferences(buf[b.Off:b.Off+b.Size], b.PC, func(ref x86.Reference) {
-			fo, fe := b.Off+ref.Off, b.Off+ref.Off+ref.N
-			i, _ := slices.BinarySearchFunc(runs, fo, func(r dispRun, v int) int { return cmp.Compare(r.end, v) })
-			if i >= len(runs) || runs[i].start > fo || fe > runs[i].end {
-				return
+	// The bodies are disjoint spans of buf and each is walked from its own
+	// start, so they walk concurrently; the shards are concatenated in body
+	// order, which is the list a serial walk built.
+	shards := shardBodies(len(d.bodies), func(lo, hi int) []dispSite {
+		var out []dispSite
+		for _, b := range d.bodies[lo:hi] {
+			if b.Off < 0 || b.Size < 0 || b.Off+b.Size > len(buf) {
+				continue
 			}
-			out = append(out, dispSite{fo, ref.N, b.PC + uint64(ref.Next), lo, hi, runs[i].at + fo - runs[i].start})
-		})
+			// Skip a body no run touches, which is most of them.
+			k, _ := slices.BinarySearchFunc(runs, b.Off, func(r dispRun, v int) int { return cmp.Compare(r.end, v) })
+			if k >= len(runs) || runs[k].start >= b.Off+b.Size {
+				continue
+			}
+			lo, hi := b.PC, b.PC+uint64(b.Size)
+			x86.WalkReferences(buf[b.Off:b.Off+b.Size], b.PC, func(ref x86.Reference) {
+				fo, fe := b.Off+ref.Off, b.Off+ref.Off+ref.N
+				i, _ := slices.BinarySearchFunc(runs, fo, func(r dispRun, v int) int { return cmp.Compare(r.end, v) })
+				if i >= len(runs) || runs[i].start > fo || fe > runs[i].end {
+					return
+				}
+				out = append(out, dispSite{fo, ref.N, b.PC + uint64(ref.Next), lo, hi, runs[i].at + fo - runs[i].start})
+			})
+		}
+		return out
+	})
+	n := 0
+	for _, s := range shards {
+		n += len(s)
 	}
+	out := make([]dispSite, 0, n)
+	for _, s := range shards {
+		out = append(out, s...)
+	}
+	return out
+}
+
+// shardBodies splits [0,n) into one contiguous range per worker and collects
+// what f makes of each, in range order.
+func shardBodies[T any](n int, f func(lo, hi int) T) []T {
+	nsh := min(max(n, 1), runtime.GOMAXPROCS(0))
+	out := make([]T, nsh)
+	var wg sync.WaitGroup
+	for s := range nsh {
+		wg.Add(1)
+		go func(s int) {
+			defer wg.Done()
+			out[s] = f(s*n/nsh, (s+1)*n/nsh)
+		}(s)
+	}
+	wg.Wait()
 	return out
 }
 
@@ -168,26 +201,32 @@ func (d *DispContext) classify(buf []byte, runs []dispRun, stamp func(run, pos i
 	if d == nil || len(runs) == 0 {
 		return
 	}
-	for _, b := range d.bodies {
-		if b.Off < 0 || b.Size < 0 || b.Off+b.Size > len(buf) {
-			continue
-		}
-		k, _ := slices.BinarySearchFunc(runs, b.Off, func(r dispRun, v int) int { return cmp.Compare(r.end, v) })
-		if k >= len(runs) || runs[k].start >= b.Off+b.Size {
-			continue
-		}
-		x86.WalkInsns(buf[b.Off:b.Off+b.Size], func(in x86.Insn) {
-			s, e := b.Off+in.Start, b.Off+in.Start+in.Length
-			for k < len(runs) && runs[k].end <= s {
-				k++
+	// Bodies are disjoint spans of buf, so every byte position each one stamps
+	// belongs to it alone: the walks run concurrently and no two of them write
+	// the same byte of the context. The run cursor k is per body already.
+	shardBodies(len(d.bodies), func(lo, hi int) struct{} {
+		for _, b := range d.bodies[lo:hi] {
+			if b.Off < 0 || b.Size < 0 || b.Off+b.Size > len(buf) {
+				continue
 			}
-			for j := k; j < len(runs) && runs[j].start < e; j++ {
-				for p := max(s, runs[j].start); p < min(e, runs[j].end); p++ {
-					stamp(j, p, insnClass(in, p-s), byte(min(p-s, cmOffMax)))
+			k, _ := slices.BinarySearchFunc(runs, b.Off, func(r dispRun, v int) int { return cmp.Compare(r.end, v) })
+			if k >= len(runs) || runs[k].start >= b.Off+b.Size {
+				continue
+			}
+			x86.WalkInsns(buf[b.Off:b.Off+b.Size], func(in x86.Insn) {
+				s, e := b.Off+in.Start, b.Off+in.Start+in.Length
+				for k < len(runs) && runs[k].end <= s {
+					k++
 				}
-			}
-		})
-	}
+				for j := k; j < len(runs) && runs[j].start < e; j++ {
+					for p := max(s, runs[j].start); p < min(e, runs[j].end); p++ {
+						stamp(j, p, insnClass(in, p-s), byte(min(p-s, cmOffMax)))
+					}
+				}
+			})
+		}
+		return struct{}{}
+	})
 }
 
 // Field classes. §14: only 13.1 % of these sites are genuinely image-spanning

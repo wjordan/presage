@@ -170,7 +170,7 @@ func TestSplitResidual(t *testing.T) {
 		t.Fatalf("flags %#x: the split residual was not chosen", h.Flags)
 	}
 	// Pieces that do not tile the region are refused, not misread.
-	if err := applySplitResidual(make([]byte, 10), []byte{2, 5, 0, 0, 0, 6, 0, 0, 0}, func() *delta.DispContext { return nil }); err == nil {
+	if err := applySplitResidual(make([]byte, 10), []byte{2, 5, 0, 0, 0, 6, 0, 0, 0}, func() *delta.DispContext { return nil }, nil); err == nil {
 		t.Fatal("pieces not covering the region were accepted")
 	}
 }
@@ -263,7 +263,7 @@ func TestDispResidualRoundTrip(t *testing.T) {
 	// And the decoder refills them: applying the stream over the prediction
 	// must reproduce the target byte for byte.
 	out := append([]byte(nil), old...)
-	if err := applySplitResidual(out, withDisp, func() *delta.DispContext { return d }); err != nil {
+	if err := applySplitResidual(out, withDisp, func() *delta.DispContext { return d }, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(out, target) {
@@ -338,7 +338,7 @@ func TestSplitResidualCM(t *testing.T) {
 		t.Fatalf("codecs %v: the CM coder was not chosen", codecs)
 	}
 	out := append([]byte(nil), pred...)
-	if err := applySplitResidual(out, stream, func() *delta.DispContext { return nil }); err != nil {
+	if err := applySplitResidual(out, stream, func() *delta.DispContext { return nil }, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(out, target) {
@@ -351,7 +351,7 @@ func TestSplitResidualCM(t *testing.T) {
 func TestSplitResidualUnknownCodec(t *testing.T) {
 	// One piece, one stream, codec 99.
 	stream := []byte{1, 10, pieceLZ, 1, 4, 1, 99, 0}
-	err := applySplitResidual(make([]byte, 10), stream, func() *delta.DispContext { return nil })
+	err := applySplitResidual(make([]byte, 10), stream, func() *delta.DispContext { return nil }, nil)
 	if err == nil || !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("unknown codec gave %v", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 
 	"github.com/wjordan/presage/delta"
 	"github.com/wjordan/presage/delta/x86"
@@ -135,7 +136,42 @@ type relaEntry struct{ slot, info, addend uint64 }
 // parseRela splits a table into its R_X86_64_RELATIVE entries and the rest,
 // each in table order, and counts how many of the rest come before the
 // first relative entry.
+//
+// The table is parsed up to three times per prediction -- twice by the
+// relocation columns and once by the derived enumeration's E2 -- always from
+// the same bytes of the same image. A million entries of appends is worth
+// doing once, so the result is memoised on the identity of the slice it was
+// given (memo.go). Every caller only reads what it gets back.
+type relaParse struct {
+	b         []byte // retained, so the key's buffer identity stays meaningful
+	rel, tail []relaEntry
+	head      int
+}
+
+var (
+	relaMu    sync.Mutex
+	relaCache = map[bufID]relaParse{}
+)
+
 func parseRela(b []byte) (rel, tail []relaEntry, head int) {
+	key := idOf(b)
+	relaMu.Lock()
+	e, ok := relaCache[key]
+	relaMu.Unlock()
+	if ok {
+		return e.rel, e.tail, e.head
+	}
+	rel, tail, head = parseRelaUncached(b)
+	relaMu.Lock()
+	if len(relaCache) > 4 {
+		clear(relaCache)
+	}
+	relaCache[key] = relaParse{b: b, rel: rel, tail: tail, head: head}
+	relaMu.Unlock()
+	return rel, tail, head
+}
+
+func parseRelaUncached(b []byte) (rel, tail []relaEntry, head int) {
 	for i := 0; i+relaEntrySize <= len(b); i += relaEntrySize {
 		e := relaEntry{
 			slot:   binary.LittleEndian.Uint64(b[i:]),
@@ -173,21 +209,32 @@ func putU64Col(col []byte, i int, v uint64) {
 func relocGapColumn(old []byte, p relocPlan, lookup func(uint64) x86.Target) (gap []byte, proj []relaEntry, projected int) {
 	oldRel, _, _ := parseRela(old[p.OldOff : p.OldOff+p.OldSize])
 	gap = make([]byte, p.RelCount*8)
-	project := func(v uint64) uint64 {
-		if v == 0 {
-			return 0
-		}
-		if t := lookup(v); t.Known {
-			projected++
-			return t.Addr
-		}
-		return v
-	}
+	// Each entry projects on its own -- the oracle is a read-only lookup over
+	// finished tables -- so the million-entry projection runs in shards. The
+	// hit count is summed per shard so it cannot depend on the split.
 	proj = make([]relaEntry, len(oldRel))
 	slots := make([]uint64, len(oldRel))
-	for i, e := range oldRel {
-		proj[i] = relaEntry{slot: project(e.slot), addend: project(e.addend)}
-		slots[i] = proj[i].slot
+	hits := shardRange(len(oldRel), func(lo, hi int) int {
+		n := 0
+		count := func(v uint64) uint64 {
+			if v == 0 {
+				return 0
+			}
+			if t := lookup(v); t.Known {
+				n++
+				return t.Addr
+			}
+			return v
+		}
+		for i := lo; i < hi; i++ {
+			e := oldRel[i]
+			proj[i] = relaEntry{slot: count(e.slot), addend: count(e.addend)}
+			slots[i] = proj[i].slot
+		}
+		return n
+	})
+	for _, n := range hits {
+		projected += n
 	}
 	// The slots are deliberately left in old order. Sorting them looks right
 	// -- the new table is sorted, so a gap is only meaningful between
@@ -251,15 +298,16 @@ func relocTailColumn(old []byte, p relocPlan, lookup func(uint64) x86.Target) []
 		return v
 	}
 	tail := make([]byte, p.TailCount*relaEntrySize)
-	for i, e := range oldTail {
-		if uint64(i) >= p.TailCount {
-			break
+	n := min(len(oldTail), int(p.TailCount))
+	eachRange(n, func(lo, hi int) {
+		for i := lo; i < hi; i++ {
+			e := oldTail[i]
+			o := tail[i*relaEntrySize:]
+			binary.LittleEndian.PutUint64(o, project(e.slot))
+			binary.LittleEndian.PutUint64(o[8:], e.info)
+			binary.LittleEndian.PutUint64(o[16:], project(e.addend))
 		}
-		o := tail[i*relaEntrySize:]
-		binary.LittleEndian.PutUint64(o, project(e.slot))
-		binary.LittleEndian.PutUint64(o[8:], e.info)
-		binary.LittleEndian.PutUint64(o[16:], project(e.addend))
-	}
+	})
 	return tail
 }
 
@@ -281,16 +329,19 @@ func assembleRela(dst, gap, addend, tail []byte, anchor uint64, relCount, headCo
 	copy(dst, tail[:head])
 	tail = tail[head:]
 	dst = dst[head:]
-	slot := anchor
-	for i := uint64(0); i < relCount; i++ {
-		if i > 0 {
-			slot += binary.LittleEndian.Uint64(gap[i*8:])
+	// The slot column is a running sum of the gaps, so a shard starting at lo
+	// needs the sum of gaps [1,lo). Those partial sums are cheap next to the
+	// three stores per entry, and computing them per shard leaves each shard
+	// writing a disjoint run of records.
+	slots := slotsFromGaps(gap, anchor, relCount)
+	eachRange(int(relCount), func(lo, hi int) {
+		for i := lo; i < hi; i++ {
+			o := dst[uint64(i)*relaEntrySize:]
+			binary.LittleEndian.PutUint64(o, slots[i])
+			binary.LittleEndian.PutUint64(o[8:], relTypeRelative)
+			binary.LittleEndian.PutUint64(o[16:], binary.LittleEndian.Uint64(addend[i*8:]))
 		}
-		o := dst[i*relaEntrySize:]
-		binary.LittleEndian.PutUint64(o, slot)
-		binary.LittleEndian.PutUint64(o[8:], relTypeRelative)
-		binary.LittleEndian.PutUint64(o[16:], binary.LittleEndian.Uint64(addend[i*8:]))
-	}
+	})
 	copy(dst[relCount*relaEntrySize:], tail)
 }
 

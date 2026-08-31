@@ -210,26 +210,40 @@ func compressAll(streams [][]byte, cm [][]byte) []zstream {
 	return out
 }
 
-// applySplitResidual is splitResidual's decoder: each piece is decompressed
-// and applied in place over its span of out, which holds the prediction.
-func applySplitResidual(out, stream []byte, disp func() *delta.DispContext) error {
+// piece is one entry of a split residual's table, with the compressed blob of
+// each of its streams.
+type piece struct {
+	length    uint64
+	kind      byte
+	raw, zlen []uint64
+	codec     []byte
+	blobs     [][]byte
+}
+
+// leadStreams is how many of a piece's streams carry no side information, and
+// so can be decoded before the buffer they will be applied over even exists.
+// For a columnar piece they are the gaps and lens columns, which are what the
+// side information for the rest is derived *from*.
+func (p piece) leadStreams() int {
+	if p.kind == pieceLZ {
+		return len(p.raw)
+	}
+	return min(len(p.raw), 2)
+}
+
+// parsePieces reads a split residual's piece table and the blobs behind it.
+func parsePieces(stream []byte, outLen int) ([]piece, error) {
 	r := &rbuf{b: stream}
 	n := r.un(1<<20, "piece count")
-	type piece struct {
-		length    uint64
-		kind      byte
-		raw, zlen []uint64
-		codec     []byte
-	}
 	ps := make([]piece, 0, min(n, 1<<12))
 	var totalLen uint64
 	for i := uint64(0); i < n && r.err == nil; i++ {
 		var p piece
-		p.length = r.un(uint64(len(out)), "piece length")
+		p.length = r.un(uint64(outLen), "piece length")
 		p.kind = r.byte()
 		ns := r.un(delta.ColumnarStreams+delta.DispStreams, "piece stream count")
 		for j := uint64(0); j < ns && r.err == nil; j++ {
-			p.raw = append(p.raw, r.un(uint64(len(out))*4+1<<16, "piece stream length"))
+			p.raw = append(p.raw, r.un(uint64(outLen)*4+1<<16, "piece stream length"))
 			p.zlen = append(p.zlen, r.un(uint64(len(stream)), "piece compressed length"))
 			p.codec = append(p.codec, r.byte())
 		}
@@ -237,20 +251,91 @@ func applySplitResidual(out, stream []byte, disp func() *delta.DispContext) erro
 		ps = append(ps, p)
 	}
 	if r.err != nil {
-		return r.err
+		return nil, r.err
 	}
-	if totalLen != uint64(len(out)) {
-		return fmt.Errorf("%w: pieces cover %d bytes, region is %d", ErrCorrupt, totalLen, len(out))
+	if totalLen != uint64(outLen) {
+		return nil, fmt.Errorf("%w: pieces cover %d bytes, region is %d", ErrCorrupt, totalLen, outLen)
 	}
-	var at uint64
-	for _, p := range ps {
-		blobs := make([][]byte, len(p.raw))
-		for j := range p.raw {
-			blobs[j] = r.take(p.zlen[j])
+	for i := range ps {
+		ps[i].blobs = make([][]byte, len(ps[i].raw))
+		for j := range ps[i].raw {
+			ps[i].blobs[j] = r.take(ps[i].zlen[j])
 			if r.err != nil {
-				return r.err
+				return nil, r.err
 			}
 		}
+	}
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return ps, nil
+}
+
+// splitPrefetch decodes a split residual's side-free streams while the
+// prediction they will be applied over is still being built. Those streams are
+// self-contained coded blobs -- their conditioning is fixed before any of the
+// prediction is known -- so this is the same work moved off the critical path,
+// not different work. It is advisory throughout: anything it cannot do it
+// simply does not do, and applySplitResidual decodes it the usual way and
+// raises the usual error.
+type splitPrefetch struct {
+	done   chan struct{}
+	pieces []piece
+	lead   [][][]byte // per piece, the decoded lead streams; nil entries missing
+}
+
+func prefetchSplitResidual(stream []byte, outLen int) *splitPrefetch {
+	pf := &splitPrefetch{done: make(chan struct{})}
+	go func() {
+		defer close(pf.done)
+		ps, err := parsePieces(stream, outLen)
+		if err != nil {
+			return
+		}
+		lead := make([][][]byte, len(ps))
+		var wg sync.WaitGroup
+		for i, p := range ps {
+			lead[i] = make([][]byte, p.leadStreams())
+			for j := range lead[i] {
+				wg.Add(1)
+				go func(i, j int) {
+					defer wg.Done()
+					if s, err := decodeStream(ps[i].codec[j], ps[i].blobs[j], int(ps[i].raw[j]), nil); err == nil {
+						lead[i][j] = s
+					}
+				}(i, j)
+			}
+		}
+		wg.Wait()
+		pf.pieces, pf.lead = ps, lead
+	}()
+	return pf
+}
+
+// take returns what the prefetch decoded for piece i's stream j, or nil.
+func (pf *splitPrefetch) take(i, j int) []byte {
+	if pf == nil || i >= len(pf.lead) || j >= len(pf.lead[i]) {
+		return nil
+	}
+	return pf.lead[i][j]
+}
+
+// applySplitResidual is splitResidual's decoder: each piece is decompressed
+// and applied in place over its span of out, which holds the prediction.
+func applySplitResidual(out, stream []byte, disp func() *delta.DispContext, pf *splitPrefetch) error {
+	if pf != nil {
+		<-pf.done
+	}
+	ps, err := parsePieces(stream, len(out))
+	if err != nil {
+		return err
+	}
+	if pf != nil && len(pf.pieces) != len(ps) {
+		pf = nil // a table it read differently is a table it cannot speak for
+	}
+	var at uint64
+	for pi, p := range ps {
+		blobs := p.blobs
 		span := out[at : at+p.length]
 		streams := make([][]byte, len(p.raw))
 		var sides []*delta.CMSide
@@ -259,11 +344,45 @@ func applySplitResidual(out, stream []byte, disp func() *delta.DispContext) erro
 			if j < len(sides) {
 				side = sides[j]
 			}
+			if side == nil {
+				if s := pf.take(pi, j); s != nil && len(s) == int(p.raw[j]) {
+					streams[j] = s
+					return nil
+				}
+			}
 			s, err := decodeStream(p.codec[j], blobs[j], int(p.raw[j]), side)
 			if err != nil {
 				return fmt.Errorf("%w: piece: %v", ErrCorrupt, err)
 			}
 			streams[j] = s
+			return nil
+		}
+		// The streams of one round are independent of each other: each is a
+		// self-contained coded blob whose only context is its own side, fixed
+		// before the round starts. Decoding them concurrently costs nothing
+		// and no byte of the result moves. The CM coder runs about a megabyte
+		// a second, so the round's wall is its slowest stream, not their sum.
+		getRange := func(lo, hi int) error {
+			if hi-lo <= 1 {
+				if hi-lo == 1 {
+					return get(lo)
+				}
+				return nil
+			}
+			errs := make([]error, hi-lo)
+			var wg sync.WaitGroup
+			for j := lo; j < hi; j++ {
+				wg.Add(1)
+				go func(j int) { defer wg.Done(); errs[j-lo] = get(j) }(j)
+			}
+			wg.Wait()
+			// Reported in stream order, so the error a corrupt patch draws
+			// does not depend on the scheduler.
+			for _, err := range errs {
+				if err != nil {
+					return err
+				}
+			}
 			return nil
 		}
 		// A byte bucket coded by the CM coder is conditioned on the
@@ -272,14 +391,9 @@ func applySplitResidual(out, stream []byte, disp func() *delta.DispContext) erro
 		// the former and the piece's field context the latter. So those two
 		// columns are decoded first and the conditioning derived from them
 		// and from span, which still holds the prediction.
-		lead := len(streams)
-		if p.kind != pieceLZ {
-			lead = min(lead, 2)
-		}
-		for j := 0; j < lead; j++ {
-			if err := get(j); err != nil {
-				return err
-			}
+		lead := p.leadStreams()
+		if err := getRange(0, lead); err != nil {
+			return err
 		}
 		if lead == 2 && slices.Contains(p.codec[2:], codecCM) {
 			buckets, err := delta.CMColumnarSides(span, streams[0], streams[1],
@@ -289,10 +403,8 @@ func applySplitResidual(out, stream []byte, disp func() *delta.DispContext) erro
 			}
 			sides = colSides(buckets)
 		}
-		for j := lead; j < len(streams); j++ {
-			if err := get(j); err != nil {
-				return err
-			}
+		if err := getRange(lead, len(streams)); err != nil {
+			return err
 		}
 		var err error
 		switch {
@@ -310,7 +422,7 @@ func applySplitResidual(out, stream []byte, disp func() *delta.DispContext) erro
 		}
 		at += p.length
 	}
-	return r.done()
+	return nil
 }
 
 // decodeStream reverses one entry of a piece's stream table. An id neither

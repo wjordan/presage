@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"slices"
+	"sync"
 
 	"github.com/wjordan/presage/delta/x86"
 	"github.com/wjordan/presage/internal/cz"
@@ -64,9 +65,37 @@ func fieldSites(text []byte, maps []mapping) []fieldSite {
 		bases = append(bases, int(m.Dst))
 	}
 	res := x86.WalkBodies(bodies, runtime.GOMAXPROCS(0))
-	var out []fieldSite
-	for k, refs := range res {
-		out = keep(out, refs, bases[k])
+	// The gather is sharded over the bodies and each shard sized from its own
+	// reference count, so a Chrome window's 12.7 M sites are neither collected
+	// on one core nor grown a slice at a time. Shards are concatenated in body
+	// order, which is what the serial gather produced.
+	nsh := workersFor(len(res))
+	shards := make([][]fieldSite, nsh)
+	var wg sync.WaitGroup
+	for s := 0; s < nsh; s++ {
+		wg.Add(1)
+		go func(s int) {
+			defer wg.Done()
+			lo, hi := s*len(res)/nsh, (s+1)*len(res)/nsh
+			n := 0
+			for k := lo; k < hi; k++ {
+				n += len(res[k])
+			}
+			part := make([]fieldSite, 0, n)
+			for k := lo; k < hi; k++ {
+				part = keep(part, res[k], bases[k])
+			}
+			shards[s] = part
+		}(s)
+	}
+	wg.Wait()
+	n := 0
+	for _, p := range shards {
+		n += len(p)
+	}
+	out := make([]fieldSite, 0, n)
+	for _, p := range shards {
+		out = append(out, p...)
 	}
 	return out
 }
@@ -151,12 +180,16 @@ type fieldStats struct {
 // remapDomain is the sorted list of distinct addresses the prediction points
 // at. The decoder can build it because it holds the prediction.
 func remapDomain(text []byte, textAddr uint64, sites []fieldSite) []uint64 {
-	out := make([]uint64, len(sites))
-	for i, s := range sites {
-		out[i] = s.addr(text, textAddr)
-	}
-	slices.Sort(out)
-	return slices.Compact(out)
+	// Each site reads four bytes of its own, so the addresses come out in
+	// shards and go straight into the parallel sort (psort.go).
+	shards := shardRange(len(sites), func(lo, hi int) []uint64 {
+		part := make([]uint64, hi-lo)
+		for i := lo; i < hi; i++ {
+			part[i-lo] = sites[i].addr(text, textAddr)
+		}
+		return part
+	})
+	return sortDedupShards(shards)
 }
 
 // remapTargets is the address set a remapped field's new target is named
@@ -367,11 +400,22 @@ func applyFieldFix(text []byte, textAddr uint64, maps []mapping, b []byte) (fiel
 		(p.Basis == remapIndexBasis && len(p.RemapTag) != (st.Remaps+7)/8) {
 		return st, errors.New("trailing address remap data")
 	}
-	for _, s := range sites {
-		if to, ok := remap[s.addr(text, textAddr)]; ok {
-			s.put(text, textAddr, to)
-			st.Remade++
+	// Every site owns four bytes no other site owns, and the remap table is
+	// finished and read-only by here, so the replay runs over disjoint slices
+	// of text in parallel. The count is summed per shard so it does not depend
+	// on the split.
+	remade := shardRange(len(sites), func(lo, hi int) int {
+		n := 0
+		for _, s := range sites[lo:hi] {
+			if to, ok := remap[s.addr(text, textAddr)]; ok {
+				s.put(text, textAddr, to)
+				n++
+			}
 		}
+		return n
+	})
+	for _, n := range remade {
+		st.Remade += n
 	}
 
 	fir, fdr := &planReader{b: p.FieldIndex}, &planReader{b: p.FieldDelta}

@@ -7,8 +7,6 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/zeebo/blake3"
-
 	"github.com/wjordan/presage/delta/x86"
 )
 
@@ -85,7 +83,8 @@ func sourceExtents(srcs []uint64, oldText []byte) map[uint64]uint64 {
 // and the map alone.
 func referenceTargets(oldText []byte, maps []mapping, oldAddr uint64) []uint64 {
 	bySrc := slices.Clone(maps)
-	slices.SortFunc(bySrc, func(a, b mapping) int { return cmpU(a.Src, b.Src) })
+	sortByKey(bySrc, func(m mapping) uint64 { return m.Src },
+		func(a, b mapping) int { return cmpU(a.Src, b.Src) })
 	var bodies []x86.Body
 	var bases []uint64
 	var prevSrc uint64
@@ -101,59 +100,85 @@ func referenceTargets(oldText []byte, maps []mapping, oldAddr uint64) []uint64 {
 		bases = append(bases, oldAddr+m.Src)
 	}
 	res := x86.WalkBodies(bodies, runtime.GOMAXPROCS(0))
-	out := []uint64{0}
-	for k, refs := range res {
-		body := bodies[k].Code
-		base := bases[k]
-		for _, ref := range refs {
-			disp, ok := readDisplacement(body, ref)
-			if !ok {
-				continue
+	// Gathered in shards over the bodies -- each body's displacements are read
+	// independently -- and each shard sized from its own reference count, so
+	// the 12.8 M-entry domain of a Chrome window neither grows a slice nor
+	// sorts on one core.
+	nsh := workersFor(len(res))
+	shards := make([][]uint64, nsh+1)
+	shards[0] = []uint64{0} // the leading zero, so an index always exists
+	var wg sync.WaitGroup
+	for s := 0; s < nsh; s++ {
+		wg.Add(1)
+		go func(s int) {
+			defer wg.Done()
+			lo, hi := s*len(res)/nsh, (s+1)*len(res)/nsh
+			n := 0
+			for k := lo; k < hi; k++ {
+				n += len(res[k])
 			}
-			out = append(out, uint64(int64(base+uint64(ref.Next))+disp))
-		}
+			part := make([]uint64, 0, n)
+			for k := lo; k < hi; k++ {
+				body := bodies[k].Code
+				base := bases[k]
+				for _, ref := range res[k] {
+					disp, ok := readDisplacement(body, ref)
+					if !ok {
+						continue
+					}
+					part = append(part, uint64(int64(base+uint64(ref.Next))+disp))
+				}
+			}
+			shards[s+1] = part
+		}(s)
 	}
-	slices.Sort(out)
-	return slices.Compact(out)
+	wg.Wait()
+	return sortDedupShards(shards)
 }
 
 // The target domain is a pure function of the old text and the map, and an
-// encode asks for it several times (each prediction decodes the plan), so
-// it is memoised in-process by content.
+// encode asks for it several times (each prediction decodes the plan), so it
+// is memoised in-process. The key is the identity of the text buffer plus the
+// source column of the map -- the entry retains the text, so a matching
+// buffer is the same bytes (memo.go), and the source column is small enough
+// to compare outright. Hashing the text itself was 0.12 s of every apply, to
+// build a key for a cache an apply never hits.
+type targetsKey struct {
+	text    bufID
+	oldAddr uint64
+}
+
+type targetsEntry struct {
+	text []byte // retained, so the key's buffer identity stays meaningful
+	srcs []uint64
+	v    []uint64
+}
+
 var (
 	targetsMu    sync.Mutex
-	targetsCache = map[[32]byte][]uint64{}
+	targetsCache = map[targetsKey][]targetsEntry{}
 )
 
 func cachedReferenceTargets(oldText []byte, maps []mapping, oldAddr uint64) []uint64 {
-	h := blake3.New()
-	h.Write(oldText)
-	var buf [8]byte
-	put := func(v uint64) {
-		for i := range buf {
-			buf[i] = byte(v >> (8 * i))
-		}
-		h.Write(buf[:])
-	}
-	put(oldAddr)
+	key := targetsKey{text: idOf(oldText), oldAddr: oldAddr}
+	srcs := make([]uint64, 0, 2*len(maps))
 	for _, m := range maps {
-		put(m.Src)
-		put(m.SrcSize)
+		srcs = append(srcs, m.Src, m.SrcSize)
 	}
-	var key [32]byte
-	copy(key[:], h.Sum(nil))
 	targetsMu.Lock()
-	v, ok := targetsCache[key]
-	targetsMu.Unlock()
-	if ok {
-		return v
+	for _, e := range targetsCache[key] {
+		if slices.Equal(e.srcs, srcs) {
+			targetsMu.Unlock()
+			return e.v
+		}
 	}
-	v = referenceTargets(oldText, maps, oldAddr)
+	targetsMu.Unlock()
+	v := referenceTargets(oldText, maps, oldAddr)
 	targetsMu.Lock()
 	if len(targetsCache) > 8 {
 		clear(targetsCache)
 	}
-	targetsCache[key] = v
+	targetsCache[key] = append(targetsCache[key], targetsEntry{text: oldText, srcs: srcs, v: v})
 	targetsMu.Unlock()
 	return v
 }
@@ -454,19 +479,16 @@ type addressLookup struct {
 
 func newAddressLookup(p predictionPlan) *addressLookup {
 	bySrc := slices.Clone(p.Maps)
-	slices.SortFunc(bySrc, func(a, b mapping) int {
+	sortByKey(bySrc, func(m mapping) uint64 { return m.Src }, func(a, b mapping) int {
 		if a.Src != b.Src {
 			return cmpU(a.Src, b.Src)
 		}
 		return cmpU(a.Dst, b.Dst)
 	})
-	return &addressLookup{
-		p:      p,
-		bySrc:  bySrc,
-		points: newPageIndex(len(p.Points), func(i int) uint64 { return p.Points[i].Old }, nil),
-		maps: newPageIndex(len(bySrc), func(i int) uint64 { return bySrc[i].Src },
-			func(i int) uint64 { return bySrc[i].Src + bySrc[i].SrcSize }),
-	}
+	pi := newPageIndex(len(p.Points), func(i int) uint64 { return p.Points[i].Old }, nil)
+	mi := newPageIndex(len(bySrc), func(i int) uint64 { return bySrc[i].Src },
+		func(i int) uint64 { return bySrc[i].Src + bySrc[i].SrcSize })
+	return &addressLookup{p: p, bySrc: bySrc, points: pi, maps: mi}
 }
 
 func (l *addressLookup) pointTarget(addr uint64) x86.Target {
@@ -591,9 +613,7 @@ func predictDecoded(oldText []byte, p predictionPlan, lookupFn func(uint64) x86.
 		return nil, x86.Stats{}, errors.New("prediction is too large")
 	}
 	out := make([]byte, int(p.TargetLen))
-	for i := range out {
-		out[i] = 0xcc
-	}
+	fill(out, 0xcc)
 	if lookupFn == nil {
 		lookupFn = newAddressLookup(p).target
 	}
