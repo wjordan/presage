@@ -528,3 +528,27 @@ today (the five-way split predates `-dispcol`, which drained the noise the
 split separated — re-run that decision); and the 286 K `gaps` column is
 CM-proof — its lever is instruction-quantized positions (§16.1), not a
 better coder.
+
+**Ported to production** (`delta/cmcoder.go`, split-residual codec id 3,
+container v3, 2026-08-31): per-stream choice, CM only where it beats
+brotli. Byte-exact on all pairs; encode flat; apply +1.0 s (Chrome) /
++1.9 s (libxul):
+
+| pair | before | after CM | delta |
+|---|---:|---:|---:|
+| chrome .169→.173 | 2,412,635 | **2,303,210** | −109,425 |
+| libxul 154.0→154.0.1 | 2,942,865 | **2,705,570** | −237,295 |
+| librustc_driver | 6,564,155 | **6,052,023** | −512,132 |
+
+Chrome landed within 1 % of the harness prediction; libxul/rustc gain
+2–5× more — their corrections are longer replacement runs, where a
+prediction byte under each coded byte pays most. The encoder chose CM
+for 28/34 streams (Chrome), declined the `gaps` column (confirming
+CM-proof), and won several unconditioned streams on the match model
+alone. Two divergences from the harness, both diagnosed: the −2,960
+bucket concatenation *inverts* in production (+10,862 — xz needed the
+shared dictionary; separate CM model banks beat any shared context),
+and the probe's `math.Exp` mixer was replaced with integer
+squash/stretch tables (lpaq) — floats in the coding path were a latent
+cross-platform decode divergence. Field-class contexts (~a ninth of the
+harness win) deferred; they attach at the `DispContext` seam.
