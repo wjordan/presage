@@ -1596,6 +1596,9 @@ func runProbes(name string, planBytes, pred, target []byte, oldImage, newImage *
 	if onlyProbes["instpos"] && name == "corrected-fields" {
 		probeInstructionPositions(predText, targetText)
 	}
+	if onlyProbes["cmix"] && name == "corrected-fields" {
+		probeCMCoder(predText, targetText, structure.Maps, nt, len(target), newImage.Sections, pred, target)
+	}
 	if onlyProbes["dispcol"] && name == "corrected-fields" {
 		probeDisplacementColumn(predText, targetText, structure.Maps, nt.Addr)
 	}
