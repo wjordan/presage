@@ -1584,6 +1584,9 @@ func runProbes(name string, planBytes, pred, target []byte, oldImage, newImage *
 	if onlyProbes["sidecar"] && name == "corrected-fields" {
 		probeSidecar(planBytes, structure, oldImage, newImage)
 	}
+	if onlyProbes["derivedmap"] && name == "corrected-fields" {
+		probeDerivedMap(planBytes, structure, oldImage, newImage)
+	}
 	if onlyProbes["blocksidecar"] && name == "corrected-fields" {
 		probeBlockSidecar(planBytes, structure, oldImage, newImage)
 	}
