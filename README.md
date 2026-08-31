@@ -122,3 +122,8 @@ benchmarks isolate one model's contribution.
 | [`docs/general/baselines.md`](docs/general/baselines.md) | the pairs, tools and flags behind the table above |
 | [`docs/general/research/`](docs/general/research/) | the measurements the design rests on, including the Chrome ELF and Firefox MAR studies |
 | [`docs/research/`](docs/research/) | earlier research on Go binary layout and delta encoding |
+
+## License
+
+Copyright 2026 Will Jordan. Licensed under the Apache License, Version 2.0;
+see [`LICENSE`](LICENSE).
