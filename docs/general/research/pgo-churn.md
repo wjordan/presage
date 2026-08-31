@@ -372,6 +372,24 @@ decay — the enumeration re-derives from the patched bytes); the carried
 table survives as an optional ~−40 K refinement for managed updaters
 that can hold per-install state.
 
+**Built as the `derived-map` rung** (`derivedrung.go`, 2026-08-31): a
+full decoding mode — the decoder derives the enumeration from the old
+image alone (0.5–0.7 s, one parallel sweep + `.rela.dyn` parse), the
+stream ships the enumeration length so a divergent derivation refuses
+the plan rather than decoding shifted, and with no hash join the
+correspondence layer *vanishes* (658 drops / 319 inserts / 0 exceptions
+against the sidecar's 1,333 / 1,406 / 1,352). Measured with `-dispcol`,
+both pairs, byte-identical predictions, byte-exact replay:
+
+| pair | corrected-fields | **derived-map (stateless)** | sidecar-map (carried) |
+|---|---:|---:|---:|
+| .169→.173 | 2,601,632 | **2,505,164 (−96,468)** | 2,465,764 (−135,868) |
+| .137→.169 | 2,593,760 | **2,497,996 (−95,764)** | 2,457,776 (−135,984) |
+
+71.0 % / 70.4 % of the carried win, generalizing across pairs within
+704 bytes; 684 bytes better than the probe's splice (stream framing
+shifted xz context favourably).
+
 ### 5.2 The block-map probe, measured dead
 
 `bench/elfpredict -probes blocksidecar` (`blocksidecar.go`), run
