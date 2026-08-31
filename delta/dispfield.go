@@ -115,6 +115,81 @@ func (d *DispContext) sites(buf []byte, runs []dispRun) []dispSite {
 	return out
 }
 
+// ---------------------------------------------------------------------------
+// per-byte field context for the CM coder (cmside.go)
+
+// Byte classes for the CM coder's field context. A correction byte is
+// classified by where it sits in the instruction the *prediction* holds at
+// that position — not the target's, which the decoder does not have yet.
+// Where the two agree on the instruction (they usually do: a recompile moves
+// a call target, not the opcode around it) this says whether the byte is a
+// displacement byte and which one, which is exactly the split a whole-byte
+// context cannot make.
+const (
+	fieldNone  = iota // no instruction the length decoder accepted covers it
+	fieldPlain        // an instruction with no PC-relative field
+	fieldLead         // before the field: prefixes, opcode, modrm, sib
+	fieldByte0        // the field's low byte, then its next three
+	fieldByte1
+	fieldByte2
+	fieldByte3
+	fieldTail // after the field: a trailing immediate
+)
+
+// cmOffMax caps the offset-within-instruction context. x86 instructions run
+// to 15 bytes, so nothing is actually clamped; the constant is here so the
+// context's width is stated where the hash in cmcoder.go relies on it.
+const cmOffMax = 15
+
+// insnClass places byte r of in.
+func insnClass(in x86.Insn, r int) byte {
+	if in.N == 0 {
+		return fieldPlain
+	}
+	switch fo := in.Off - in.Start; {
+	case r < fo:
+		return fieldLead
+	case r < fo+in.N:
+		return byte(fieldByte0 + min(r-fo, 3))
+	default:
+		return fieldTail
+	}
+}
+
+// classify stamps a field class and an offset-within-instruction onto every
+// byte of buf that lies inside one of runs, by walking only the bodies those
+// runs touch — the same skip-most-bodies test sites uses, and most bodies are
+// untouched. buf is the prediction on both sides, so both derive the same
+// stamps; a byte no body covers keeps fieldNone.
+//
+// stamp is called with the index of the run the byte falls in and its position
+// in buf. runs must be sorted by start and non-overlapping.
+func (d *DispContext) classify(buf []byte, runs []dispRun, stamp func(run, pos int, cls, off byte)) {
+	if d == nil || len(runs) == 0 {
+		return
+	}
+	for _, b := range d.bodies {
+		if b.Off < 0 || b.Size < 0 || b.Off+b.Size > len(buf) {
+			continue
+		}
+		k, _ := slices.BinarySearchFunc(runs, b.Off, func(r dispRun, v int) int { return cmp.Compare(r.end, v) })
+		if k >= len(runs) || runs[k].start >= b.Off+b.Size {
+			continue
+		}
+		x86.WalkInsns(buf[b.Off:b.Off+b.Size], func(in x86.Insn) {
+			s, e := b.Off+in.Start, b.Off+in.Start+in.Length
+			for k < len(runs) && runs[k].end <= s {
+				k++
+			}
+			for j := k; j < len(runs) && runs[j].start < e; j++ {
+				for p := max(s, runs[j].start); p < min(e, runs[j].end); p++ {
+					stamp(j, p, insnClass(in, p-s), byte(min(p-s, cmOffMax)))
+				}
+			}
+		})
+	}
+}
+
 // Field classes. §14: only 13.1 % of these sites are genuinely image-spanning
 // calls to a known function start; 79.4 % are jumps inside their own function,
 // which want a byte basis instead. The rest escape to an absolute address.

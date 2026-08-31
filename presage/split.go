@@ -111,11 +111,17 @@ func codePiece(pred, target []byte, disp *delta.DispContext) (p pieceCode, err e
 	if len(cols) != delta.ColumnarStreams {
 		colKind = pieceColumnarDisp
 	}
-	sides, err := delta.CMColumnarSides(pred, cols[0], cols[1])
+	sides, err := delta.CMColumnarSides(pred, cols[0], cols[1], disp)
 	if err != nil {
 		return p, err
 	}
 	p.kind, p.streams = pieceLZ, [][]byte{corr}
+	// The lz shape's single stream is not offered the CM coder. It has no
+	// positional alignment with the prediction -- it is a flagged copy/replace
+	// program, not a byte column -- so the coder would run on its generic and
+	// match models alone, and measured that way it is worth -1,187 on Chrome
+	// and nothing at all on libxul for +7 s of encode. brotli is already good
+	// at this stream; the CM win lives entirely in pred[i].
 	lzT, colT := trialAll(p.streams, nil), trialAll(cols, colSides(sides))
 	won := lzT
 	if colT.total < lzT.total {
@@ -146,10 +152,9 @@ type zstream struct {
 // applySplitResidual.
 const codecCM byte = 3
 
-// cmMinStream is the smallest stream the CM coder is offered. It runs at
-// about 1 MB/s each way; below a few kilobytes its adaptive models have not
-// paid for themselves and the attempt is only encode time.
-const cmMinStream = 4 << 10
+// cmMinStream is the smallest stream the CM coder is offered; delta gates the
+// field-context walk on the same threshold.
+const cmMinStream = delta.CMMinStream
 
 // colSides maps the per-bucket side information onto the columnar stream
 // table, where the buckets start after the gaps and lens columns.
@@ -262,10 +267,11 @@ func applySplitResidual(out, stream []byte, disp func() *delta.DispContext) erro
 			return nil
 		}
 		// A byte bucket coded by the CM coder is conditioned on the
-		// prediction under each of its bytes, which the gaps and lens
-		// columns before it fix. So those two are decoded first and the
-		// conditioning derived from them and from span, which still holds
-		// the prediction.
+		// prediction under each of its bytes, and on the instruction that
+		// prediction byte sits in — the gaps and lens columns before it fix
+		// the former and the piece's field context the latter. So those two
+		// columns are decoded first and the conditioning derived from them
+		// and from span, which still holds the prediction.
 		lead := len(streams)
 		if p.kind != pieceLZ {
 			lead = min(lead, 2)
@@ -276,7 +282,8 @@ func applySplitResidual(out, stream []byte, disp func() *delta.DispContext) erro
 			}
 		}
 		if lead == 2 && slices.Contains(p.codec[2:], codecCM) {
-			buckets, err := delta.CMColumnarSides(span, streams[0], streams[1])
+			buckets, err := delta.CMColumnarSides(span, streams[0], streams[1],
+				disp().Restrict(int(at), int(at)+int(p.length)))
 			if err != nil {
 				return fmt.Errorf("%w: piece: %v", ErrCorrupt, err)
 			}

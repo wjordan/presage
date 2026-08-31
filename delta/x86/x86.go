@@ -189,6 +189,34 @@ func WalkReferences(code []byte, pc uint64, visit func(Reference)) {
 	}
 }
 
+// Insn is one instruction the length decoder accepted: where it starts, how
+// long it is, and its PC-relative field. N is 0 when it has none, and Off is
+// meaningful only when N is not.
+type Insn struct {
+	Start, Length int
+	Off, N        int
+}
+
+// WalkInsns visits every instruction in code, in order. It is WalkReferences
+// without the reference filter and without the pc arithmetic: the same step,
+// the same skip-a-byte recovery, so the two passes place instruction
+// boundaries identically. A byte no visit covers belongs to no instruction the
+// decoder could read.
+func WalkInsns(code []byte, visit func(Insn)) {
+	for i := 0; i < len(code); {
+		length, off, n, ok := step(code[i:])
+		if !ok {
+			i++
+			continue
+		}
+		if n != 1 && n != 2 && n != 4 {
+			off, n = 0, 0
+		}
+		visit(Insn{Start: i, Length: length, Off: i + off, N: n})
+		i += length
+	}
+}
+
 // Body is one code region to walk: its bytes and the pc its first byte lives
 // at. The whole-image predictor already holds .text as a list of independent
 // function bodies, so a parallel walk needs no instruction-boundary guessing.

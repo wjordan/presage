@@ -351,10 +351,9 @@ const CMSelMax = 8
 //   - Sel is the mixer selector, 0..CMSelMax-1 -- the byte's column, so a
 //     displacement's high byte and its low byte do not share weights.
 //   - Cls and Off are the instruction field the byte sits in and its offset
-//     within the instruction. They are the seam for the field context the
-//     harness priced at a ninth of the win; nothing supplies them yet,
-//     because deriving them costs an x86 walk of the prediction at both
-//     ends and the DispContext they would come from is per-piece.
+//     within the instruction, from an x86 walk of the prediction under the
+//     piece's DispContext (dispfield.go). They separate a call target's high
+//     byte from its low one, which no byte-history context can.
 type CMSide struct {
 	Pred []byte
 	Sel  []byte
