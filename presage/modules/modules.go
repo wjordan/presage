@@ -14,10 +14,16 @@ import (
 // symbols for reference 0 and the target (nil for none); decoders pass
 // nothing.
 func Registry(syms ...symbols.Reader) *presage.Registry {
+	return RegistryStats(nil, syms...)
+}
+
+// RegistryStats is Registry with the ELF module reporting into elfStats,
+// so an encoder can print how the function map was built.
+func RegistryStats(elfStats *elfmod.Stats, syms ...symbols.Reader) *presage.Registry {
 	var s [2]symbols.Reader
 	copy(s[:], syms)
 	r := presage.NewRegistry()
 	r.Add(gomod.Module{})
-	r.Add(elfmod.Module{Symbols: s})
+	r.Add(elfmod.Module{Symbols: s, Stats: elfStats})
 	return r
 }

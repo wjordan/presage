@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/wjordan/presage/presage"
+	"github.com/wjordan/presage/presage/elfmod"
 	"github.com/wjordan/presage/presage/modules"
 	"github.com/wjordan/presage/presage/symbols"
 )
@@ -88,7 +89,8 @@ func diff(args []string) error {
 	if err != nil {
 		return err
 	}
-	reg := modules.Registry(syms[0], syms[1])
+	var elfStats elfmod.Stats
+	reg := modules.RegistryStats(&elfStats, syms[0], syms[1])
 	allowed, err := moduleIDs(reg, *only)
 	if err != nil {
 		return err
@@ -118,6 +120,9 @@ func diff(args []string) error {
 		}
 		for _, n := range st.Notes {
 			fmt.Fprintf(os.Stderr, "  %s\n", n)
+		}
+		for _, n := range elfStats.Notes {
+			fmt.Fprintf(os.Stderr, "  elf: %s\n", n)
 		}
 	}
 	return nil
