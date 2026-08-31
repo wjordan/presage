@@ -1115,6 +1115,8 @@ func run() error {
 	flag.BoolVar(&noGoText, "no-go-text", false, "keep the Go-table module out of .text when there are no equivalences")
 	noGoTables := flag.Bool("no-go-tables", false, "leave the Go-table module out even for a Go binary")
 	ownMap := flag.Bool("own-map", false, "transmit the symbol-built function map even when the Go-table module could derive one")
+	flag.StringVar(&sidecarTablePath, "sidecar-table", "", "carried symbol table the sidecar rung joins against, instead of a fresh hash of the old binary's symbols")
+	flag.StringVar(&sidecarEmitPath, "sidecar-emit", "", "write the table the client would hold after this patch (kept units keep their carried hashes, inserts get the one shipped hash)")
 	outDir := flag.String("out", "", "optional artifact directory")
 	reference := flag.Int("reference", 0, "reference whole-patch byte count")
 	equivalencePatch := flag.String("equivalence-patch", "", "optional raw patch supplying whole-file equivalences")

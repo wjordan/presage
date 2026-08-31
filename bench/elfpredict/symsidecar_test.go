@@ -163,6 +163,48 @@ func TestSidecarNormalPlanUnchanged(t *testing.T) {
 	}
 }
 
+// TestSidecarRollForward covers the two-hop path: the table the decoder can
+// compute after hop 1 must describe hop 1's new layout exactly, inherit the
+// carried hashes for kept units, and carry the one shipped hash per insert --
+// and hop 2 must then encode against it.
+func TestSidecarRollForward(t *testing.T) {
+	oldNamed, newNamed, maps := synthSidecar()
+	d, oldUnits, _, err := buildSidecarDelta(oldNamed, newNamed, maps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp, err := replaySidecar(d, oldUnits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolled := rollForwardTable(rp, oldUnits)
+	fresh := hashNamedUnits(newNamed)
+	if len(rolled) != len(fresh) {
+		t.Fatalf("rolled %d units, want %d", len(rolled), len(fresh))
+	}
+	for i := range rolled {
+		if rolled[i].Off != fresh[i].Off || rolled[i].Size != fresh[i].Size {
+			t.Fatalf("unit %d rolled to %d+%d, want %d+%d", i,
+				rolled[i].Off, rolled[i].Size, fresh[i].Off, fresh[i].Size)
+		}
+	}
+	// new 3 is the insert; new 0 keeps old 0's hashes.
+	if len(rolled[3].Hashes) != 1 || rolled[3].Hashes[0] != nameHash64("brand new") {
+		t.Fatalf("insert rolled with %v", rolled[3].Hashes)
+	}
+	if !slices.Equal(rolled[0].Hashes, oldUnits[0].Hashes) {
+		t.Fatalf("kept unit did not inherit its carried hashes: %v", rolled[0].Hashes)
+	}
+	// Hop 2 against the rolled table, with an identity map.
+	var next []mapping
+	for _, u := range fresh {
+		next = append(next, mapping{Src: u.Off, SrcSize: u.Size, Dst: u.Off, DstSize: u.Size})
+	}
+	if _, _, err := buildSidecarDeltaFrom(rolled, nil, newNamed, next); err != nil {
+		t.Fatalf("hop 2 against the rolled table: %v", err)
+	}
+}
+
 func TestNameHash64Stable(t *testing.T) {
 	// FNV-1a of "a" and of the empty string, so a change of hash function is
 	// caught rather than silently invalidating every installed sidecar.

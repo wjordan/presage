@@ -266,8 +266,17 @@ type sidecarStats struct {
 // buildSidecarDelta produces the stream and, as its own gate, replays the
 // decoder against it and checks the reconstruction is the shipped map exactly.
 func buildSidecarDelta(oldNamed, newNamed []namedUnit, maps []mapping) (*sidecarDelta, []sidecarUnit, sidecarStats, error) {
+	d, st, err := buildSidecarDeltaFrom(hashNamedUnits(oldNamed), oldNamed, newNamed, maps)
+	return d, hashNamedUnits(oldNamed), st, err
+}
+
+// buildSidecarDeltaFrom is the same encoder against a carried table that is
+// not necessarily the fresh hash of oldNamed -- on hop N+1 it is the table the
+// previous patch rolled forward, whose hashes are as stale as that roll left
+// them. oldNamed may be nil then; it feeds only the collision count.
+func buildSidecarDeltaFrom(oldUnits []sidecarUnit, oldNamed, newNamed []namedUnit, maps []mapping) (*sidecarDelta, sidecarStats, error) {
 	var st sidecarStats
-	oldUnits, newUnits := hashNamedUnits(oldNamed), hashNamedUnits(newNamed)
+	newUnits := hashNamedUnits(newNamed)
 	st.OldUnits, st.NewUnits = len(oldUnits), len(newUnits)
 	st.Collisions = hashCollisions(oldNamed, newNamed)
 	joined := sidecarHashJoin(oldUnits, newUnits)
@@ -435,20 +444,20 @@ func buildSidecarDelta(oldNamed, newNamed []namedUnit, maps []mapping) (*sidecar
 	// map back, field for field, in order.
 	got, err := reconstructMaps(d, oldUnits)
 	if err != nil {
-		return nil, nil, st, fmt.Errorf("sidecar reconstruction failed: %w", err)
+		return nil, st, fmt.Errorf("sidecar reconstruction failed: %w", err)
 	}
 	if len(got) != len(sorted) {
-		return nil, nil, st, fmt.Errorf("sidecar reconstruction produced %d mappings, want %d", len(got), len(sorted))
+		return nil, st, fmt.Errorf("sidecar reconstruction produced %d mappings, want %d", len(got), len(sorted))
 	}
 	for i := range got {
 		// Copy is carried by the plan's own bitmap, not by this stream.
 		want := sorted[i]
 		want.Copy = false
 		if got[i] != want {
-			return nil, nil, st, fmt.Errorf("sidecar reconstruction differs at mapping %d: %+v want %+v", i, got[i], want)
+			return nil, st, fmt.Errorf("sidecar reconstruction differs at mapping %d: %+v want %+v", i, got[i], want)
 		}
 	}
-	return d, oldUnits, st, nil
+	return d, st, nil
 }
 
 // nextKeptTable[i] is the first kept old unit at or after i, so nextKept[oi+1]
@@ -468,9 +477,81 @@ func nextKeptTable(kept []bool) []int {
 
 func alignUp(v, a uint64) uint64 { return v + (a-v%a)%a }
 
+// sidecarReplay is everything the decoder derives from the carried table and
+// the delta stream before it emits a mapping: which old unit each new unit
+// joins to, where the correspondence exceptions move that, the replayed
+// layout, and the one hash shipped for each insert. reconstructMaps needs the
+// first four; rolling the table forward needs the join and the hashes.
+type sidecarReplay struct {
+	Join    []int // per new unit, the joined old index; -1 for an insert
+	Src     []int // Join with the correspondence exceptions applied
+	Offs    []uint64
+	Sizes   []uint64
+	InsHash map[int]uint64
+}
+
 // reconstructMaps is the decoder. Its only inputs are the carried table and
 // the delta stream; it never sees a symbol name or the new binary.
 func reconstructMaps(d *sidecarDelta, oldUnits []sidecarUnit) ([]mapping, error) {
+	rp, err := replaySidecar(d, oldUnits)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]mapping, 0, d.Maps)
+	for ni := 0; ni < len(rp.Src); ni++ {
+		if rp.Src[ni] < 0 {
+			continue
+		}
+		o := oldUnits[rp.Src[ni]]
+		out = append(out, mapping{Src: o.Off, SrcSize: o.Size, Dst: rp.Offs[ni], DstSize: rp.Sizes[ni]})
+	}
+	// Anything the unit model could not express.
+	rr := &planReader{b: d.Raw}
+	var prevRawDst uint64
+	for !rr.done() {
+		dst := prevRawDst + rr.u()
+		dstSize := rr.u()
+		s := rr.u()
+		srcSize := rr.u()
+		if rr.err != nil {
+			return nil, errors.New("invalid unrepresentable mapping")
+		}
+		out = append(out, mapping{Src: s, SrcSize: srcSize, Dst: dst, DstSize: dstSize})
+		prevRawDst = dst
+	}
+	if rr.err != nil {
+		return nil, errors.New("invalid unrepresentable mapping")
+	}
+	slices.SortFunc(out, func(a, b mapping) int {
+		if a.Dst != b.Dst {
+			return cmpU(a.Dst, b.Dst)
+		}
+		return cmpU(a.Src, b.Src)
+	})
+	return out, nil
+}
+
+// rollForwardTable is the client's post-patch table, computed the only way the
+// client can compute it: from the table it already held plus the delta the
+// patch shipped. A kept unit inherits its old row's hashes -- including the
+// staleness those rows already carry -- an inserted unit gets the single hash
+// the stream shipped for it, and the addresses and sizes come from the
+// replayed layout. No new symbol names enter anywhere.
+func rollForwardTable(rp *sidecarReplay, oldUnits []sidecarUnit) []sidecarUnit {
+	out := make([]sidecarUnit, len(rp.Offs))
+	for ni := range out {
+		var hs []uint64
+		if oi := rp.Join[ni]; oi >= 0 {
+			hs = slices.Clone(oldUnits[oi].Hashes)
+		} else {
+			hs = []uint64{rp.InsHash[ni]}
+		}
+		out[ni] = sidecarUnit{Off: rp.Offs[ni], Size: rp.Sizes[ni], Hashes: hs}
+	}
+	return out
+}
+
+func replaySidecar(d *sidecarDelta, oldUnits []sidecarUnit) (*sidecarReplay, error) {
 	n := int(d.NewUnits)
 	if n < 0 || uint64(n) != d.NewUnits {
 		return nil, errors.New("implausible new-unit count")
@@ -502,6 +583,7 @@ func reconstructMaps(d *sidecarDelta, oldUnits []sidecarUnit) ([]mapping, error)
 	sizes := make([]uint64, n)
 	ip, is := &planReader{b: d.InsertPos}, &planReader{b: d.InsertSize}
 	ih := &planReader{b: d.InsertHash}
+	insHash := map[int]uint64{}
 	prev, first := 0, true
 	for !ip.done() {
 		gap := int(ip.u())
@@ -520,6 +602,7 @@ func reconstructMaps(d *sidecarDelta, oldUnits []sidecarUnit) ([]mapping, error)
 		}
 		// The hash is not used to rebuild the map; it is what lets the client
 		// roll its carried table forward for the next patch.
+		insHash[ni] = binary.LittleEndian.Uint64(ih.b)
 		ih.b = ih.b[8:]
 		prev = ni
 	}
@@ -587,7 +670,9 @@ func reconstructMaps(d *sidecarDelta, oldUnits []sidecarUnit) ([]mapping, error)
 		prevEnd = uint64(off) + sizes[ni]
 	}
 
-	// Correspondence exceptions.
+	// Correspondence exceptions. The join is kept alongside: it, not the map's
+	// source, is the identity the carried table's hashes follow.
+	join := slices.Clone(src)
 	for ni, v := range excAt {
 		s := src[ni] + int(v)
 		if s < -1 || s >= len(oldUnits) {
@@ -595,39 +680,7 @@ func reconstructMaps(d *sidecarDelta, oldUnits []sidecarUnit) ([]mapping, error)
 		}
 		src[ni] = s
 	}
-
-	out := make([]mapping, 0, d.Maps)
-	for ni := 0; ni < n; ni++ {
-		if src[ni] < 0 {
-			continue
-		}
-		o := oldUnits[src[ni]]
-		out = append(out, mapping{Src: o.Off, SrcSize: o.Size, Dst: offs[ni], DstSize: sizes[ni]})
-	}
-	// Anything the unit model could not express.
-	rr := &planReader{b: d.Raw}
-	var prevRawDst uint64
-	for !rr.done() {
-		dst := prevRawDst + rr.u()
-		dstSize := rr.u()
-		s := rr.u()
-		srcSize := rr.u()
-		if rr.err != nil {
-			return nil, errors.New("invalid unrepresentable mapping")
-		}
-		out = append(out, mapping{Src: s, SrcSize: srcSize, Dst: dst, DstSize: dstSize})
-		prevRawDst = dst
-	}
-	if rr.err != nil {
-		return nil, errors.New("invalid unrepresentable mapping")
-	}
-	slices.SortFunc(out, func(a, b mapping) int {
-		if a.Dst != b.Dst {
-			return cmpU(a.Dst, b.Dst)
-		}
-		return cmpU(a.Src, b.Src)
-	})
-	return out, nil
+	return &sidecarReplay{Join: join, Src: src, Offs: offs, Sizes: sizes, InsHash: insHash}, nil
 }
 
 // sparseSigned reads a gap-coded index column paired with a signed value
@@ -762,8 +815,26 @@ func buildSidecarRung(correctedPlan []byte, oldImage, newImage *image, structure
 	}
 	t.done("old %d units, new %d units", len(oldNamed), len(newNamed))
 
+	// The old-side table. Fresh from the old binary's symbols by default, which
+	// is the full-install bootstrap; with -sidecar-table it is whatever the
+	// previous patch left the client holding, and the encoder must join the new
+	// binary's real symbols against those possibly-stale hashes.
+	oldUnits := hashNamedUnits(oldNamed)
+	if sidecarTablePath != "" {
+		b, err := os.ReadFile(sidecarTablePath)
+		if err != nil {
+			return nil, err
+		}
+		if oldUnits, err = unmarshalSidecarTable(b); err != nil {
+			return nil, err
+		}
+		fmt.Fprintf(os.Stderr, "sidecar: carried table loaded from %s (%d units; %d fresh)\n",
+			sidecarTablePath, len(oldUnits), len(oldNamed))
+		oldNamed = nil // its names are not what the client holds
+	}
+
 	t = startStage("sidecar delta")
-	d, oldUnits, st, err := buildSidecarDelta(oldNamed, newNamed, structure.Maps)
+	d, st, err := buildSidecarDeltaFrom(oldUnits, oldNamed, newNamed, structure.Maps)
 	if err != nil {
 		return nil, err
 	}
@@ -779,6 +850,11 @@ func buildSidecarRung(correctedPlan []byte, oldImage, newImage *image, structure
 	}
 	if err := writeFile(outDir, "symbol-sidecar.bin", table); err != nil {
 		return nil, err
+	}
+	if sidecarEmitPath != "" {
+		if err := emitRolledTable(d, decoderSidecar, newNamed); err != nil {
+			return nil, err
+		}
 	}
 
 	cp, err := unmarshalCombinedPlan(correctedPlan)
@@ -798,6 +874,77 @@ func buildSidecarRung(correctedPlan []byte, oldImage, newImage *image, structure
 	reportSidecar(st, normalStructure, sidecarStructure, correctedPlan, out, d, structure, oldText)
 	t.done("")
 	return out, nil
+}
+
+// sidecarTablePath is -sidecar-table: the old-side table the rung joins
+// against, instead of a fresh hash of the old binary's symbols.
+// sidecarEmitPath is -sidecar-emit: where to write the table the client would
+// hold after applying this patch.
+var sidecarTablePath, sidecarEmitPath string
+
+// emitRolledTable writes the client's post-patch table and reports how far it
+// has drifted from the table the *next* encoder would build fresh. The drift
+// is the price of the design: a kept unit's row is whatever it was when the
+// unit first appeared, so a renamed function keeps a hash nobody will look up
+// again, and an inserted unit carries one hash where the fold gave it many.
+func emitRolledTable(d *sidecarDelta, oldUnits []sidecarUnit, newNamed []namedUnit) error {
+	rp, err := replaySidecar(d, oldUnits)
+	if err != nil {
+		return err
+	}
+	rolled := rollForwardTable(rp, oldUnits)
+	b := marshalSidecarTable(rolled)
+	if err := os.WriteFile(sidecarEmitPath, b, 0o644); err != nil {
+		return err
+	}
+
+	// Against the table hop N+1's encoder would have built from real symbols.
+	fresh := hashNamedUnits(newNamed)
+	byOff := make(map[uint64]int, len(fresh))
+	for i, u := range fresh {
+		byOff[u.Off] = i
+	}
+	var layoutOK, exact, subset, partial, stale, orphan, rolledHashes, freshHashes int
+	for _, u := range rolled {
+		rolledHashes += len(u.Hashes)
+		i, ok := byOff[u.Off]
+		if !ok || fresh[i].Size != u.Size {
+			orphan++
+			continue
+		}
+		layoutOK++
+		have := map[uint64]bool{}
+		for _, h := range fresh[i].Hashes {
+			have[h] = true
+		}
+		hit := 0
+		for _, h := range u.Hashes {
+			if have[h] {
+				hit++
+			}
+		}
+		switch {
+		case hit == 0:
+			stale++
+		case hit == len(u.Hashes) && hit == len(fresh[i].Hashes):
+			exact++
+		case hit == len(u.Hashes):
+			subset++
+		default:
+			partial++
+		}
+	}
+	for _, u := range fresh {
+		freshHashes += len(u.Hashes)
+	}
+	f := os.Stderr
+	fmt.Fprintf(f, "sidecar: rolled table -> %s, %d units, raw %d B, xz %d\n",
+		sidecarEmitPath, len(rolled), len(b), xzSizeContiguous(b))
+	fmt.Fprintf(f, "sidecar: rolled vs fresh: %d units at the same address+size (%d elsewhere); %d hash sets exact, %d a subset of fresh, %d partly overlapping, %d entirely stale\n",
+		layoutOK, orphan, exact, subset, partial, stale)
+	fmt.Fprintf(f, "sidecar: rolled carries %d hashes against %d fresh (%.1f%%); fresh table would be %d units\n",
+		rolledHashes, freshHashes, 100*float64(rolledHashes)/float64(freshHashes), len(fresh))
+	return nil
 }
 
 func reportSidecar(st sidecarStats, normalStructure, sidecarStructure, normalPlan, sidecarPlan []byte, d *sidecarDelta, structure predictionPlan, oldText []byte) {
