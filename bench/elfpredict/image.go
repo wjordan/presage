@@ -32,7 +32,7 @@ func predictImage(old []byte, encoded []byte) ([]byte, combinedStats, error) {
 	var structure predictionPlan
 	var pred *srcPredictor
 	if len(cp.Structure) != 0 {
-		structure, err = unmarshalPlan(cp.Structure, old[ep.OldText.Off:ep.OldText.Off+ep.OldText.Size], goMapDeriver(old, cp.GoTables, ep.OldText, ep.NewText))
+		structure, err = unmarshalPlanFile(cp.Structure, old, ep.OldText, goMapDeriver(old, cp.GoTables, ep.OldText, ep.NewText))
 		if err != nil {
 			return nil, combinedStats{}, err
 		}

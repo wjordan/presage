@@ -111,31 +111,19 @@ func unionSorted(vs ...[]uint64) []uint64 {
 }
 
 // relocTextTargets is E2: the R_X86_64_RELATIVE addends that point into .text.
+// The decoder holds no *image, only the old file's bytes, so the one
+// implementation lives in derivedrung.go and this is the probe's adapter.
 func relocTextTargets(img *image) []uint64 {
-	sec, ok := img.Sections[".rela.dyn"]
-	if !ok {
-		if sec, ok = img.Sections[".rela"]; !ok {
-			return nil
-		}
-	}
-	rel, _, _ := parseRela(img.Data[sec.Off : sec.Off+sec.Size])
-	end := img.Text.Addr + img.Text.Size
-	var out []uint64
-	for _, e := range rel {
-		if e.addend >= img.Text.Addr && e.addend < end {
-			out = append(out, e.addend-img.Text.Addr)
-		}
-	}
-	return sortUniq(out)
+	return relaTextTargets(img.Data, img.Text)
 }
 
 // --- phase 1: coverage --------------------------------------------------
 
 type coverage struct {
-	name                          string
-	derived                       int
-	recovered                     int // true unit starts present in the enumeration
-	spuriousInside, spuriousOuter int
+	name                           string
+	derived                        int
+	recovered                      int // true unit starts present in the enumeration
+	spuriousInside, spuriousOuter  int
 	sizeExact, sizeOver, sizeUnder int
 }
 
@@ -197,10 +185,43 @@ func measureCoverage(name string, derived []uint64, units []namedUnit, oldText [
 type derivedStream struct {
 	base *sidecarDelta
 
+	// Derived is how many entries the encoder's derivation produced. The
+	// decoder derives its own and refuses the plan if the two disagree, which
+	// is what makes "the derivation is identical on both sides" a checked
+	// property rather than a hope.
+	Derived uint64
+
 	Boundary   []byte // address gaps of the true starts the enumeration missed
 	Suppress   []byte // optional bitmap: which derived entries are real
 	SizeFixIdx []byte // enumeration entries whose padding-rule size is wrong
 	SizeFixVal []byte
+}
+
+// pointers is columns() with the byte slices addressable, so the rung's
+// accounting can blank one column at a time.
+func (s *derivedStream) pointers() []struct {
+	name string
+	b    *[]byte
+} {
+	out := []struct {
+		name string
+		b    *[]byte
+	}{
+		{"boundary exceptions", &s.Boundary},
+		{"suppression bitmap", &s.Suppress},
+		{"old-size fixup index", &s.SizeFixIdx},
+		{"old-size fixup value", &s.SizeFixVal},
+	}
+	for _, c := range s.base.columns() {
+		if c.name == "insert name hashes" {
+			continue
+		}
+		out = append(out, struct {
+			name string
+			b    *[]byte
+		}{c.name, c.b})
+	}
+	return out
 }
 
 func (s *derivedStream) columns() []struct {
@@ -258,7 +279,7 @@ func buildDerivedStream(derived []uint64, oldNamed, newNamed []namedUnit, maps [
 	for _, off := range derived {
 		inDerived[off] = true
 	}
-	s := &derivedStream{}
+	s := &derivedStream{Derived: uint64(len(derived))}
 	var missing []uint64
 	for _, u := range oldNamed {
 		if !inDerived[u.Off] {
@@ -271,7 +292,6 @@ func buildDerivedStream(derived []uint64, oldNamed, newNamed []namedUnit, maps [
 		prev = off
 	}
 
-	var offs []uint64
 	if suppress {
 		bits := make([]byte, (len(derived)+7)/8)
 		for i, off := range derived {
@@ -280,23 +300,15 @@ func buildDerivedStream(derived []uint64, oldNamed, newNamed []namedUnit, maps [
 			}
 		}
 		s.Suppress = bits
-		for _, u := range oldNamed {
-			offs = append(offs, u.Off)
-		}
-	} else {
-		offs = unionSorted(derived, missing)
 	}
 
 	// Sizes by the padding rule, then fixups where the rule is wrong. Only
 	// entries the map actually sources from need a correct size, so the fixup
-	// column is built after the correspondence is known.
-	E := make([]sidecarUnit, len(offs))
-	for i, off := range offs {
-		next := uint64(len(oldText))
-		if i+1 < len(offs) {
-			next = offs[i+1]
-		}
-		E[i] = sidecarUnit{Off: off, Size: paddingExtent(oldText, off, next)}
+	// column is built after the correspondence is known. The list itself comes
+	// from the same function the decoder runs.
+	E, err := enumerationUnits(derived, s.Suppress, s.Boundary, oldText)
+	if err != nil {
+		return nil, nil, st, err
 	}
 	eIdx := make(map[uint64]int, len(E))
 	for i, u := range E {
@@ -372,12 +384,7 @@ func buildDerivedStream(derived []uint64, oldNamed, newNamed []namedUnit, maps [
 	s.base = d
 
 	// The gate: replay the decoder and require the shipped map back exactly.
-	// InsertHash is not part of the derived stream -- there is no carried table
-	// to roll forward -- but reconstructMaps reads it, so the replay is handed a
-	// zero-filled column that is never priced.
-	gate := *d
-	gate.InsertHash = make([]byte, 8*st2.Inserts)
-	got, err := reconstructMaps(&gate, E)
+	got, err := reconstructMaps(d, E)
 	if err != nil {
 		return nil, nil, st2, fmt.Errorf("derived reconstruction failed: %w", err)
 	}
@@ -400,7 +407,9 @@ func buildDerivedStream(derived []uint64, oldNamed, newNamed []namedUnit, maps [
 func deltaFromJoin(oldUnits, newUnits []sidecarUnit, joined []int, raw []byte, nmaps uint64) (*sidecarDelta, sidecarStats, error) {
 	var st sidecarStats
 	st.OldUnits, st.NewUnits = len(oldUnits), len(newUnits)
-	d := &sidecarDelta{NewUnits: uint64(len(newUnits)), Maps: nmaps, Raw: raw}
+	// There is no carried table to roll forward, so an insert ships no name
+	// hash: the column is absent rather than zero-filled.
+	d := &sidecarDelta{NewUnits: uint64(len(newUnits)), Maps: nmaps, Raw: raw, NoInsertHash: true}
 
 	kept := make([]bool, len(oldUnits))
 	for _, oi := range joined {
@@ -432,7 +441,6 @@ func deltaFromJoin(oldUnits, newUnits []sidecarUnit, joined []int, raw []byte, n
 		if oi < 0 {
 			d.InsertPos = appendGap(d.InsertPos, ni, prevInsert)
 			d.InsertSize = binary.AppendUvarint(d.InsertSize, u.Size)
-			d.InsertHash = binary.LittleEndian.AppendUint64(d.InsertHash, 0)
 			prevInsert = ni
 			st.Inserts++
 			continue

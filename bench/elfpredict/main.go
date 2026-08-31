@@ -529,7 +529,7 @@ func buildRungPlans(oldImage, newImage *image, ep equivalencePlan, structure pre
 			if err != nil {
 				return nil, "", err
 			}
-			slim, err := unmarshalPlan(derived.Structure, oldImage.textBytes(), goMapDeriver(oldImage.Data, goTablesPlan, oldImage.Text, newImage.Text))
+			slim, err := unmarshalPlanFile(derived.Structure, oldImage.Data, oldImage.Text, goMapDeriver(oldImage.Data, goTablesPlan, oldImage.Text, newImage.Text))
 			if err != nil {
 				return nil, "", err
 			}
@@ -796,7 +796,7 @@ func runWholeImage(oldImage, newImage *image, epBytes, structureBytes, choices, 
 	// The function map is decoded once: it now walks the old image to build
 	// the reference-target domain of §9.12, which is not something to repeat.
 	t := startStage("decode function map")
-	structure, err := unmarshalPlan(structureBytes, oldImage.textBytes(), goMapDeriver(oldImage.Data, goTablesPlan, oldImage.Text, newImage.Text))
+	structure, err := unmarshalPlanFile(structureBytes, oldImage.Data, oldImage.Text, goMapDeriver(oldImage.Data, goTablesPlan, oldImage.Text, newImage.Text))
 	if err != nil {
 		return nil, err
 	}
@@ -821,6 +821,20 @@ func runWholeImage(oldImage, newImage *image, epBytes, structureBytes, choices, 
 			fmt.Fprintf(os.Stderr, "sidecar-map FAILED: %v\n", err)
 		} else {
 			rungs = append(rungs, rung{"sidecar-map", plan})
+		}
+	}
+	// The derived-map rung is the same replacement with no carried file: the
+	// enumeration the delta is keyed against is derived from the old image on
+	// both sides, so the plan decodes under the plain "old binary + patch"
+	// contract.
+	if wantRung("derived-map") {
+		i := slices.IndexFunc(rungs, func(r rung) bool { return r.name == "corrected-fields" })
+		if i < 0 {
+			fmt.Fprintln(os.Stderr, "derived-map needs the corrected-fields rung in -rungs")
+		} else if plan, err := buildDerivedRung(rungs[i].plan, oldImage, newImage, structure); err != nil {
+			fmt.Fprintf(os.Stderr, "derived-map FAILED: %v\n", err)
+		} else {
+			rungs = append(rungs, rung{"derived-map", plan})
 		}
 	}
 	// The attribution walk needs function spans; take them from the dense map,
@@ -886,6 +900,14 @@ func runWholeImage(oldImage, newImage *image, epBytes, structureBytes, choices, 
 				return nil, errors.New("sidecar-map prediction differs from corrected-fields")
 			} else {
 				fmt.Fprintln(os.Stderr, "sidecar-map: prediction is byte-identical to corrected-fields")
+			}
+		case "derived-map":
+			if correctedPrediction == nil {
+				fmt.Fprintln(os.Stderr, "derived-map: no corrected-fields prediction to compare against")
+			} else if !bytes.Equal(pred, correctedPrediction) {
+				return nil, errors.New("derived-map prediction differs from corrected-fields")
+			} else {
+				fmt.Fprintln(os.Stderr, "derived-map: prediction is byte-identical to corrected-fields")
 			}
 		}
 		t = startStage("measure " + r.name)
@@ -1042,7 +1064,7 @@ func wantLateRungs() bool {
 	for _, n := range []string{"projected-relocations", "equivalence-relocations", "equivalence-relocations-byrow",
 		"equivalence-relocations-slots", "structural-relocations",
 		"go-tables", "modelled-eh-frame", "modelled-rodata", "corrected-fields", "corrected-fields-gated", "sparse-plan",
-		"sidecar-map"} {
+		"sidecar-map", "derived-map"} {
 		if wantRung(n) {
 			return true
 		}

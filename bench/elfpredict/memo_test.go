@@ -12,6 +12,13 @@ import (
 // entry would not fail loudly -- it would silently decode every point to the
 // wrong address, and every measurement taken after it would be fiction.
 func TestReferenceTargetMemo(t *testing.T) {
+	// Its own memo directory: the entry count below is exact, and any other
+	// test in the package that serializes a plan leaves entries in the shared
+	// one, which would make this assertion depend on declaration order.
+	prev := memoDir
+	defer func() { memoDir = prev }()
+	memoDir = t.TempDir()
+
 	old := make([]byte, 64)
 	// e8 rel32 at 0x10, so the walk finds one call and one target.
 	old[0x10] = 0xe8

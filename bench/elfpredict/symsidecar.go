@@ -201,6 +201,12 @@ type sidecarDelta struct {
 	ExcIndex   []byte // new-unit gaps where the map disagrees with the join
 	ExcSrc     []byte // map source minus join source; -1 means "not mapped"
 	Raw        []byte // mappings the unit model cannot express at all
+
+	// NoInsertHash marks a stream with no carried table behind it -- the
+	// derived-map rung -- where InsertHash is legitimately absent instead of
+	// eight bytes per insert. It is never serialized, so the sidecar's own
+	// bytes are untouched.
+	NoInsertHash bool
 }
 
 func (d *sidecarDelta) columns() []struct {
@@ -597,13 +603,15 @@ func replaySidecar(d *sidecarDelta, oldUnits []sidecarUnit) (*sidecarReplay, err
 		}
 		inserted[ni] = true
 		sizes[ni] = is.u()
-		if len(ih.b) < 8 {
-			return nil, errors.New("invalid insert name hashes")
+		if !d.NoInsertHash {
+			if len(ih.b) < 8 {
+				return nil, errors.New("invalid insert name hashes")
+			}
+			// The hash is not used to rebuild the map; it is what lets the
+			// client roll its carried table forward for the next patch.
+			insHash[ni] = binary.LittleEndian.Uint64(ih.b)
+			ih.b = ih.b[8:]
 		}
-		// The hash is not used to rebuild the map; it is what lets the client
-		// roll its carried table forward for the next patch.
-		insHash[ni] = binary.LittleEndian.Uint64(ih.b)
-		ih.b = ih.b[8:]
 		prev = ni
 	}
 	if ip.err != nil || !is.done() || !ih.done() {

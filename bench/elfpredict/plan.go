@@ -64,6 +64,10 @@ const (
 	// delta against a symbol table the decoder carries from the previous
 	// patch (see symsidecar.go). Everything else is exactly planDense.
 	planSidecar
+	// planDerived is planSidecar with no carried file: the decoder derives the
+	// enumeration the delta is keyed against from the old image's own bytes
+	// (see derivedrung.go). Everything else is exactly planDense.
+	planDerived
 )
 
 type mapping struct {
@@ -390,12 +394,23 @@ func (r *planReader) byteAt() byte {
 // of a planGoDerived plan, which carries none of its own; it is called only
 // for that mode.
 func unmarshalPlan(b, oldText []byte, derive func() (derivedMap, error)) (predictionPlan, error) {
+	return unmarshalPlanFile(b, oldText, section{Size: uint64(len(oldText))}, derive)
+}
+
+// unmarshalPlanFile is unmarshalPlan for a caller holding the whole old file
+// rather than a bare .text buffer. planDerived needs it: the enumeration it
+// keys against is derived from the old image, .rela.dyn included.
+func unmarshalPlanFile(b, oldFile []byte, text section, derive func() (derivedMap, error)) (predictionPlan, error) {
 	if len(b) < len(planMagic) || !bytes.Equal(b[:4], planMagic[:]) {
 		return predictionPlan{}, errors.New("invalid prediction plan magic")
 	}
+	if text.Off > uint64(len(oldFile)) || text.Size > uint64(len(oldFile))-text.Off {
+		return predictionPlan{}, errors.New("old .text lies outside the old image")
+	}
+	oldText := oldFile[text.Off : text.Off+text.Size]
 	r := &planReader{b: b[4:]}
 	p := predictionPlan{OldAddr: r.u(), NewAddr: r.u(), TargetLen: r.u()}
-	if flag := r.byteAt(); flag > byte(planSidecar) {
+	if flag := r.byteAt(); flag > byte(planDerived) {
 		return predictionPlan{}, errors.New("invalid map mode in prediction plan")
 	} else {
 		p.Mode = planMode(flag)
@@ -404,12 +419,19 @@ func unmarshalPlan(b, oldText []byte, derive func() (derivedMap, error)) (predic
 	if n > uint64(len(b)) {
 		return predictionPlan{}, errors.New("implausible mapping count")
 	}
-	if p.Mode == planSidecar {
+	switch p.Mode {
+	case planSidecar:
 		if err := readSidecarMaps(r, &p, n); err != nil {
 			return predictionPlan{}, err
 		}
-	} else if err := readDenseMaps(r, &p, n, oldText); err != nil {
-		return predictionPlan{}, err
+	case planDerived:
+		if err := readDerivedMaps(r, &p, n, oldFile, text); err != nil {
+			return predictionPlan{}, err
+		}
+	default:
+		if err := readDenseMaps(r, &p, n, oldText); err != nil {
+			return predictionPlan{}, err
+		}
 	}
 	if p.Mode == planGoDerived {
 		if n != 0 {

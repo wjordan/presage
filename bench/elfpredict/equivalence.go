@@ -771,7 +771,7 @@ func predictCombined(old []byte, encoded []byte) ([]byte, combinedStats, error) 
 	if err != nil {
 		return nil, combinedStats{}, err
 	}
-	structure, err := unmarshalPlan(cp.Structure, old[ep.OldText.Off:ep.OldText.Off+ep.OldText.Size], goMapDeriver(old, cp.GoTables, ep.OldText, ep.NewText))
+	structure, err := unmarshalPlanFile(cp.Structure, old, ep.OldText, goMapDeriver(old, cp.GoTables, ep.OldText, ep.NewText))
 	if err != nil {
 		return nil, combinedStats{}, err
 	}
