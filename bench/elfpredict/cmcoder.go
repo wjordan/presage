@@ -328,10 +328,16 @@ type cmContexts interface {
 	useMatch() bool
 }
 
+// cmRefSet is an optional extension: a context set may supply extra match
+// models that predict from a reference image the decoder already holds. See
+// cmprobe2.go.
+type cmRefSet interface{ refModels() []*refMatch }
+
 type cmCoder struct {
 	set    cmContexts
 	banks  []*cmBank
 	mm     *matchModel
+	refs   []*refMatch
 	mx     *mixer
 	hashes []uint32
 }
@@ -347,6 +353,10 @@ func newCMCoder(set cmContexts) *cmCoder {
 		c.mm = newMatchModel()
 		inputs++
 	}
+	if rs, ok := set.(cmRefSet); ok {
+		c.refs = rs.refModels()
+		inputs += len(c.refs)
+	}
 	c.mx = newMixer(inputs, set.mixerCtxs()*8)
 	return c
 }
@@ -358,10 +368,17 @@ func (c *cmCoder) code(src []byte, enc *arEncoder, dec *arDecoder, dst []byte) {
 	if dec != nil {
 		data = dst
 	}
+	nb := len(c.banks)
+	if c.mm != nil {
+		nb++
+	}
 	for i := range data {
 		sel := c.set.setByte(i, data, c.hashes)
 		for j, b := range c.banks {
 			b.base = c.hashes[j]
+		}
+		for _, r := range c.refs {
+			r.startByte(i)
 		}
 		c0 := uint32(1)
 		for k := uint(0); k < 8; k++ {
@@ -371,6 +388,9 @@ func (c *cmCoder) code(src []byte, enc *arEncoder, dec *arDecoder, dst []byte) {
 			}
 			if c.mm != nil {
 				c.mx.in[len(c.banks)] = c.mm.stretchIn(c0, k)
+			}
+			for j, r := range c.refs {
+				c.mx.in[nb+j] = r.stretchIn(c0, k)
 			}
 			c.mx.ctx = sel*8 + int(k)
 			p := c.mx.mix()
@@ -387,6 +407,9 @@ func (c *cmCoder) code(src []byte, enc *arEncoder, dec *arDecoder, dst []byte) {
 			if c.mm != nil {
 				c.mm.update(bit)
 			}
+			for _, r := range c.refs {
+				r.update(bit)
+			}
 			c.mx.update(bit)
 			c0 = c0<<1 | uint32(bit)
 		}
@@ -395,6 +418,9 @@ func (c *cmCoder) code(src []byte, enc *arEncoder, dec *arDecoder, dst []byte) {
 		}
 		if c.mm != nil {
 			c.mm.advance(data, i+1)
+		}
+		for _, r := range c.refs {
+			r.endByte(i, data[i])
 		}
 	}
 }

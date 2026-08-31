@@ -298,6 +298,7 @@ func probeCMCoder(predText, targetText []byte, maps []mapping, text section, ima
 		report("zstd --ultra -"+z+" (concatenated)", zstdSize(stream, z), 0, 0)
 	}
 
+	rung4 := 0
 	for r := range cmRungModels {
 		set := &corrCtx{sideBuck, sidePred, sideCls, sideOff, sideRoff, r}
 		t := time.Now()
@@ -312,6 +313,13 @@ func probeCMCoder(predText, targetText []byte, maps []mapping, text section, ima
 			continue
 		}
 		report(cmRungNames[r], len(coded), encSec, decSec)
+		if r == 4 {
+			rung4 = len(coded)
+		}
+	}
+
+	if os.Getenv("PROBE_CMREF") != "" {
+		probeCMRef(predText, targetText, runs, c.Bytes, bucketXZ, otherXZ, rung4)
 	}
 
 	// The position columns are the rest of the .text piece. They carry no

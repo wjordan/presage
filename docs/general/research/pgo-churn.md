@@ -552,3 +552,28 @@ and the probe's `math.Exp` mixer was replaced with integer
 squash/stretch tables (lpaq) — floats in the coding path were a latent
 cross-platform decode divergence. Field-class contexts (~a ninth of the
 harness win) deferred; they attach at the `DispContext` seam.
+
+### 8.1 Match-into-old and ordering probes, measured under the bar
+
+`-probes` via `cmprobe2.go` (2026-08-31), every rung round-tripped
+through the real decoder, both Chrome pairs. Mechanism that made it
+measurable at all: the decoder holds a contiguous *partial target image*
+(correct bytes = prediction, wrong bytes = already decoded), so match
+models anchor on address space, not the sparse residual.
+
+| extension | coded delta | decode cost | verdict |
+|---|---:|---|---|
+| A2: global old-`.text` dictionary | −17.5 K / −17.9 K | 4–6× slower | closest, still under bar |
+| A1: local realignment ±4096 | −13.2 K / −13.8 K | 9× | thin; any practical index drops it to −8.6 K |
+| A1+A2 combined | −25.5 K / −26.4 K | 13× (~20 s) | under the 30 K bar AND over cost |
+| B: similarity-ordered runs under CM | −2.2 K / −4.3 K | free | dead; doesn't compound with A |
+
+Real facts worth keeping: 53 % of wrong-byte positions anchor a ≥6-byte
+match elsewhere in old `.text` — recompiled bodies genuinely reuse byte
+sequences from the rest of the binary — so §7's canonicalized-matching
+refutation does NOT extend to raw byte matching; it's the decode cost,
+not the signal, that kills it. B's free decoder-derivable sort is worth
+−56–60 K *to xz* on the 5-stream form, but that form lost to CM by more
+(569,676 sorted-xz vs 522,858 unsorted-CM), so it's moot in production.
+Caveat on all rows: the harness CM is a toy engine (no SSE); a stronger
+engine may already capture part of these deltas.
