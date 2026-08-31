@@ -60,6 +60,10 @@ const (
 	// planGoDerived transmits no map: the decoder derives it from the Go-table
 	// plan carried beside the structural plan (see delta.GoFunctionMap).
 	planGoDerived
+	// planSidecar transmits the five map columns empty and, in their place, a
+	// delta against a symbol table the decoder carries from the previous
+	// patch (see symsidecar.go). Everything else is exactly planDense.
+	planSidecar
 )
 
 type mapping struct {
@@ -391,7 +395,7 @@ func unmarshalPlan(b, oldText []byte, derive func() (derivedMap, error)) (predic
 	}
 	r := &planReader{b: b[4:]}
 	p := predictionPlan{OldAddr: r.u(), NewAddr: r.u(), TargetLen: r.u()}
-	if flag := r.byteAt(); flag > byte(planGoDerived) {
+	if flag := r.byteAt(); flag > byte(planSidecar) {
 		return predictionPlan{}, errors.New("invalid map mode in prediction plan")
 	} else {
 		p.Mode = planMode(flag)
@@ -400,7 +404,11 @@ func unmarshalPlan(b, oldText []byte, derive func() (derivedMap, error)) (predic
 	if n > uint64(len(b)) {
 		return predictionPlan{}, errors.New("implausible mapping count")
 	}
-	if err := readDenseMaps(r, &p, n, oldText); err != nil {
+	if p.Mode == planSidecar {
+		if err := readSidecarMaps(r, &p, n); err != nil {
+			return predictionPlan{}, err
+		}
+	} else if err := readDenseMaps(r, &p, n, oldText); err != nil {
 		return predictionPlan{}, err
 	}
 	if p.Mode == planGoDerived {

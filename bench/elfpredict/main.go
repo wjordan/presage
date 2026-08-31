@@ -809,9 +809,24 @@ func runWholeImage(oldImage, newImage *image, epBytes, structureBytes, choices, 
 	if err != nil {
 		return nil, err
 	}
+	// The sidecar rung is the corrected-fields plan with its map columns
+	// replaced by a delta against a symbol table the client carries. It is
+	// built here rather than in buildRungPlans so that the symbol tables it
+	// reads are not folded into that stage's memo key.
+	if wantRung("sidecar-map") {
+		i := slices.IndexFunc(rungs, func(r rung) bool { return r.name == "corrected-fields" })
+		if i < 0 {
+			fmt.Fprintln(os.Stderr, "sidecar-map needs the corrected-fields rung in -rungs")
+		} else if plan, err := buildSidecarRung(rungs[i].plan, oldImage, newImage, structure, outDir); err != nil {
+			fmt.Fprintf(os.Stderr, "sidecar-map FAILED: %v\n", err)
+		} else {
+			rungs = append(rungs, rung{"sidecar-map", plan})
+		}
+	}
 	// The attribution walk needs function spans; take them from the dense map,
 	// which every measured rung ships.
 	attributionMaps := structure.Maps
+	var correctedPrediction []byte
 	if onlyProbes == nil {
 		t = startStage("plan column diagnostics")
 		planColumnCost(structure)
@@ -849,6 +864,21 @@ func runWholeImage(oldImage, newImage *image, epBytes, structureBytes, choices, 
 			runProbes(r.name, r.plan, pred, target, oldImage, newImage, structureBytes, structure)
 			t.done("")
 			continue
+		}
+		// The sidecar rung must be the same prediction as the rung it
+		// replaces: only the encoding of the map changed, so any difference is
+		// a decoder bug, not a result.
+		switch r.name {
+		case "corrected-fields":
+			correctedPrediction = pred
+		case "sidecar-map":
+			if correctedPrediction == nil {
+				fmt.Fprintln(os.Stderr, "sidecar-map: no corrected-fields prediction to compare against")
+			} else if !bytes.Equal(pred, correctedPrediction) {
+				return nil, errors.New("sidecar-map prediction differs from corrected-fields")
+			} else {
+				fmt.Fprintln(os.Stderr, "sidecar-map: prediction is byte-identical to corrected-fields")
+			}
 		}
 		t = startStage("measure " + r.name)
 		rep, corr, err := measure(pred, target, r.plan, stats.Relocation, reference, true, newImage.Sections)
@@ -985,6 +1015,10 @@ var dictProbeWindow int
 // probe, for external per-region analysis.
 var dumpDir string
 
+// oldDebugPath and newDebugPath are the -old-debug/-new-debug arguments,
+// kept for probes that read the symbol tables themselves.
+var oldDebugPath, newDebugPath string
+
 func wantRung(name string) bool { return onlyRungs == nil || onlyRungs[name] }
 
 // wantLateRungs reports whether anything downstream of the plain retargeting
@@ -993,7 +1027,8 @@ func wantRung(name string) bool { return onlyRungs == nil || onlyRungs[name] }
 func wantLateRungs() bool {
 	for _, n := range []string{"projected-relocations", "equivalence-relocations", "equivalence-relocations-byrow",
 		"equivalence-relocations-slots", "structural-relocations",
-		"go-tables", "modelled-eh-frame", "modelled-rodata", "corrected-fields", "corrected-fields-gated", "sparse-plan"} {
+		"go-tables", "modelled-eh-frame", "modelled-rodata", "corrected-fields", "corrected-fields-gated", "sparse-plan",
+		"sidecar-map"} {
 		if wantRung(n) {
 			return true
 		}
@@ -1100,6 +1135,9 @@ func run() error {
 	// both reach the rungs without passing the later assignment, and a dump
 	// probe that silently writes nothing is worse than no probe at all.
 	dumpDir = *outDir
+	// The sidecar probe reads the two symbol tables directly, and -resume
+	// reaches the rungs without ever loading them.
+	oldDebugPath, newDebugPath = *oldDebug, *newDebug
 	if *resume != "" {
 		return resumeWholeImage(*oldPath, *newPath, *resume, *outDir, *reference)
 	}
@@ -1527,6 +1565,12 @@ func runProbes(name string, planBytes, pred, target []byte, oldImage, newImage *
 	}
 	if onlyProbes["dict"] && name == "corrected-fields" {
 		probeCorrectionDictionary(predText, targetText, dictProbeWindow)
+	}
+	if onlyProbes["sidecar"] && name == "corrected-fields" {
+		probeSidecar(planBytes, structure, oldImage, newImage)
+	}
+	if onlyProbes["blocksidecar"] && name == "corrected-fields" {
+		probeBlockSidecar(planBytes, structure, oldImage, newImage)
 	}
 	if onlyProbes["rnfdict"] && name == "corrected-fields" {
 		probeDictionaryCalibration()
