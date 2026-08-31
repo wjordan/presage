@@ -304,11 +304,24 @@ average), and that average is also the build's sharpest lesson:
   map lacks — covered by a shared `s−j` sentinel column; 0 extra cost here.
 * 0 distinct-name hash collisions across 1.85 M names; 1,352
   correspondence exceptions; 0 unrepresentable mappings.
-* **Roll-forward caveat**: an inserted unit's rolled-forward entry carries
-  one of its aliases, and a renamed unit a stale hash — correctness is
-  untouched (the next encoder replays the client table byte-exactly), but
-  join fidelity can degrade over a chain of patches. −135,868 is a
-  first-patch number; the steady state is unmeasured.
+* **Roll-forward, measured on the real chain `.137 → .169 → .173`**
+  (2026-08-31, `-sidecar-emit`/`-sidecar-table`; both hops genuine PGO
+  rolls, `500ed016 → 43ad97a8 → ec4cb49a`): hop 2 encoded against the
+  rolled table costs **2,467,108 vs 2,465,764 fresh — +1,344, +0.054 %**,
+  correction bit-identical. Only 668 of 925,590 rolled rows are degraded
+  at all (alias loss; **zero entirely-stale rows** — renames-in-place
+  across a point release are essentially nonexistent), turning 73 joins
+  into insert+drop pairs and 100 into exceptions. The §5.1b caveat was
+  much milder than advertised; a third hop (`-sidecar-emit` on hop 2,
+  then the 152 branch-jump pair, artifacts present) is the cheap next
+  check if cumulative decay ever matters.
+* **Both wins generalize.** The `.137→.169` pair, first full ladder run
+  on a second pair (prediction 99.398 %): sidecar **−135,984** (pair 1:
+  −135,868), dispcol **−19,672** (−20,032), exactly additive; best rung
+  2,457,776 (44.60 % of that pair's plain-zucchini 5,510,480 — not the
+  RELA-aware baseline, so percentages don't compare across pairs).
+  Reproducing within 116 bytes across independent pairs says the map
+  columns' redundancy is structural, not a fit to one diff.
 
 ### 5.1c No sidecar after all: the derived enumeration
 
