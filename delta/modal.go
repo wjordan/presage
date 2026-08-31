@@ -459,7 +459,9 @@ func applyModal(buf []byte, r *rbuf, nregions uint64, split bool) error {
 // encodeModal writes the correction with the mode chosen per region. The
 // models are bootstrapped by a pass that prices every byte at a byte, and
 // each further pass re-chooses against what the last one wrote.
-func encodeModal(pred, want []byte) []byte {
+// It returns the winner with what it costs once the container compresses it,
+// so the shape picker one level up does not compress it a second time.
+func encodeModal(pred, want []byte) ([]byte, int) {
 	rs := modalRegions(pred, want)
 	m := &modeModel{}
 	var o *modalOut
@@ -469,11 +471,17 @@ func encodeModal(pred, want []byte) []byte {
 		m.train(&o.hist)
 	}
 	o = modalWrite(pred, want, rs, m)
-	a, b := modalPack(o, len(want), false), modalPack(o, len(want), true)
-	if czLen(b) < czLen(a) {
-		return b
+	a := modalPack(o, len(want), false)
+	// The split form's sub-streams are already compressed, so its cost is its
+	// own length: the container's pass over it can only find the little that
+	// is left in the header. Handing those bytes back to the compressor to
+	// learn a number it already has is the slowest way to ask.
+	b := modalPack(o, len(want), true)
+	za, zb := czLen(a), len(b)
+	if zb < za {
+		return b, zb
 	}
-	return a
+	return a, za
 }
 
 // modalPasses is how many times the selector re-chooses against its own

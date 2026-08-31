@@ -1,8 +1,10 @@
 package presage
 
 import (
+	"errors"
 	"fmt"
 	"slices"
+	"sync"
 
 	"github.com/wjordan/presage/delta"
 	"github.com/wjordan/presage/internal/cz"
@@ -28,47 +30,48 @@ type Cutter interface {
 func splitResidual(pred, target []byte, cuts []int64, disp *delta.DispContext) (stream []byte, modal bool, size int, err error) {
 	bounds := append([]int64{0}, cuts...)
 	bounds = append(bounds, int64(len(target)))
-	w := &wbuf{}
-	var zs [][]byte
-	n := 0
-	for i := 0; i+1 < len(bounds); i++ {
+	n := len(bounds) - 1
+	// Each piece is independent, so they are coded concurrently and written
+	// back by index: the stream this returns does not depend on the order
+	// they finish in. The pieces are extremely skewed -- on a browser one of
+	// them carries most of the correction -- so this is worth a fifth, not
+	// the piece count, and the limit is there because each worker holds its
+	// own copy of a piece's streams.
+	out := make([]pieceCode, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, min(n, splitWorkers))
+	for i := range n {
 		a, b := bounds[i], bounds[i+1]
 		if a < 0 || b <= a || b > int64(len(target)) {
 			return nil, false, 0, fmt.Errorf("presage: cut %d..%d outside a %d-byte region", a, b, len(target))
 		}
-		corr, err := delta.EncodeCorrectionAdaptive(pred[a:b], target[a:b])
-		if err != nil {
-			return nil, false, 0, err
-		}
-		cols, err := delta.EncodeColumnarDisp(pred[a:b], target[a:b], disp.Restrict(int(a), int(b)))
-		if err != nil {
-			return nil, false, 0, err
-		}
-		colKind := pieceColumnar
-		if len(cols) != delta.ColumnarStreams {
-			colKind = pieceColumnarDisp
-		}
-		sides, err := delta.CMColumnarSides(pred[a:b], cols[0], cols[1])
-		if err != nil {
-			return nil, false, 0, err
-		}
-		kind, streams := pieceLZ, [][]byte{corr}
-		zl, cl := compressAll(streams, nil), compressAll(cols, colSides(sides))
-		if total(cl) < total(zl) {
-			kind, streams, zl = colKind, cols, cl
-		} else {
-			modal = modal || delta.UsesModalCorrection(corr)
-		}
-		w.u(uint64(b - a))
-		w.raw([]byte{kind})
-		w.u(uint64(len(streams)))
-		for j, z := range zl {
-			w.u(uint64(len(streams[j])))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			out[i], errs[i] = codePiece(pred[a:b], target[a:b], disp.Restrict(int(a), int(b)))
+		}()
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		return nil, false, 0, err
+	}
+
+	w := &wbuf{}
+	var zs [][]byte
+	for i, p := range out {
+		modal = modal || p.modal
+		w.u(uint64(bounds[i+1] - bounds[i]))
+		w.raw([]byte{p.kind})
+		w.u(uint64(len(p.streams)))
+		for j, z := range p.zl {
+			w.u(uint64(len(p.streams[j])))
 			w.u(uint64(len(z.b)))
 			w.raw([]byte{z.codec})
 			zs = append(zs, z.b)
 		}
-		n++
 	}
 	head := &wbuf{}
 	head.u(uint64(n))
@@ -77,6 +80,51 @@ func splitResidual(pred, target []byte, cuts []int64, disp *delta.DispContext) (
 		stream = append(stream, z...)
 	}
 	return stream, modal, len(stream), nil
+}
+
+// splitWorkers bounds how many pieces are coded at once. A piece's coder
+// holds the span's correction, its columns and both compressed forms, so the
+// bound is about peak memory rather than about cores; the skew means a
+// higher one buys almost nothing anyway.
+const splitWorkers = 4
+
+// pieceCode is one coded piece, held until every piece is done so the
+// stream is assembled in cut order.
+type pieceCode struct {
+	kind    byte
+	streams [][]byte
+	zl      []zstream
+	modal   bool
+}
+
+// codePiece codes one piece both ways and keeps the smaller.
+func codePiece(pred, target []byte, disp *delta.DispContext) (p pieceCode, err error) {
+	corr, err := delta.EncodeCorrectionAdaptive(pred, target)
+	if err != nil {
+		return p, err
+	}
+	cols, err := delta.EncodeColumnarDisp(pred, target, disp)
+	if err != nil {
+		return p, err
+	}
+	colKind := pieceColumnar
+	if len(cols) != delta.ColumnarStreams {
+		colKind = pieceColumnarDisp
+	}
+	sides, err := delta.CMColumnarSides(pred, cols[0], cols[1])
+	if err != nil {
+		return p, err
+	}
+	p.kind, p.streams = pieceLZ, [][]byte{corr}
+	lzT, colT := trialAll(p.streams, nil), trialAll(cols, colSides(sides))
+	won := lzT
+	if colT.total < lzT.total {
+		p.kind, p.streams, won = colKind, cols, colT
+	} else {
+		p.modal = delta.UsesModalCorrection(corr)
+	}
+	p.zl = compressAll(p.streams, won.cm)
+	return p, nil
 }
 
 // Piece kinds.
@@ -111,34 +159,50 @@ func colSides(buckets []*delta.CMSide) []*delta.CMSide {
 	return sides
 }
 
-// compressAll compresses each stream with cz. When sides is non-nil the
-// large streams are additionally offered to the CM coder, under whatever
-// per-position conditioning they have, and the smaller of the two ships:
-// the coder is a candidate, never a commitment.
-func compressAll(streams [][]byte, sides []*delta.CMSide) []zstream {
+// A pieceTrial prices one candidate shape of a piece. Only one of the two shapes
+// ships, so the price is a cz.SizeProxy rather than a real compression --
+// but the CM coder's price is its real output, because that coder has no
+// cheap proxy and its bytes are worth keeping: if the shape it belongs to
+// wins, compressAll ships them without coding them twice.
+type pieceTrial struct {
+	cm    [][]byte // the CM coder's output per stream, nil where not offered
+	total int
+}
+
+// trialAll prices each stream. When sides is non-nil the large streams are
+// additionally offered to the CM coder, under whatever per-position
+// conditioning they have: the coder is a candidate, never a commitment.
+func trialAll(streams [][]byte, sides []*delta.CMSide) pieceTrial {
+	t := pieceTrial{cm: make([][]byte, len(streams))}
+	for i, s := range streams {
+		n := cz.SizeProxy(s)
+		if sides != nil && len(s) >= cmMinStream {
+			var side *delta.CMSide
+			if i < len(sides) {
+				side = sides[i]
+			}
+			if c, err := delta.CMEncode(s, side); err == nil {
+				t.cm[i] = c
+				n = min(n, len(c))
+			}
+		}
+		t.total += n
+	}
+	return t
+}
+
+// compressAll makes the shipping table for the shape that won: each stream
+// compressed with cz for real, and the CM coder's bytes from the trial kept
+// wherever they are still smaller.
+func compressAll(streams [][]byte, cm [][]byte) []zstream {
 	out := make([]zstream, len(streams))
 	for i, s := range streams {
 		out[i].codec, out[i].b = cz.Compress(s)
-		if sides == nil || len(s) < cmMinStream {
-			continue
-		}
-		var side *delta.CMSide
-		if i < len(sides) {
-			side = sides[i]
-		}
-		if c, err := delta.CMEncode(s, side); err == nil && len(c) < len(out[i].b) {
-			out[i] = zstream{codecCM, c}
+		if i < len(cm) && cm[i] != nil && len(cm[i]) < len(out[i].b) {
+			out[i] = zstream{codecCM, cm[i]}
 		}
 	}
 	return out
-}
-
-func total(zs []zstream) int {
-	n := 0
-	for _, z := range zs {
-		n += len(z.b)
-	}
-	return n
 }
 
 // applySplitResidual is splitResidual's decoder: each piece is decompressed
@@ -249,19 +313,4 @@ func decodeStream(codec byte, z []byte, n int, side *delta.CMSide) ([]byte, erro
 		return delta.CMDecode(z, n, side)
 	}
 	return cz.Decompress(codec, z, n)
-}
-
-// frameCost is what a stream costs once the container frames and
-// compresses it, so a piecewise correction is chosen on the number that
-// ships.
-func frameCost(b []byte) int {
-	n := 0
-	for off := 0; ; off += FrameSize {
-		end := min(off+FrameSize, len(b))
-		_, z := cz.Compress(b[off:end])
-		n += len(z)
-		if end == len(b) {
-			return n
-		}
-	}
 }

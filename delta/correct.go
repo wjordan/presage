@@ -164,26 +164,31 @@ func (sh corrShape) write(pred, want []byte, flagged bool) []byte {
 	return w.b
 }
 
-// encodeCorrection writes the stream that turns pred into want. The two must
-// be the same length.
+// encodeCorrectionSized writes the stream that turns pred into want. The two
+// must be the same length.
 //
 // adaptive is transform 2 and above: the correction is written both ways,
 // both are compressed by the compressor that will ship them, and the smaller
 // is kept. The second pass is the price -- one more compression of the
 // largest stream in the patch -- and it is what makes a patch release pay
 // its own encoding rather than a minor release's.
-func encodeCorrection(pred, want []byte, adaptive bool) ([]byte, error) {
+// The winner's compressed size is returned with it: the caller that prices a
+// correction against another encoding needs exactly this number, and
+// recomputing it is a second compression of the largest stream in the patch.
+func encodeCorrectionSized(pred, want []byte, adaptive bool) ([]byte, int, error) {
 	if len(pred) != len(want) {
-		return nil, fmt.Errorf("delta: prediction is %d bytes, target is %d", len(pred), len(want))
+		return nil, 0, fmt.Errorf("delta: prediction is %d bytes, target is %d", len(pred), len(want))
 	}
 	a := shipped.write(pred, want, adaptive)
 	if !adaptive {
-		return a, nil
+		return a, 0, nil
 	}
-	cands := [][]byte{a, nearmiss.write(pred, want, true), encodeModal(pred, want)}
+	modal, modalSize := encodeModal(pred, want)
+	cands := [][]byte{a, nearmiss.write(pred, want, true), modal}
 	sizes := make([]int, len(cands))
+	sizes[2] = modalSize
 	var wg sync.WaitGroup
-	for i := range cands {
+	for i := range cands[:2] {
 		wg.Add(1)
 		go func() { defer wg.Done(); sizes[i] = czLen(cands[i]) }()
 	}
@@ -194,7 +199,7 @@ func encodeCorrection(pred, want []byte, adaptive bool) ([]byte, error) {
 			best = i
 		}
 	}
-	return cands[best], nil
+	return cands[best], sizes[best], nil
 }
 
 // UsesModalCorrection reports whether a stream from EncodeCorrectionAdaptive
@@ -208,15 +213,16 @@ func UsesModalCorrection(stream []byte) bool {
 	return r.err == nil && (shape == modalShape || shape == modalSplitShape)
 }
 
-// czLen is what a stream will cost once the container compresses it: the
-// same compressor at the same frame size, so the shape is chosen on the
-// number that ships.
+// czLen is what a stream will cost once the container compresses it, at the
+// same frame size so that the shape is chosen on the number that ships. It
+// is a proxy for that number rather than the number itself: nothing it
+// compresses is kept, and the shape it picks is what matters, not the
+// hundredth of a percent by which the proxy misprices it (internal/cz).
 func czLen(b []byte) int {
 	n := 0
 	for off := 0; ; off += FrameSize {
 		end := min(off+FrameSize, len(b))
-		_, z := cz.Compress(b[off:end])
-		n += len(z)
+		n += cz.SizeProxy(b[off:end])
 		if end == len(b) {
 			return n
 		}
@@ -231,11 +237,26 @@ func EncodeCorrection(pred, want []byte) ([]byte, error) {
 	return encodeCorrection(pred, want, false)
 }
 
+// encodeCorrection is encodeCorrectionSized for the callers that do not need
+// the winner's compressed size.
+func encodeCorrection(pred, want []byte, adaptive bool) ([]byte, error) {
+	b, _, err := encodeCorrectionSized(pred, want, adaptive)
+	return b, err
+}
+
 // EncodeCorrectionAdaptive writes the correction in whichever of the two
 // transform-2 shapes compresses smaller, for a codec built on top of this
 // package; the stream is applied with ApplyFlaggedCorrection.
 func EncodeCorrectionAdaptive(pred, want []byte) ([]byte, error) {
 	return encodeCorrection(pred, want, true)
+}
+
+// EncodeCorrectionAdaptiveSized is EncodeCorrectionAdaptive and also returns
+// what the winning shape costs once the container frames and compresses it.
+// A caller pricing this correction against another encoding of the same
+// bytes wants exactly that number, and it has already been computed here.
+func EncodeCorrectionAdaptiveSized(pred, want []byte) ([]byte, int, error) {
+	return encodeCorrectionSized(pred, want, true)
 }
 
 // CorrectionShapes writes the correction in both shapes a transform-2

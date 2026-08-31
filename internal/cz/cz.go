@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 
 	"github.com/andybalholm/brotli"
@@ -70,6 +71,67 @@ func Compress(src []byte) (codec byte, out []byte) {
 		codec, out = Brotli, buf.Bytes()
 	}
 	return codec, out
+}
+
+// An encoder choosing between two shapes of the same bytes needs a number,
+// not the bytes. Compress gives it the exact number and charges brotli-11 for
+// it, and most of what brotli-11 does on this path is thrown away: the losing
+// shape is never written. SizeProxy answers the same question with a fast
+// compressor, so the trial costs a thirtieth and only the bytes that ship are
+// compressed for real.
+//
+// A proxy's job is to *rank* two candidates the way quality 11 would, so the
+// obvious choice is brotli at a low quality -- the same algorithm with a
+// smaller search. Measured, it is not: on Chrome the two proxies pick exactly
+// the same shapes and cost the same wall time, and on the small streams the
+// correction tests use, quality 5 misprices a nine-byte margin that zstd gets
+// right. zstd is what a trial already computes on its way to brotli, so it is
+// the default. See docs/general/research/encode-profile.md.
+const (
+	proxyZstd = iota
+	proxyBrotli5
+	proxyExact // brotli-11: what a trial cost before, for measurement
+)
+
+// sizeProxyMode is settable by PRESAGE_SIZE_PROXY ("brotli5", "zstd",
+// "exact") so the proxy can be re-measured against the real compressor
+// without a rebuild. It changes encode-side choices only; no patch this
+// package produces is unreadable under another setting.
+var sizeProxyMode = func() int {
+	switch os.Getenv("PRESAGE_SIZE_PROXY") {
+	case "brotli5":
+		return proxyBrotli5
+	case "exact":
+		return proxyExact
+	}
+	return proxyZstd
+}()
+
+// counter is the sink for a compressor whose output is only ever measured.
+type counter int
+
+func (c *counter) Write(p []byte) (int, error) { *c += counter(len(p)); return len(p), nil }
+
+// SizeProxy estimates what Compress would return for src. It is never larger
+// than src, as Compress is not.
+func SizeProxy(src []byte) int {
+	n := len(src)
+	switch sizeProxyMode {
+	case proxyExact:
+		_, z := Compress(src)
+		return len(z)
+	case proxyBrotli5:
+		var c counter
+		w := brotli.NewWriterOptions(&c, brotli.WriterOptions{Quality: 5, LGWin: 24})
+		if _, err := w.Write(src); err == nil && w.Close() == nil && int(c) < n {
+			n = int(c)
+		}
+	default:
+		if z := len(CompressZstd(src)); z < n {
+			n = z
+		}
+	}
+	return n
 }
 
 // readAll reads r into buf, refusing to grow past n+1 bytes so that a

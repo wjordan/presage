@@ -160,7 +160,7 @@ func residual(m Module, refs [][]byte, plan, pred, target []byte) ([]byte, byte,
 	if len(pred) != len(target) {
 		return nil, 0, fmt.Errorf("presage: module %s predicted %d bytes for a %d-byte region", m.Name(), len(pred), len(target))
 	}
-	whole, err := delta.EncodeCorrectionAdaptive(pred, target)
+	whole, wholeCost, err := delta.EncodeCorrectionAdaptiveSized(pred, target)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -184,7 +184,7 @@ func residual(m Module, refs [][]byte, plan, pred, target []byte) ([]byte, byte,
 	if err != nil {
 		return nil, 0, err
 	}
-	if size >= frameCost(whole) {
+	if size >= wholeCost {
 		return whole, flags, nil
 	}
 	flags = FlagSplitResidual
