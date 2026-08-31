@@ -28,14 +28,15 @@ func (Module) ID() byte     { return presage.ModuleGo }
 func (Module) Name() string { return "go" }
 func (Module) Exact() bool  { return true }
 
-// The plan is three length-prefixed parts: the transform's plan, the DWARF
-// plan, and the equivalence runs of the sections the DWARF plan does not
-// table. The last two are empty for a binary without .debug_info.
-type plan struct{ tf, dw, runs []byte }
+// The plan is four length-prefixed parts: the transform's plan, the DWARF
+// plan, the equivalence runs of the sections the DWARF plan does not table,
+// and the fips flag (fips.go). The middle two are empty for a binary
+// without .debug_info.
+type plan struct{ tf, dw, runs, fips []byte }
 
 func (p plan) marshal() []byte {
 	var b []byte
-	for _, part := range [][]byte{p.tf, p.dw, p.runs} {
+	for _, part := range [][]byte{p.tf, p.dw, p.runs, p.fips} {
 		b = binary.AppendUvarint(b, uint64(len(part)))
 		b = append(b, part...)
 	}
@@ -43,7 +44,7 @@ func (p plan) marshal() []byte {
 }
 
 func parsePlan(b []byte) (plan, error) {
-	var parts [3][]byte
+	var parts [4][]byte
 	for i := range parts {
 		n, k := binary.Uvarint(b)
 		if k <= 0 || n > uint64(len(b)-k) {
@@ -54,7 +55,7 @@ func parsePlan(b []byte) (plan, error) {
 	if len(b) != 0 {
 		return plan{}, fmt.Errorf("%w: %d trailing go plan bytes", presage.ErrCorrupt, len(b))
 	}
-	return plan{parts[0], parts[1], parts[2]}, nil
+	return plan{parts[0], parts[1], parts[2], parts[3]}, nil
 }
 
 // Analyse runs the transform on reference 0 and the target. A pair the
@@ -70,7 +71,8 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	bare := plan{tf: tf}
+	fp := fipsPart(target)
+	bare := plan{tf: tf, fips: fp}
 	secs, ok := debugSecs(old, target)
 	if !ok {
 		return bare.marshal(), img.Pred, nil
@@ -91,7 +93,7 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 	if !ok {
 		return bare.marshal(), img.Pred, nil
 	}
-	layered := plan{tf: tf, dw: dp.Marshal(), runs: dp.MarshalRuns()}
+	layered := plan{tf: tf, dw: dp.Marshal(), runs: dp.MarshalRuns(), fips: fp}
 	// The prediction is what the decoder will build from the plan, not
 	// what the encoder knows; and the layer is kept only where it pays,
 	// which a release whose debug sections barely changed does not — its

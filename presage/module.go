@@ -28,6 +28,18 @@ type Module interface {
 	Exact() bool
 }
 
+// Finaliser is an optional module extension for bytes the decoder can
+// recompute from the finished output -- a checksum the linker derives from
+// the rest of the file. The encoder prices the residual against
+// MaskResidual's copy of the prediction, where those bytes are already
+// right and so cost nothing; the decoder calls Finalise to recompute them
+// once the residual is applied. The container's target hash still checks
+// the result, so a wrong recomputation is an error, never a wrong output.
+type Finaliser interface {
+	MaskResidual(plan, pred, target []byte) []byte
+	Finalise(plan, out []byte) error
+}
+
 // Core module ids. Ids above 15 are for admitted modules.
 const (
 	ModuleLZ   = 0 // shifted delta against reference 0; the fallback for anything

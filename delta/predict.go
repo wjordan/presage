@@ -186,6 +186,9 @@ func predictSections(pred []byte, old, new *gobin.Bin, l *layout, mp *mapper, st
 				}
 			case ptrOnly[ns.Name]:
 				predictDataSection(old, new, ns.Name, nil, mp, dst)
+				if ns.Name == ".go.module" {
+					predictModuledata(old, new, dst)
+				}
 			default:
 				copy(dst, os.Data)
 			}

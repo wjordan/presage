@@ -34,6 +34,29 @@ func corpus(t *testing.T) []string {
 		}
 	}
 	sort.Strings(files)
+	if testing.Short() {
+		// The smallest binary of each flavour: the shapes without the
+		// repetitions, matching delta's short gate.
+		rep := map[string]string{}
+		size := func(p string) int64 {
+			fi, err := os.Stat(p)
+			if err != nil {
+				return 1 << 62
+			}
+			return fi.Size()
+		}
+		for _, p := range files {
+			f := flavour(p)
+			if cur, ok := rep[f]; !ok || size(p) < size(cur) {
+				rep[f] = p
+			}
+		}
+		files = files[:0]
+		for _, f := range rep {
+			files = append(files, f)
+		}
+		sort.Strings(files)
+	}
 	return files
 }
 

@@ -123,7 +123,11 @@ func Encode(refs [][]byte, target []byte, o Options) ([]byte, error) {
 		chosen = reg.Get(ModuleLZ)
 		plan, pred, _ = chosen.Analyse(refs, target)
 	}
-	res, rflags, err := residual(chosen, pred, target)
+	predRes := pred
+	if f, ok := chosen.(Finaliser); ok {
+		predRes = f.MaskResidual(plan, pred, target)
+	}
+	res, rflags, err := residual(chosen, predRes, target)
 	if err != nil {
 		return nil, err
 	}
@@ -223,6 +227,11 @@ func Apply(refs [][]byte, patch []byte, reg *Registry, w io.Writer) error {
 		bytes, err := applyResidual(m, pred, res, rg.Length, h.Flags)
 		if err != nil {
 			return err
+		}
+		if f, ok := m.(Finaliser); ok {
+			if err := f.Finalise(plan, bytes); err != nil {
+				return err
+			}
 		}
 		out = append(out, bytes...)
 	}

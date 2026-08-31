@@ -81,9 +81,21 @@ const layoutMagic = "BSL1"
 const maxFuncs = 1 << 24
 
 // encodeSects writes the new section table as deltas against the old one.
+// Section address deltas are coded against the previous section's delta and
+// the file offset against the address delta: a one-line change shifts a run
+// of sections by one constant, and this makes the run cost nothing.
 func encodeSects(w *wbuf, old *gobin.Bin, sects []sectInfo) {
 	w.u(uint64(len(sects)))
 	expect := 0
+	var pa int64
+	run := 0
+	flush := func() {
+		if run > 0 {
+			w.raw([]byte{3})
+			w.u(uint64(run))
+			run = 0
+		}
+	}
 	for _, s := range sects {
 		k := -1
 		for i, os := range old.Order {
@@ -92,6 +104,16 @@ func encodeSects(w *wbuf, old *gobin.Bin, sects []sectInfo) {
 				break
 			}
 		}
+		if k == expect {
+			os := old.Order[k]
+			da := int64(s.Addr) - int64(os.Addr)
+			if da == pa && int64(s.Off)-int64(os.Off) == da && s.Size == os.Size && s.NoBits == os.NoBits {
+				run++
+				expect++
+				continue
+			}
+		}
+		flush()
 		var oa, oo, osz uint64
 		switch {
 		case k < 0:
@@ -108,34 +130,60 @@ func encodeSects(w *wbuf, old *gobin.Bin, sects []sectInfo) {
 		if k >= 0 {
 			oa, oo, osz = old.Order[k].Addr, old.Order[k].Off, old.Order[k].Size
 		}
-		w.s(int64(s.Addr) - int64(oa))
-		w.s(int64(s.Off) - int64(oo))
+		da := int64(s.Addr) - int64(oa)
+		w.s(da - pa)
+		w.s(int64(s.Off) - int64(oo) - da)
 		w.s(int64(s.Size) - int64(osz))
+		pa = da
 		nb := byte(0)
 		if s.NoBits {
 			nb = 1
 		}
 		w.raw([]byte{nb})
 	}
+	flush()
 }
 
 func decodeSects(r *rbuf, old *gobin.Bin) []sectInfo {
 	n := r.un(1<<12, "section count")
 	out := make([]sectInfo, 0, n)
 	expect := 0
+	var pa int64
+	run := 0
 	for i := uint64(0); i < n && r.err == nil; i++ {
 		var s sectInfo
 		k := -1
-		switch op := r.byte(); op {
-		case 0:
+		if run == 0 {
+			switch op := r.byte(); op {
+			case 0:
+				k = expect
+			case 1:
+				k = int(r.un(uint64(len(old.Order)), "old section index"))
+			case 2:
+				s.Name = string(r.take(r.un(256, "section name length")))
+			case 3:
+				run = int(r.un(n-i, "section run length"))
+				if run == 0 {
+					r.fail("empty section run")
+					return nil
+				}
+			default:
+				r.fail("bad section op %d", op)
+				return nil
+			}
+		}
+		if run > 0 {
+			run--
 			k = expect
-		case 1:
-			k = int(r.un(uint64(len(old.Order)), "old section index"))
-		case 2:
-			s.Name = string(r.take(r.un(256, "section name length")))
-		default:
-			r.fail("bad section op %d", op)
-			return nil
+			if k >= len(old.Order) {
+				r.fail("old section index %d out of range", k)
+				return nil
+			}
+			os := old.Order[k]
+			out = append(out, sectInfo{Name: os.Name, Addr: uint64(int64(os.Addr) + pa),
+				Off: uint64(int64(os.Off) + pa), Size: os.Size, NoBits: os.NoBits})
+			expect = k + 1
+			continue
 		}
 		var oa, oo, osz uint64
 		if k >= 0 {
@@ -147,9 +195,11 @@ func decodeSects(r *rbuf, old *gobin.Bin) []sectInfo {
 			oa, oo, osz = old.Order[k].Addr, old.Order[k].Off, old.Order[k].Size
 			expect = k + 1
 		}
-		s.Addr = uint64(int64(oa) + r.s())
-		s.Off = uint64(int64(oo) + r.s())
+		da := pa + r.s()
+		s.Addr = uint64(int64(oa) + da)
+		s.Off = uint64(int64(oo) + da + r.s())
 		s.Size = uint64(int64(osz) + r.s())
+		pa = da
 		s.NoBits = r.byte() == 1
 		out = append(out, s)
 	}
@@ -431,11 +481,28 @@ func decodeDataMapRLE(b []byte) (*dataMap, error) {
 // name that is new; then the size change. In a normal release almost every
 // function is op 0 with a zero size delta, which is why 110 K functions cost
 // 11 KB.
+// Op 3 runs over the common case -- functions matched in order with their
+// size unchanged -- so an unchanged span of the binary costs two bytes, not
+// two per function.
 func encodeFuncLayout(old, new *gobin.Bin, m *match) []byte {
 	w := &wbuf{}
 	expect := 0
+	run := 0
+	flush := func() {
+		if run > 0 {
+			w.raw([]byte{3})
+			w.u(uint64(run))
+			run = 0
+		}
+	}
 	for j, f := range new.Funcs {
 		i := m.NewToOld[j]
+		if i == expect && int64(f.Size()) == int64(old.Funcs[i].Size()) {
+			run++
+			expect = i + 1
+			continue
+		}
+		flush()
 		var oldSize int64
 		switch {
 		case i < 0:
@@ -453,6 +520,7 @@ func encodeFuncLayout(old, new *gobin.Bin, m *match) []byte {
 		}
 		w.s(int64(f.Size()) - oldSize)
 	}
+	flush()
 	return w.b
 }
 
@@ -465,19 +533,33 @@ func decodeFuncLayout(old *gobin.Bin, l *layout) ([]*gobin.Func, *match, error) 
 	}
 	expect := 0
 	entry := l.FirstEntry
+	run := 0
 	for j := 0; j < l.NFunc; j++ {
 		i := -1
 		var name string
 		var oldSize int64
-		switch op := r.byte(); op {
-		case 0:
+		sized := false
+		if run == 0 {
+			switch op := r.byte(); op {
+			case 0:
+				i = expect
+			case 1:
+				i = int(r.un(uint64(len(old.Funcs)), "old function index"))
+			case 2:
+				name = string(r.take(r.un(1<<16, "function name length")))
+			case 3:
+				run = int(r.un(uint64(l.NFunc-j), "function run length"))
+				if run == 0 {
+					return nil, nil, fmt.Errorf("%w: empty function run", errCorrupt)
+				}
+			default:
+				return nil, nil, fmt.Errorf("%w: bad function op %d", errCorrupt, op)
+			}
+		}
+		if run > 0 {
+			run--
 			i = expect
-		case 1:
-			i = int(r.un(uint64(len(old.Funcs)), "old function index"))
-		case 2:
-			name = string(r.take(r.un(1<<16, "function name length")))
-		default:
-			return nil, nil, fmt.Errorf("%w: bad function op %d", errCorrupt, op)
+			sized = true
 		}
 		if r.err != nil {
 			return nil, nil, r.err
@@ -491,7 +573,10 @@ func decodeFuncLayout(old *gobin.Bin, l *layout) ([]*gobin.Func, *match, error) 
 			expect = i + 1
 			m.OldToNew[i] = j
 		}
-		size := oldSize + r.s()
+		size := oldSize
+		if !sized {
+			size += r.s()
+		}
 		if r.err != nil {
 			return nil, nil, r.err
 		}

@@ -66,7 +66,9 @@ type Region struct {
 	PlanLen int64
 }
 
-// Frame describes one compressed piece of the body.
+// Frame describes one compressed piece of the body. A single-frame patch
+// omits the per-frame hash: the frame is the whole body, all or nothing,
+// and the target hash already checks it.
 type Frame struct {
 	Off, Len, ZLen int64
 	Codec          byte
@@ -119,7 +121,9 @@ func marshalHeader(h *Header, body []byte) []byte {
 		f.u(uint64(fr.Len))
 		f.u(uint64(fr.ZLen))
 		f.raw([]byte{fr.Codec})
-		f.raw(fr.B3[:])
+		if len(h.Frames) > 1 {
+			f.raw(fr.B3[:])
+		}
 	}
 	w.bytes(f.b)
 	return append(w.b, body...)
@@ -172,7 +176,9 @@ func ParseHeader(b []byte) (*Header, error) {
 		fr.Len = int64(f.un(FrameSize, "frame length"))
 		fr.ZLen = int64(f.un(maxPatchSize, "frame compressed length"))
 		fr.Codec = f.byte()
-		copy(fr.B3[:], f.take(32))
+		if n > 1 {
+			copy(fr.B3[:], f.take(32))
+		}
 		if fr.Off != off {
 			f.fail("frame %d starts at %d, want %d", i, fr.Off, off)
 			break
@@ -221,7 +227,7 @@ func readBody(h *Header, patch []byte) ([]byte, error) {
 		}
 		z := patch[pos : pos+f.ZLen]
 		pos += f.ZLen
-		if hashOf(z) != f.B3 {
+		if len(h.Frames) > 1 && hashOf(z) != f.B3 {
 			return nil, fmt.Errorf("%w: frame %d hash mismatch", ErrCorrupt, i)
 		}
 		raw, err := cz.Decompress(f.Codec, z, int(f.Len))

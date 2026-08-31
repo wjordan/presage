@@ -22,7 +22,7 @@ import (
 // release, which the repository does not carry, so it runs over a corpus
 // directory named by BINSYNC_CORPUS (bench/out/bin127 after bench/build.sh).
 func TestSelfPrediction(t *testing.T) {
-	for _, path := range corpus(t) {
+	for _, path := range shortCorpus(corpus(t)) {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			t.Parallel()
 			bin := readFile(t, path)
@@ -61,7 +61,9 @@ func TestSelfPrediction(t *testing.T) {
 // 168 of the 600 ordered pairs on the reference corpus and 7.9% of the work:
 // the 432 pairs it leaves out are repetitions of the same cross-flavour
 // shapes, and they cost 103 s each because the prediction is mostly wrong.
-// Set BINSYNC_CORPUS_ALL=1 for all of them (~35 min, the release gate).
+// Set BINSYNC_CORPUS_ALL=1 for all of them (~35 min, the release gate), or
+// `-short` for one pair per flavour shape (~2 min): the flavour shapes are
+// the decode-path coverage, the repetitions are the wall clock.
 func TestCorpusRoundTrip(t *testing.T) {
 	for _, pair := range corpusPairs(corpus(t)) {
 		a, b := pair[0], pair[1]
@@ -174,8 +176,69 @@ func corpusPairs(files []string) [][2]string {
 			}
 		}
 	}
+	if testing.Short() {
+		// One same-flavour pair per flavour, plus the one cheapest
+		// cross-flavour pair, keeps every decode path and drops the
+		// repetitions.
+		perFlavour := map[string][2]string{}
+		for _, pr := range out {
+			f := flavour(pr[0])
+			if cur, ok := perFlavour[f]; !ok || size(pr[0])+size(pr[1]) < size(cur[0])+size(cur[1]) {
+				perFlavour[f] = pr
+			}
+		}
+		out = out[:0]
+		for _, f := range slices.Sorted(maps.Keys(perFlavour)) {
+			out = append(out, perFlavour[f])
+		}
+		var cross [2]string
+		for _, k := range slices.Sorted(maps.Keys(rep)) {
+			pr := rep[k]
+			if cross[0] == "" || size(pr[0])+size(pr[1]) < size(cross[0])+size(cross[1]) {
+				cross = pr
+			}
+		}
+		if cross[0] != "" {
+			out = append(out, cross)
+		}
+		return out
+	}
 	for _, k := range slices.Sorted(maps.Keys(rep)) {
 		out = append(out, rep[k])
+	}
+	return out
+}
+
+// shortCorpus keeps the smallest binary of each flavour under `-short`.
+func shortCorpus(files []string) []string {
+	if !testing.Short() {
+		return files
+	}
+	flavour := func(p string) string {
+		n := filepath.Base(p)
+		i := strings.Index(n, "-")
+		if i < 0 {
+			return n
+		}
+		return strings.TrimSuffix(n[i+1:], "-rebuild")
+	}
+	size := func(p string) int64 {
+		fi, err := os.Stat(p)
+		if err != nil {
+			return 1 << 62
+		}
+		return fi.Size()
+	}
+	rep := map[string]string{}
+	for _, p := range files {
+		f := flavour(p)
+		if cur, ok := rep[f]; !ok || size(p) < size(cur) {
+			rep[f] = p
+		}
+	}
+	var out []string
+	for _, f := range slices.Sorted(maps.Keys(rep)) {
+		out = append(out, rep[f])
 	}
 	return out
 }

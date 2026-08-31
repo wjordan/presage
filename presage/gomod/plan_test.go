@@ -8,10 +8,10 @@ import (
 )
 
 func TestPlanParts(t *testing.T) {
-	p := plan{tf: []byte("layout"), dw: []byte("dwarf"), runs: nil}
+	p := plan{tf: []byte("layout"), dw: []byte("dwarf"), runs: nil, fips: []byte{1}}
 	b := p.marshal()
 	got, err := parsePlan(b)
-	if err != nil || string(got.tf) != "layout" || string(got.dw) != "dwarf" || len(got.runs) != 0 {
+	if err != nil || string(got.tf) != "layout" || string(got.dw) != "dwarf" || len(got.runs) != 0 || string(got.fips) != "\x01" {
 		t.Fatalf("parsed %+v, %v", got, err)
 	}
 	for _, bad := range [][]byte{b[:len(b)-1], append(append([]byte{}, b...), 0), {0xff, 0xff, 0xff, 0xff, 0xff}} {
