@@ -49,7 +49,7 @@ func codeUnits(r symbols.Reader, text section) ([]codeUnit, error) {
 		}
 		g.maxSize = max(g.maxSize, f.Size)
 		if f.Name != "" {
-			g.names = append(g.names, fingerprint(f.Name))
+			g.names = append(g.names, fingerprint(symbols.CanonicalName(f.Name)))
 		}
 	})
 	if err != nil {
@@ -169,17 +169,32 @@ func constructPlan(oldUnits, newUnits []codeUnit, oldText, newText []byte, oldAd
 		}
 		newCode := code(newText, n)
 		k := hashKey{Size: n.Size, Hash: x86.ContentHash(newCode)}
+		// Monomorphisation and ICF give one canonical body many twins,
+		// so take the nearest by position as chooseNameCandidate does
+		// rather than the first: an arbitrary source poisons the
+		// retarget and the matcher's expected-source hint.
+		best, bestDist := -1, uint64(0)
 		for _, oi := range byHash[k] {
 			o := oldUnits[oi]
 			if !x86.Equal(code(oldText, o), newCode) {
 				continue
 			}
-			maps = append(maps, mapping{Src: o.Off, SrcSize: o.Size, Dst: n.Off, DstSize: n.Size, Copy: true})
-			st.ContentMapped++
-			st.CopyUnits++
-			st.CopyBytes += int(n.Size)
-			break
+			dist := max(o.Off, n.Off) - min(o.Off, n.Off)
+			if best < 0 || dist < bestDist {
+				best, bestDist = oi, dist
+			}
+			if dist == 0 {
+				break
+			}
 		}
+		if best < 0 {
+			continue
+		}
+		o := oldUnits[best]
+		maps = append(maps, mapping{Src: o.Off, SrcSize: o.Size, Dst: n.Off, DstSize: n.Size, Copy: true})
+		st.ContentMapped++
+		st.CopyUnits++
+		st.CopyBytes += int(n.Size)
 	}
 	slices.SortFunc(maps, func(a, b mapping) int {
 		if a.Dst != b.Dst {
