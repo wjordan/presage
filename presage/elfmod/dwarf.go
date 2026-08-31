@@ -92,12 +92,15 @@ func eqCovers(ep equivalencePlan, off, size uint64) bool {
 	return false
 }
 
-// textEquivalences counts the equivalences that write into .text.
+// textEquivalences counts the equivalences that write into a code window.
 func textEquivalences(ep equivalencePlan) int {
 	n := 0
 	for _, e := range ep.Eqs {
-		if e.Dst < ep.NewText.Off+ep.NewText.Size && e.Dst+e.N > ep.NewText.Off {
-			n++
+		for _, w := range ep.Windows {
+			if e.Dst < w.New.Off+w.New.Size && e.Dst+e.N > w.New.Off {
+				n++
+				break
+			}
 		}
 	}
 	return n

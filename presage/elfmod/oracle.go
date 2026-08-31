@@ -7,12 +7,12 @@ import "github.com/wjordan/presage/delta/x86"
 // the runs once. Both parts are immutable after construction.
 type oracleParts struct {
 	ep equivalencePlan
-	lk *addressLookup
+	lk *codeLookup
 	sm sourceEquivalenceMapper
 }
 
-func newOracleParts(ep equivalencePlan, structure predictionPlan) oracleParts {
-	return oracleParts{ep: ep, lk: newAddressLookup(structure), sm: newSourceEquivalenceMapper(ep)}
+func newOracleParts(ep equivalencePlan, structures []predictionPlan) oracleParts {
+	return oracleParts{ep: ep, lk: newCodeLookup(structures), sm: newSourceEquivalenceMapper(ep)}
 }
 
 // image answers "where did this old address go" for an instruction
@@ -22,10 +22,22 @@ func newOracleParts(ep equivalencePlan, structure predictionPlan) oracleParts {
 func (o oracleParts) image(rp *relocPlan) ImageOracle {
 	ep, lk, sm := o.ep, o.lk, o.sm
 	return func(addr uint64) x86.Target {
-		if addr >= ep.OldText.Addr && addr < ep.OldText.Addr+ep.OldText.Size {
-			oldFile := ep.OldText.Off + addr - ep.OldText.Addr
-			if newFile, ok := sm.project(oldFile); ok && newFile >= ep.NewText.Off && newFile < ep.NewText.Off+ep.NewText.Size {
-				return x86.Target{Addr: ep.NewText.Addr + newFile - ep.NewText.Off, Known: true}
+		// Inside a window the byte-level projection through the runs is
+		// authoritative, and the window the bytes *land* in names the new
+		// address: a run carrying a function into another window is a real
+		// move (BOLT re-tiers hot and cold code on every profile). Only a
+		// projection landing outside every window says nothing.
+		for _, w := range ep.Windows {
+			if addr < w.Old.Addr || addr >= w.Old.Addr+w.Old.Size {
+				continue
+			}
+			oldFile := w.Old.Off + addr - w.Old.Addr
+			if newFile, ok := sm.project(oldFile); ok {
+				for _, x := range ep.Windows {
+					if newFile >= x.New.Off && newFile < x.New.Off+x.New.Size {
+						return x86.Target{Addr: x.New.Addr + newFile - x.New.Off, Known: true}
+					}
+				}
 			}
 			return lk.target(addr)
 		}
@@ -71,11 +83,13 @@ func (o oracleParts) pointer(rp *relocPlan) PointerOracle {
 }
 
 // funcSizeDeltas gives the size change of the unit starting at an old
-// address, from the function map.
-func funcSizeDeltas(structure predictionPlan) func(uint64) (int64, bool) {
-	deltas := make(map[uint64]int64, len(structure.Maps))
-	for _, m := range structure.Maps {
-		deltas[structure.OldAddr+m.Src] = int64(m.DstSize) - int64(m.SrcSize)
+// address, from every window's function map.
+func funcSizeDeltas(structures []predictionPlan) func(uint64) (int64, bool) {
+	deltas := make(map[uint64]int64)
+	for _, structure := range structures {
+		for _, m := range structure.Maps {
+			deltas[structure.OldAddr+m.Src] = int64(m.DstSize) - int64(m.SrcSize)
+		}
 	}
 	return func(addr uint64) (int64, bool) {
 		d, ok := deltas[addr]

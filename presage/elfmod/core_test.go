@@ -87,11 +87,13 @@ func TestStructurePlanRoundTrip(t *testing.T) {
 
 func TestEquivalencePlanRoundTrip(t *testing.T) {
 	t.Parallel()
+	window := codeWindow{Old: section{Addr: 0x1000, Off: 100, Size: 500}, New: section{Addr: 0x2000, Off: 100, Size: 600}}
 	ep := equivalencePlan{OldLen: 1000, NewLen: 1200,
-		OldText: section{Addr: 0x1000, Off: 100, Size: 500}, NewText: section{Addr: 0x2000, Off: 100, Size: 600},
-		Eqs: []equivalence{{Src: 0, Dst: 0, N: 100}, {Src: 150, Dst: 120, N: 40}, {Src: 700, Dst: 900, N: 100}}}
+		Windows: []codeWindow{window},
+		Eqs:     []equivalence{{Src: 0, Dst: 0, N: 100}, {Src: 150, Dst: 120, N: 40}, {Src: 700, Dst: 900, N: 100}}}
 	maps := []mapping{{Src: 40, SrcSize: 60, Dst: 10, DstSize: 60, Copy: true}}
-	for _, pred := range []*srcPredictor{nil, newSrcPredictor(maps, ep.OldText, ep.NewText)} {
+	structures := []predictionPlan{{OldAddr: window.Old.Addr, NewAddr: window.New.Addr, Maps: maps}}
+	for _, pred := range []*srcPredictor{nil, newSrcPredictor(structures, ep.Windows)} {
 		b, err := ep.marshal(pred)
 		if err != nil {
 			t.Fatal(err)
@@ -131,17 +133,21 @@ func TestRetargetAndChoice(t *testing.T) {
 	const oldAddr, newAddr = 0x1000, 0x2000
 	oldText := twoFuncs(oldAddr, 32, bodyB)
 	newText := twoFuncs(newAddr, 64, bodyB) // B moved by 32; A's call changes
+	window := codeWindow{
+		Old: section{Addr: oldAddr, Off: 0, Size: uint64(len(oldText))},
+		New: section{Addr: newAddr, Off: 0, Size: uint64(len(newText))},
+	}
 	ep := equivalencePlan{OldLen: uint64(len(oldText)), NewLen: uint64(len(newText)),
-		OldText: section{Addr: oldAddr, Off: 0, Size: uint64(len(oldText))},
-		NewText: section{Addr: newAddr, Off: 0, Size: uint64(len(newText))},
+		Windows: []codeWindow{window},
 		Eqs:     []equivalence{{Src: 0, Dst: 0, N: 16}, {Src: 32, Dst: 64, N: 16}}}
 	structure := predictionPlan{OldAddr: oldAddr, NewAddr: newAddr, TargetLen: uint64(len(newText)),
 		Maps: []mapping{{Src: 0, SrcSize: 16, Dst: 0, DstSize: 16, Copy: true}, {Src: 32, SrcSize: 6, Dst: 64, DstSize: 6, Copy: true}}}
+	structures := []predictionPlan{structure}
 	out := layImage(oldText, ep)
 	if bytes.Equal(out, newText) {
 		t.Fatal("test needs a moved call")
 	}
-	st := retargetEquivalencePrediction(out, ep, structure, newOracleParts(ep, structure).image(nil))
+	st := retargetEquivalencePrediction(out, ep, window, structure, newOracleParts(ep, structures).image(nil))
 	if st.Refs == 0 || st.Unknown != 0 || st.NoFit != 0 {
 		t.Fatalf("retarget stats %+v", st)
 	}

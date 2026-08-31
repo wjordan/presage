@@ -16,10 +16,27 @@ type section struct {
 	NoBits bool // occupies no file bytes
 }
 
+// namedSection is a section that the module needs to find again by name in
+// the other image.
+type namedSection struct {
+	Name string
+	section
+}
+
+// codeWindow is one executable region modelled as a unit: an old section
+// and the new section of the same name. Every window gets its own function
+// map, canonical masking, retargeting pass and field fix; a section that is
+// not in a window is only ever copied by the whole-image equivalences.
+type codeWindow struct {
+	Old, New section
+}
+
 // image is one ELF file and the geometry the module reads from it.
 type image struct {
-	Data     []byte
-	Text     section
+	Data []byte
+	Text section
+	// Code is the executable window candidates, ascending by address.
+	Code     []namedSection
 	Sections map[string]section
 	// Debug holds the non-allocated sections with file contents.
 	Debug map[string]section
@@ -28,6 +45,8 @@ type image struct {
 func (im *image) textBytes() []byte {
 	return im.Data[im.Text.Off : im.Text.Off+im.Text.Size]
 }
+
+func bytesOf(b []byte, s section) []byte { return b[s.Off : s.Off+s.Size] }
 
 // mapping is one matched function: where its old body is, where the new
 // one goes, and whether the old bytes are copied.

@@ -458,13 +458,57 @@ func (l *addressLookup) mapTarget(addr uint64) x86.Target {
 	return x86.Target{}
 }
 
-func (l *addressLookup) target(addr uint64) x86.Target {
+// codeLookup answers address questions across every code window. The order
+// is the same as one window's: an exact point first, then the function map,
+// then the section ranges — but each phase asks every window before the next
+// begins, so a map in one window is never overruled by a range answer that
+// another window's plan happens to carry. With one window it is exactly
+// addressLookup.target.
+type codeLookup struct {
+	win []*addressLookup
+}
+
+func newCodeLookup(structures []predictionPlan) *codeLookup {
+	l := &codeLookup{win: make([]*addressLookup, len(structures))}
+	for i := range structures {
+		l.win[i] = newAddressLookup(structures[i])
+	}
+	return l
+}
+
+func (l *codeLookup) pointTarget(addr uint64) x86.Target {
+	for _, w := range l.win {
+		if t := w.pointTarget(addr); t.Known {
+			return t
+		}
+	}
+	return x86.Target{}
+}
+
+func (l *codeLookup) mapTarget(addr uint64) x86.Target {
+	for _, w := range l.win {
+		if t := w.mapTarget(addr); t.Known {
+			return t
+		}
+	}
+	return x86.Target{}
+}
+
+func (l *codeLookup) target(addr uint64) x86.Target {
 	if t := l.pointTarget(addr); t.Known {
 		return t
 	}
 	if t := l.mapTarget(addr); t.Known {
 		return t
 	}
+	// Every window's plan carries the same ranges; ask one.
+	if len(l.win) != 0 {
+		return l.win[0].rangeTarget(addr)
+	}
+	return x86.Target{}
+}
+
+func (l *addressLookup) rangeTarget(addr uint64) x86.Target {
 	p := l.p
 	i, ok := slices.BinarySearchFunc(p.Ranges, addr, func(ar addressRange, addr uint64) int {
 		if ar.Old > addr {
@@ -480,6 +524,16 @@ func (l *addressLookup) target(addr uint64) x86.Target {
 		return x86.Target{Addr: ar.New + addr - ar.Old, Known: true}
 	}
 	return x86.Target{}
+}
+
+func (l *addressLookup) target(addr uint64) x86.Target {
+	if t := l.pointTarget(addr); t.Known {
+		return t
+	}
+	if t := l.mapTarget(addr); t.Known {
+		return t
+	}
+	return l.rangeTarget(addr)
 }
 
 // predictDecoded is the structural .text prediction: every copied body

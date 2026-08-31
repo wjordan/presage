@@ -1,8 +1,11 @@
 package elfmod
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/wjordan/presage/delta/x86"
 	"github.com/wjordan/presage/presage"
@@ -26,39 +29,59 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 	if st == nil {
 		st = &Stats{}
 	}
-	oldText, newText := oi.textBytes(), ni.textBytes()
+	windows := pairCodeWindows(oi, ni)
+	if len(windows) == 0 {
+		return nil, nil, presage.ErrDeclined
+	}
+	ranges := sectionRanges(oi, ni)
 
-	// 1. The function map from the symbols, when both sides have them.
-	var oldUnits, newUnits []codeUnit
-	if m.Symbols[0] != nil && m.Symbols[1] != nil {
-		if oldUnits, err = codeUnits(m.Symbols[0], oi.Text); err != nil {
-			return nil, nil, fmt.Errorf("elf: old symbols: %w", err)
+	// 1. One function map per code window, from the symbols when both
+	// sides have them. Every window carries the same section ranges, so
+	// each window's lookup is complete on its own.
+	haveSymbols := m.Symbols[0] != nil && m.Symbols[1] != nil
+	structures := make([]predictionPlan, len(windows))
+	var structureBytes []byte
+	var ms matchStats
+	var oldUnitCount, newUnitCount int
+	for i, w := range windows {
+		oldCode, newCode := bytesOf(old, w.Old), bytesOf(target, w.New)
+		var oldUnits, newUnits []codeUnit
+		if haveSymbols {
+			if oldUnits, err = codeUnits(m.Symbols[0], w.Old); err != nil {
+				return nil, nil, fmt.Errorf("elf: old symbols: %w", err)
+			}
+			if newUnits, err = codeUnits(m.Symbols[1], w.New); err != nil {
+				return nil, nil, fmt.Errorf("elf: new symbols: %w", err)
+			}
+			oldUnitCount, newUnitCount = oldUnitCount+len(oldUnits), newUnitCount+len(newUnits)
 		}
-		if newUnits, err = codeUnits(m.Symbols[1], ni.Text); err != nil {
-			return nil, nil, fmt.Errorf("elf: new symbols: %w", err)
+		p, wms := constructPlan(oldUnits, newUnits, oldCode, newCode, w.Old.Addr, w.New.Addr, ranges)
+		p.Points = inferReferencePoints(p, oldCode, newCode)
+		structures[i] = allMapped(p)
+		ms.NameMapped += wms.NameMapped
+		ms.ContentMapped += wms.ContentMapped
+		ms.CopyUnits += wms.CopyUnits
+		ms.CopyBytes += wms.CopyBytes
+		st.Mappings += len(structures[i].Maps)
+		st.Points += len(structures[i].Points)
+		b, err := structures[i].marshal(oldCode)
+		if err != nil {
+			return nil, nil, fmt.Errorf("elf: %w", err)
 		}
-		st.Notes = append(st.Notes, fmt.Sprintf("symbols: %d old units, %d new units", len(oldUnits), len(newUnits)))
+		structureBytes = appendStream(structureBytes, b)
+	}
+	if haveSymbols {
+		st.Notes = append(st.Notes, fmt.Sprintf("symbols: %d old units, %d new units", oldUnitCount, newUnitCount))
 	} else {
 		st.Notes = append(st.Notes, "no symbols: whole-image equivalences and section ranges only")
 	}
-	structure, ms := constructPlan(oldUnits, newUnits, oldText, newText, oi.Text.Addr, ni.Text.Addr, sectionRanges(oi, ni))
-	structure.Points = inferReferencePoints(structure, oldText, newText)
-	structure = allMapped(structure)
-	st.Mappings, st.Points = len(structure.Maps), len(structure.Points)
+	st.Notes = append(st.Notes, fmt.Sprintf("windows: %d code (%s)", len(windows), windowSummary(oi, windows)))
 	st.Notes = append(st.Notes, fmt.Sprintf("map: %d functions (%d by name, %d by content, %d canonical-equal), %d reference points",
-		len(structure.Maps), ms.NameMapped, ms.ContentMapped, ms.CopyUnits, len(structure.Points)))
-	structureBytes, err := structure.marshal(oldText)
-	if err != nil {
-		return nil, nil, fmt.Errorf("elf: %w", err)
-	}
-	structuralPred, _, err := predictDecoded(oldText, structure, nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("elf: %w", err)
-	}
+		st.Mappings, ms.NameMapped, ms.ContentMapped, ms.CopyUnits, st.Points))
 
-	// 2. Whole-image equivalences, matched on canonical .text so moved
-	// targets do not break runs; sources coded against the map.
-	pred := newSrcPredictor(structure.Maps, oi.Text, ni.Text)
+	// 2. Whole-image equivalences, matched on canonical code windows so
+	// moved targets do not break runs; sources coded against the map.
+	pred := newSrcPredictor(structures, windows)
 	params := m.Params
 	if params.Min == 0 && params.Drop == 0 {
 		params = eqmatch.CodeDefaults
@@ -69,8 +92,11 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 			return int(s), ok
 		}
 	}
-	runs := eqmatch.Match(maskedText(oi), maskedText(ni), params)
-	ep := equivalencePlan{OldLen: uint64(len(old)), NewLen: uint64(len(target)), OldText: oi.Text, NewText: ni.Text}
+	oldMasked, newMasked := maskedCode(old, windows, func(w codeWindow) section { return w.Old }),
+		maskedCode(target, windows, func(w codeWindow) section { return w.New })
+	runs := eqmatch.Match(oldMasked, newMasked, params)
+	oldMasked, newMasked = nil, nil
+	ep := equivalencePlan{OldLen: uint64(len(old)), NewLen: uint64(len(target)), Windows: windows}
 	ep.Eqs = make([]equivalence, len(runs))
 	for i, r := range runs {
 		ep.Eqs[i] = equivalence{Src: r.Src, Dst: r.Dst, N: r.N}
@@ -83,16 +109,30 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 	st.Equivalences = len(ep.Eqs)
 
 	// 3. Per-function choice between the retargeted equivalence copy and
-	// the structural body.
+	// the structural body, one window at a time.
 	var choices []byte
-	if len(structure.Maps) != 0 {
+	if st.Mappings != 0 {
 		laid := layImage(old, ep)
-		text := laid[ep.NewText.Off : ep.NewText.Off+ep.NewText.Size]
-		retargetEquivalencePrediction(text, ep, structure, newOracleParts(ep, structure).image(nil))
-		choices, st.SelectedFunctions, st.SelectedBytes = chooseStructuralFunctions(text, structuralPred, newText, structure)
+		parts := newOracleParts(ep, structures)
+		oracle := parts.image(nil)
+		for i, w := range windows {
+			text := bytesOf(laid, w.New)
+			retargetEquivalencePrediction(text, ep, w, structures[i], oracle)
+			if len(structures[i].Maps) == 0 {
+				choices = appendStream(choices, nil)
+				continue
+			}
+			structuralPred, _, err := predictDecoded(bytesOf(old, w.Old), structures[i], parts.lk.target)
+			if err != nil {
+				return nil, nil, fmt.Errorf("elf: %w", err)
+			}
+			b, fns, bytes := chooseStructuralFunctions(text, structuralPred, bytesOf(target, w.New), structures[i])
+			st.SelectedFunctions += fns
+			st.SelectedBytes += bytes
+			choices = appendStream(choices, b)
+		}
 		laid = nil
 	}
-	structuralPred = nil
 
 	// 4. The relocation table, or the section geometry alone for the
 	// layers that read it from this plan.
@@ -107,7 +147,7 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 	rp := base
 	if haveRela {
 		base.OldOff, base.OldSize, base.NewOff, base.NewSize = oldRela.Off, oldRela.Size, newRela.Off, newRela.Size
-		if rp, err = buildRelocPlan(old, target, base, newOracleParts(ep, structure).pointer(&base)); err != nil {
+		if rp, err = buildRelocPlan(old, target, base, newOracleParts(ep, structures).pointer(&base)); err != nil {
 			return nil, nil, fmt.Errorf("elf: %w", err)
 		}
 		st.Notes = append(st.Notes, fmt.Sprintf("reloc: gap %d B, addend %d B, tail %d B", len(rp.GapCorrection), len(rp.AddendCorrection), len(rp.TailCorrection)))
@@ -117,7 +157,7 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 	cp := planStreams{Equivalences: epBytes, Structure: structureBytes, Choices: choices, Reloc: rp.marshal()}
 
 	// 5. The DWARF field layer, for an unstripped pair.
-	parts := newOracleParts(ep, structure)
+	parts := newOracleParts(ep, structures)
 	pointer := parts.pointer(&rp)
 	addrMap := func(addr uint64) (uint64, bool) {
 		t := pointer(addr)
@@ -163,16 +203,21 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 		cp.RoData = rd.marshal()
 	}
 
-	// 8. The field fix over the finished .text.
+	// 8. The field fix over each finished code window.
 	{
 		p, _, err := predictImage(old, cp)
 		if err != nil {
 			return nil, nil, fmt.Errorf("elf: field fix: %w", err)
 		}
-		nt := ni.Text
-		fx, fst := encodeFieldFix(p[nt.Off:nt.Off+nt.Size], target[nt.Off:nt.Off+nt.Size], nt.Addr, structure.Maps)
-		st.Notes = append(st.Notes, fmt.Sprintf("fields: %d sites, %d remaps, %d deltas", fst.Sites, fst.Remaps, fst.Deltas))
-		cp.Fields = fx.marshal()
+		var total fieldStats
+		for i, w := range windows {
+			fx, fst := encodeFieldFix(bytesOf(p, w.New), bytesOf(target, w.New), w.New.Addr, structures[i].Maps)
+			total.Sites += fst.Sites
+			total.Remaps += fst.Remaps
+			total.Deltas += fst.Deltas
+			cp.Fields = appendStream(cp.Fields, fx.marshal())
+		}
+		st.Notes = append(st.Notes, fmt.Sprintf("fields: %d sites, %d remaps, %d deltas", total.Sites, total.Remaps, total.Deltas))
 	}
 
 	// 9. What the decoder will build.
@@ -185,25 +230,90 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 		return nil, nil, errors.New("elf: prediction length disagrees with the target")
 	}
 	st.Relocation = ps.Relocation
+	if len(cp.EhFrame) != 0 {
+		e := ps.EhFrame
+		st.Notes = append(st.Notes, fmt.Sprintf("eh_frame: %d FDEs, %d retargeted, %d unknown, %d resized, %d hdr entries",
+			e.FDEs, e.Retargeted, e.Unknown, e.Resized, e.HdrEntries))
+	}
 	st.PredictErr = wrongCount(out, target)
-	st.TextPredictErr = wrongCount(out[ni.Text.Off:ni.Text.Off+ni.Text.Size], newText)
+	st.TextPredictErr = wrongCount(bytesOf(out, ni.Text), bytesOf(target, ni.Text))
 	st.Notes = append(st.Notes, fmt.Sprintf("plan %d B (eq %d, structure %d, choices %d, reloc %d, eh %d, rodata %d, fields %d, dwarf %d); %d mispredicted bytes, %d in .text",
 		len(plan), len(cp.Equivalences), len(cp.Structure), len(cp.Choices), len(cp.Reloc), len(cp.EhFrame), len(cp.RoData), len(cp.Fields), len(cp.Dwarf),
 		st.PredictErr, st.TextPredictErr))
+	st.Notes = append(st.Notes, sectionErrNote(out, target, ni, st.PredictErr))
 	return plan, out, nil
 }
 
-// maskedText is the image with .text canonicalised: PC-relative
+// sectionErrNote attributes the mispredicted bytes to the new image's
+// sections, largest first. Which section pays is what decides whether a
+// missing layer is worth building, and the total alone never says.
+func sectionErrNote(out, target []byte, ni *image, total int) string {
+	type row struct {
+		name string
+		err  int
+	}
+	var rows []row
+	var covered int
+	count := func(name string, s section) {
+		if s.NoBits || s.Off+s.Size > uint64(len(target)) {
+			return
+		}
+		n := wrongCount(out[s.Off:s.Off+s.Size], target[s.Off:s.Off+s.Size])
+		covered += n
+		if n != 0 {
+			rows = append(rows, row{name, n})
+		}
+	}
+	for name, s := range ni.Sections {
+		count(name, s)
+	}
+	for name, s := range ni.Debug {
+		count(name, s)
+	}
+	slices.SortFunc(rows, func(a, b row) int { return cmp.Compare(b.err, a.err) })
+	var b strings.Builder
+	b.WriteString("mispredicted by section:")
+	for i, r := range rows {
+		if i == 12 {
+			fmt.Fprintf(&b, " (+%d more)", len(rows)-i)
+			break
+		}
+		fmt.Fprintf(&b, " %s=%d", r.name, r.err)
+	}
+	fmt.Fprintf(&b, "; elsewhere=%d", total-covered)
+	return b.String()
+}
+
+// maskedCode is the image with every code window canonicalised: PC-relative
 // displacements zeroed (x86.Canonical), so two copies of the same code
 // whose targets moved agree byte for byte and the retargeting stage fixes
-// the displacements afterwards.
-func maskedText(img *image) []byte {
-	if img.Text.Size == 0 {
-		return img.Data
+// the displacements afterwards. A window the module cannot reach is matched
+// on raw bytes, where a body that moved agrees with nothing.
+func maskedCode(data []byte, windows []codeWindow, pick func(codeWindow) section) []byte {
+	out := append([]byte(nil), data...)
+	for _, w := range windows {
+		s := pick(w)
+		if s.Size != 0 {
+			maskWindow(out, s.Off, s.Off+s.Size)
+		}
 	}
-	out := append([]byte(nil), img.Data...)
-	lo, hi := img.Text.Off, img.Text.Off+img.Text.Size
-	canon, _ := x86.Canonical(img.Data[lo:hi])
-	copy(out[lo:hi], canon)
 	return out
+}
+
+func maskWindow(out []byte, lo, hi uint64) {
+	canon, _ := x86.Canonical(out[lo:hi])
+	copy(out[lo:hi], canon)
+}
+
+// windowSummary names the windows and their sizes for the encode's report.
+func windowSummary(img *image, windows []codeWindow) string {
+	byOff := make(map[uint64]string, len(img.Code))
+	for _, s := range img.Code {
+		byOff[s.Off] = s.Name
+	}
+	parts := make([]string, 0, len(windows))
+	for _, w := range windows {
+		parts = append(parts, fmt.Sprintf("%s %d B", byOff[w.Old.Off], w.Old.Size))
+	}
+	return strings.Join(parts, ", ")
 }

@@ -18,8 +18,7 @@ import (
 type equivalencePlan struct {
 	OldLen      uint64
 	NewLen      uint64
-	OldText     section
-	NewText     section
+	Windows     []codeWindow
 	SrcSkip     []byte
 	SrcResidual []byte
 	DstSkip     []byte
@@ -30,33 +29,53 @@ type equivalencePlan struct {
 
 // srcPredictor answers, for a destination offset, where the function map
 // says those bytes came from.
-type srcPredictor struct {
+type srcWindow struct {
 	maps           []mapping // in destination order
-	oldOff, newOff uint64    // .text file offsets
+	oldOff, newOff uint64    // window file offsets
 	newSize        uint64
 }
 
-func newSrcPredictor(maps []mapping, oldText, newText section) *srcPredictor {
-	if len(maps) == 0 {
+type srcPredictor struct {
+	win []srcWindow
+}
+
+// newSrcPredictor holds the mapped windows only; a window with no map
+// contributes nothing and an image with no map at all gets a nil predictor,
+// which marshals every source as a skip.
+func newSrcPredictor(structures []predictionPlan, windows []codeWindow) *srcPredictor {
+	var win []srcWindow
+	for i, w := range windows {
+		if i >= len(structures) || len(structures[i].Maps) == 0 {
+			continue
+		}
+		win = append(win, srcWindow{maps: structures[i].Maps, oldOff: w.Old.Off, newOff: w.New.Off, newSize: w.New.Size})
+	}
+	if len(win) == 0 {
 		return nil
 	}
-	return &srcPredictor{maps: maps, oldOff: oldText.Off, newOff: newText.Off, newSize: newText.Size}
+	return &srcPredictor{win: win}
 }
 
 func (s *srcPredictor) at(dst uint64) (uint64, bool) {
-	if s == nil || len(s.maps) == 0 || dst < s.newOff || dst >= s.newOff+s.newSize {
+	if s == nil {
 		return 0, false
 	}
-	off := dst - s.newOff
-	i := sort.Search(len(s.maps), func(i int) bool { return s.maps[i].Dst > off })
-	if i == 0 {
-		return 0, false
+	for _, w := range s.win {
+		if dst < w.newOff || dst >= w.newOff+w.newSize {
+			continue
+		}
+		off := dst - w.newOff
+		i := sort.Search(len(w.maps), func(i int) bool { return w.maps[i].Dst > off })
+		if i == 0 {
+			return 0, false
+		}
+		m := w.maps[i-1]
+		if off >= m.Dst+m.DstSize {
+			return 0, false
+		}
+		return w.oldOff + m.Src + (off - m.Dst), true
 	}
-	m := s.maps[i-1]
-	if off >= m.Dst+m.DstSize {
-		return 0, false
-	}
-	return s.oldOff + m.Src + (off - m.Dst), true
+	return 0, false
 }
 
 // encodeColumns rebuilds the three unpredicted columns from the runs.
@@ -153,10 +172,13 @@ func (p equivalencePlan) marshal(pred *srcPredictor) ([]byte, error) {
 	var b []byte
 	b = appendU(b, p.OldLen)
 	b = appendU(b, p.NewLen)
-	for _, s := range []section{p.OldText, p.NewText} {
-		b = appendU(b, s.Addr)
-		b = appendU(b, s.Off)
-		b = appendU(b, s.Size)
+	b = appendU(b, uint64(len(p.Windows)))
+	for _, w := range p.Windows {
+		for _, s := range []section{w.Old, w.New} {
+			b = appendU(b, s.Addr)
+			b = appendU(b, s.Off)
+			b = appendU(b, s.Size)
+		}
 	}
 	if p.Predicted {
 		b = append(b, 1)
@@ -176,8 +198,17 @@ func (p equivalencePlan) marshal(pred *srcPredictor) ([]byte, error) {
 func parseEquivalencePlan(b []byte) (equivalencePlan, error) {
 	r := &planReader{b: b}
 	p := equivalencePlan{OldLen: r.u(), NewLen: r.u()}
-	p.OldText = section{Addr: r.u(), Off: r.u(), Size: r.u()}
-	p.NewText = section{Addr: r.u(), Off: r.u(), Size: r.u()}
+	n := r.u()
+	if r.err != nil || n == 0 || n > 1<<16 {
+		return equivalencePlan{}, errors.New("implausible code window count")
+	}
+	p.Windows = make([]codeWindow, n)
+	for i := range p.Windows {
+		p.Windows[i] = codeWindow{
+			Old: section{Addr: r.u(), Off: r.u(), Size: r.u()},
+			New: section{Addr: r.u(), Off: r.u(), Size: r.u()},
+		}
+	}
 	flag := r.byteAt()
 	src, residual, dst, count := r.stream(), r.stream(), r.stream(), r.stream()
 	if !r.done() || flag > 1 {
@@ -186,8 +217,16 @@ func parseEquivalencePlan(b []byte) (equivalencePlan, error) {
 	p.Predicted = flag == 1
 	p.SrcSkip, p.SrcResidual = slices.Clone(src.b), slices.Clone(residual.b)
 	p.DstSkip, p.CopyLen = slices.Clone(dst.b), slices.Clone(count.b)
-	if p.OldText.Off > p.OldLen || p.OldText.Size > p.OldLen-p.OldText.Off || p.NewText.Off > p.NewLen || p.NewText.Size > p.NewLen-p.NewText.Off {
-		return equivalencePlan{}, errors.New("text section exceeds equivalence image")
+	for i, w := range p.Windows {
+		if w.Old.Off > p.OldLen || w.Old.Size > p.OldLen-w.Old.Off || w.New.Off > p.NewLen || w.New.Size > p.NewLen-w.New.Off {
+			return equivalencePlan{}, errors.New("code window exceeds equivalence image")
+		}
+		// Overlapping windows would let two maps claim one byte, and the
+		// order the decoder happens to apply them in would decide the image.
+		if i != 0 && (w.Old.Off < p.Windows[i-1].Old.Off+p.Windows[i-1].Old.Size ||
+			w.New.Off < p.Windows[i-1].New.Off+p.Windows[i-1].New.Size) {
+			return equivalencePlan{}, errors.New("code windows overlap or are unsorted")
+		}
 	}
 	return p, nil
 }

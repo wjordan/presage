@@ -1,7 +1,7 @@
 //go:build corpus
 
-// The ELF module's gate (docs/general/elf-module.md §7): the Chrome and
-// libxul pairs encode, apply and compare byte-exactly, under a parity
+// The ELF module's gate (docs/general/elf-module.md §7): the Chrome,
+// libxul and rustc-nightly pairs encode, apply and compare byte-exactly, under a parity
 // budget (the harness's own -native-equivalences number, proving the port)
 // and a product budget (the comparison table), the latter behind
 // PRESAGE_ELF_PRODUCT_GATE=1 until the matcher track lands. Minutes to run:
@@ -48,6 +48,19 @@ var pairs = []pair{
 		oldSyms: home(".cache", "presage-pairs", "libxul-154.0.funcs"),
 		newSyms: home(".cache", "presage-pairs", "libxul-154.0.1.funcs"),
 		parity:  4780572, product: 4063404,
+	},
+	{
+		// Two adjacent rustc nightlies, one day apart: the corpus's only
+		// BOLT'd multi-window image (four code windows) and its only Rust
+		// v0-mangled symbols. No harness number exists, so parity is the
+		// measured patch, a ratchet against regression; bsdiff is
+		// 15,106,624. Symbols come from the images' own .symtab.
+		name:    "librustc_driver-2026-08-27-28",
+		old:     home(".cache", "presage-pairs", "rd-2026-08-27.so"),
+		new:     home(".cache", "presage-pairs", "rd-2026-08-28.so"),
+		oldSyms: home(".cache", "presage-pairs", "rd-2026-08-27.so"),
+		newSyms: home(".cache", "presage-pairs", "rd-2026-08-28.so"),
+		parity:  6597439, product: 6597439,
 	},
 }
 

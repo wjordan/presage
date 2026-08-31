@@ -91,6 +91,7 @@ func (Module) Materialise(refs [][]byte, plan []byte, length int64) ([]byte, err
 type predStats struct {
 	Relocation                       x86.Stats
 	SelectedFunctions, SelectedBytes int
+	EhFrame                          ehFrameStats
 }
 
 // predictImage is the decoder: every stage reads the old image and the
@@ -104,15 +105,25 @@ func predictImage(old []byte, cp planStreams) ([]byte, predStats, error) {
 	if uint64(len(old)) != ep.OldLen || ep.NewLen > uint64(int(^uint(0)>>1)) {
 		return nil, st, errors.New("old image does not match the equivalence plan")
 	}
-	oldText := old[ep.OldText.Off : ep.OldText.Off+ep.OldText.Size]
-	structure, err := unmarshalPlan(cp.Structure, oldText)
-	if err != nil {
-		return nil, st, err
+	// One structural plan per code window, in window order.
+	structures := make([]predictionPlan, len(ep.Windows))
+	sr := &planReader{b: cp.Structure}
+	for i, w := range ep.Windows {
+		b := sr.stream()
+		if sr.err != nil {
+			return nil, st, errors.New("invalid structure stream")
+		}
+		if structures[i], err = unmarshalPlan(b.b, bytesOf(old, w.Old)); err != nil {
+			return nil, st, err
+		}
+		if structures[i].TargetLen != w.New.Size || structures[i].OldAddr != w.Old.Addr || structures[i].NewAddr != w.New.Addr {
+			return nil, st, errors.New("structural and equivalence plans describe different code windows")
+		}
 	}
-	if structure.TargetLen != ep.NewText.Size || structure.OldAddr != ep.OldText.Addr || structure.NewAddr != ep.NewText.Addr {
-		return nil, st, errors.New("structural and equivalence plans describe different text sections")
+	if !sr.done() {
+		return nil, st, errors.New("structure stream does not match the code windows")
 	}
-	if ep.Eqs, err = decodeEquivalences(ep, newSrcPredictor(structure.Maps, ep.OldText, ep.NewText)); err != nil {
+	if ep.Eqs, err = decodeEquivalences(ep, newSrcPredictor(structures, ep.Windows)); err != nil {
 		return nil, st, err
 	}
 	out := layImage(old, ep)
@@ -128,7 +139,7 @@ func predictImage(old []byte, cp planStreams) ([]byte, predStats, error) {
 		}
 		rp = &parsed
 	}
-	parts := newOracleParts(ep, structure)
+	parts := newOracleParts(ep, structures)
 	if rp != nil && rp.NewSize != 0 {
 		if _, err := applyReloc(out, old, *rp, parts.pointer(rp)); err != nil {
 			return nil, st, err
@@ -139,7 +150,7 @@ func predictImage(old []byte, cp planStreams) ([]byte, predStats, error) {
 		if err != nil {
 			return nil, st, err
 		}
-		if _, err := applyDwarf(out, old, dp, ep, parts.pointer(rp), funcSizeDeltas(structure)); err != nil {
+		if _, err := applyDwarf(out, old, dp, ep, parts.pointer(rp), funcSizeDeltas(structures)); err != nil {
 			return nil, st, err
 		}
 	}
@@ -157,15 +168,17 @@ func predictImage(old []byte, cp planStreams) ([]byte, predStats, error) {
 		// Keyed by old address: an FDE names the function it describes
 		// by where that function used to be.
 		type extent struct{ old, new uint64 }
-		extents := make(map[uint64]extent, len(structure.Maps))
-		for _, m := range structure.Maps {
-			extents[structure.OldAddr+m.Src] = extent{m.SrcSize, m.DstSize}
+		extents := make(map[uint64]extent)
+		for _, structure := range structures {
+			for _, m := range structure.Maps {
+				extents[structure.OldAddr+m.Src] = extent{m.SrcSize, m.DstSize}
+			}
 		}
 		extentOf := func(addr uint64) (uint64, uint64, bool) {
 			e, ok := extents[addr]
 			return e.old, e.new, ok
 		}
-		applyEhFrame(out, old, ep, fp, rp.OldSecs, parts.pointer(rp), extentOf)
+		st.EhFrame = applyEhFrame(out, old, ep, fp, rp.OldSecs, parts.pointer(rp), extentOf)
 	}
 	if len(cp.RoData) != 0 {
 		rd, err := unmarshalRoDataPlan(cp.RoData)
@@ -180,30 +193,59 @@ func predictImage(old []byte, cp planStreams) ([]byte, predStats, error) {
 		}
 		applyRoData(out, old, rd, parts.sm, parts.pointer(rp))
 	}
-	text := out[ep.NewText.Off : ep.NewText.Off+ep.NewText.Size]
-	st.Relocation = retargetEquivalencePrediction(text, ep, structure, parts.image(rp))
+	oracle := parts.image(rp)
+	for i, w := range ep.Windows {
+		st.Relocation.Add(retargetEquivalencePrediction(bytesOf(out, w.New), ep, w, structures[i], oracle))
+	}
 	if len(cp.Choices) != 0 {
-		if len(cp.Choices) != (len(structure.Maps)+7)/8 {
-			return nil, st, errors.New("choice stream has the wrong size")
-		}
-		structural, _, err := predictDecoded(oldText, structure, parts.lk.target)
-		if err != nil {
-			return nil, st, err
-		}
-		for i, m := range structure.Maps {
-			if cp.Choices[i/8]&(1<<(i%8)) == 0 {
+		cr := &planReader{b: cp.Choices}
+		for i, w := range ep.Windows {
+			b := cr.stream()
+			if cr.err != nil {
+				return nil, st, errors.New("invalid choice stream")
+			}
+			if len(b.b) == 0 {
 				continue
 			}
-			copy(text[m.Dst:m.Dst+m.DstSize], structural[m.Dst:m.Dst+m.DstSize])
-			st.SelectedFunctions++
-			st.SelectedBytes += int(m.DstSize)
+			if len(b.b) != (len(structures[i].Maps)+7)/8 {
+				return nil, st, errors.New("choice stream has the wrong size")
+			}
+			structural, _, err := predictDecoded(bytesOf(old, w.Old), structures[i], parts.lk.target)
+			if err != nil {
+				return nil, st, err
+			}
+			text := bytesOf(out, w.New)
+			for j, m := range structures[i].Maps {
+				if b.b[j/8]&(1<<(j%8)) == 0 {
+					continue
+				}
+				copy(text[m.Dst:m.Dst+m.DstSize], structural[m.Dst:m.Dst+m.DstSize])
+				st.SelectedFunctions++
+				st.SelectedBytes += int(m.DstSize)
+			}
+		}
+		if !cr.done() {
+			return nil, st, errors.New("choice stream does not match the code windows")
 		}
 	}
 	// The field fix is last: it names fields by position in a walk of the
 	// finished prediction.
 	if len(cp.Fields) != 0 {
-		if _, err := applyFieldFix(text, ep.NewText.Addr, structure.Maps, cp.Fields); err != nil {
-			return nil, st, err
+		fr := &planReader{b: cp.Fields}
+		for i, w := range ep.Windows {
+			b := fr.stream()
+			if fr.err != nil {
+				return nil, st, errors.New("invalid field stream")
+			}
+			if len(b.b) == 0 {
+				continue
+			}
+			if _, err := applyFieldFix(bytesOf(out, w.New), w.New.Addr, structures[i].Maps, b.b); err != nil {
+				return nil, st, err
+			}
+		}
+		if !fr.done() {
+			return nil, st, errors.New("field stream does not match the code windows")
 		}
 	}
 	return out, st, nil
@@ -213,8 +255,10 @@ func predictImage(old []byte, cp planStreams) ([]byte, predStats, error) {
 // (the padding byte between functions), then every run copied whole-image.
 func layImage(old []byte, ep equivalencePlan) []byte {
 	out := make([]byte, int(ep.NewLen))
-	for i := ep.NewText.Off; i < ep.NewText.Off+ep.NewText.Size; i++ {
-		out[i] = 0xcc
+	for _, w := range ep.Windows {
+		for i := w.New.Off; i < w.New.Off+w.New.Size; i++ {
+			out[i] = 0xcc
+		}
 	}
 	for _, eq := range ep.Eqs {
 		copy(out[eq.Dst:eq.Dst+eq.N], old[eq.Src:eq.Src+eq.N])

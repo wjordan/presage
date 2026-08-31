@@ -2,17 +2,18 @@ package elfmod
 
 import "github.com/wjordan/presage/delta/x86"
 
-// retargetEquivalencePrediction rewrites every PC-relative field in the
-// laid .text window (text is the new .text, ep and structure describe it)
-// whose whole instruction came from one run: the old target is resolved
-// through lookup and the displacement recomputed for the new position.
-func retargetEquivalencePrediction(text []byte, ep equivalencePlan, structure predictionPlan, lookup ImageOracle) x86.Stats {
+// retargetEquivalencePrediction rewrites every PC-relative field in one
+// laid code window (text is the window's new bytes, w its geometry and
+// structure its map) whose whole instruction came from one run: the old
+// target is resolved through lookup and the displacement recomputed for the
+// new position.
+func retargetEquivalencePrediction(text []byte, ep equivalencePlan, w codeWindow, structure predictionPlan, lookup ImageOracle) x86.Stats {
 	retargetBody := func(stats *x86.Stats, body []byte, dstBase uint64) {
 		x86.WalkReferences(body, 0, func(ref x86.Reference) {
 			stats.Refs++
-			fullStart := ep.NewText.Off + dstBase + uint64(ref.Start)
-			fullField := ep.NewText.Off + dstBase + uint64(ref.Off)
-			fullLast := ep.NewText.Off + dstBase + uint64(ref.Next-1)
+			fullStart := w.New.Off + dstBase + uint64(ref.Start)
+			fullField := w.New.Off + dstBase + uint64(ref.Off)
+			fullLast := w.New.Off + dstBase + uint64(ref.Next-1)
 			srcStart, startEq, startOK := ep.sourceAt(fullStart)
 			srcField, fieldEq, fieldOK := ep.sourceAt(fullField)
 			srcLast, lastEq, lastOK := ep.sourceAt(fullLast)
@@ -20,8 +21,12 @@ func retargetEquivalencePrediction(text []byte, ep equivalencePlan, structure pr
 				stats.Unknown++
 				return
 			}
-			oldTextEnd := ep.OldText.Off + ep.OldText.Size
-			if srcStart < ep.OldText.Off || srcLast >= oldTextEnd {
+			// The instruction's source may sit in any code window: a body
+			// that migrated between windows (BOLT re-tiers on every
+			// profile) is copied here by a run from its old home. The
+			// source window's geometry names the old address.
+			sw, ok := oldWindowOf(ep.Windows, srcStart, srcLast)
+			if !ok {
 				stats.Unknown++
 				return
 			}
@@ -30,32 +35,71 @@ func retargetEquivalencePrediction(text []byte, ep equivalencePlan, structure pr
 				stats.Unknown++
 				return
 			}
-			oldNext := ep.OldText.Addr + srcLast + 1 - ep.OldText.Off
+			oldNext := sw.Old.Addr + srcLast + 1 - sw.Old.Off
 			target := lookup(uint64(int64(oldNext) + disp))
 			if !target.Known {
 				stats.Unknown++
 				return
 			}
-			newNext := ep.NewText.Addr + dstBase + uint64(ref.Next)
+			newNext := w.New.Addr + dstBase + uint64(ref.Next)
 			if !writeDisplacement(body, ref, int64(target.Addr)-int64(newNext)) {
 				stats.NoFit++
 			}
 		})
 	}
-	if len(structure.Maps) == 0 {
-		var stats x86.Stats
-		retargetBody(&stats, text, 0)
-		return stats
-	}
-	// One body per map, concurrently: bodies are disjoint and every lookup
-	// is a read, so the result matches the serial loop.
-	return parallelStats(len(structure.Maps), workers(), func(stats *x86.Stats, i int) {
-		m := structure.Maps[i]
-		if m.Dst > uint64(len(text)) || m.DstSize > uint64(len(text))-m.Dst {
-			return
-		}
-		retargetBody(stats, text[m.Dst:m.Dst+m.DstSize], m.Dst)
+	// Every byte of the window, as disjoint spans: each mapped body from
+	// its own start, and the gaps between them.
+	//
+	// The gaps are not slack. A gap is code the symbols do not describe,
+	// and on a BOLT'd image that is the orphaned original of every function
+	// BOLT moved into the new .text -- 57% of .bolt.org.text, still mapped,
+	// still executable, still full of PC-relative displacements. Retargeting
+	// only the mapped bodies left 39% of librustc_driver's code with the old
+	// image's displacements, which cost far more than the map won.
+	spans := windowSpans(structure.Maps, uint64(len(text)))
+	return parallelStats(len(spans), workers(), func(stats *x86.Stats, i int) {
+		s := spans[i]
+		retargetBody(stats, text[s.Off:s.Off+s.Size], s.Off)
 	})
+}
+
+// oldWindowOf finds the window whose old section contains [lo, hi].
+func oldWindowOf(windows []codeWindow, lo, hi uint64) (codeWindow, bool) {
+	for _, w := range windows {
+		if lo >= w.Old.Off && hi < w.Old.Off+w.Old.Size {
+			return w, true
+		}
+	}
+	return codeWindow{}, false
+}
+
+// span is a half-open byte range of a code window.
+type span struct{ Off, Size uint64 }
+
+// windowSpans covers [0, size) with the maps' destination bodies and the
+// gaps between them, in order. Maps are sorted by destination and disjoint;
+// anything that is not is skipped rather than trusted.
+func windowSpans(maps []mapping, size uint64) []span {
+	spans := make([]span, 0, 2*len(maps)+1)
+	var pos uint64
+	for _, m := range maps {
+		if m.Dst < pos || m.Dst >= size {
+			continue
+		}
+		end := min(m.Dst+m.DstSize, size)
+		if end <= m.Dst {
+			continue
+		}
+		if m.Dst > pos {
+			spans = append(spans, span{Off: pos, Size: m.Dst - pos})
+		}
+		spans = append(spans, span{Off: m.Dst, Size: end - m.Dst})
+		pos = end
+	}
+	if pos < size {
+		spans = append(spans, span{Off: pos, Size: size - pos})
+	}
+	return spans
 }
 
 func wrongCount(a, b []byte) int {
