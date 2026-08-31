@@ -204,9 +204,9 @@ wire because the shipped binary embodies it; the only artifact containing
 those bytes is compiler output. Metadata changes how cheaply the patch
 *addresses and describes*; it cannot supply what the compiler re-emitted.
 The plan-side pool is ~1.1 MB and the first estimate for realistic capture
-was 300–500 K; §5.1 and §5.2 then measured both candidates, and the
-direction's real ceiling is **≈ −98 K measured, ~−135 K designed — 4–5 %
-of the patch** (the block half of the estimate died).
+was 300–500 K; §5.1–§5.2 measured both candidates and §5.1b built the
+survivor: **−135,868, −5.18 % of the patch** (the block half of the
+estimate died).
 
 ### 5.1 The symbol-sidecar probe, measured
 
@@ -265,6 +265,50 @@ instead of tens of MB of mangled C++), and inserted functions ship hashes
 too, shrinking the 49 K insert-names column to ~11 K and the win toward
 −135 K (*estimate*). Hash-pinned to the binary, bootstrapped by full
 install or a sidecar-less first patch (capability-gated variant per G4).
+
+### 5.1b Built for real: the sidecar rung
+
+`bench/elfpredict -rungs sidecar-map` (`symsidecar.go`), 2026-08-31: a full
+encoder + decoder, not a probe. The decoder holds only the old image, the
+carried table and the patch; it reconstructs the `[]mapping` from the
+symtab-delta stream (asserted exactly equal to the shipped map), parses
+points/ranges against the reconstructed bases, and predicts
+**byte-identically** to `corrected-fields`; the correction replays
+byte-exactly. Normal-path plan bytes are pinned unchanged (`planSidecar`
+is a new mode value).
+
+| | corrected-fields | sidecar-map |
+|---|---:|---:|
+| plan xz | 1,244,736 | 1,108,868 |
+| correction xz | 1,376,928 | 1,376,928 |
+| **total** | **2,621,664** | **2,485,796 (−135,868, −5.18 %)** |
+| vs Zucchini 5,263,732 | 49.81 % | **47.22 %** |
+
+The built number beats the probe's −98,460 for the reasons the probe
+flagged against itself: joint compression (the stream costs 99,428 inside
+the plan vs 138,584 standalone) and hashed inserts (11,572 vs 49,036 for
+names). The carried table is 925,590 units, 13.56 MB raw / 12.4 MB xz —
+alias hashes dominate (ICF folding gives inserted units 16.8 names on
+average), and that average is also the build's sharpest lesson:
+
+* **One hash per insert is load-bearing.** Shipping every alias hash per
+  inserted unit costs 190,184 xz — 64-bit hashes are incompressible — and
+  flips the rung to a **+42,744 loss**. §5.1's "~11 K hashed names" holds
+  only at one hash per unit.
+* **Reconstruction order is load-bearing**: drops → insert positions →
+  order+size walk → layout replay → correspondence exceptions *last* (a
+  rename may point at a dropped unit the walk rejects by construction).
+  The delta stream must sit exactly where the map columns were, because
+  `referenceTargets` derives from the maps.
+* The probe missed an exception class — the join proposing a source the
+  map lacks — covered by a shared `s−j` sentinel column; 0 extra cost here.
+* 0 distinct-name hash collisions across 1.85 M names; 1,352
+  correspondence exceptions; 0 unrepresentable mappings.
+* **Roll-forward caveat**: an inserted unit's rolled-forward entry carries
+  one of its aliases, and a renamed unit a stale hash — correctness is
+  untouched (the next encoder replays the client table byte-exactly), but
+  join fidelity can degrade over a chain of patches. −135,868 is a
+  first-patch number; the steady state is unmeasured.
 
 ### 5.2 The block-map probe, measured dead
 
