@@ -257,3 +257,15 @@ efficiency from 3.9× toward the core count.
 - I did one profiled run of each command. No repeats, no variance estimate. The three encode
   runs I did make (112.4 s, 114.9 s, 119.6 s wall — the latter two carry instrumentation and
   stderr I/O) suggest run-to-run noise of a few percent.
+
+## Outcome (2026-08-31, commit 48de052)
+
+Passes #1/#2/#3/#5 landed: Chrome encode 116 → 71 s (1.64×), patch
++1,944 B (+0.084 %; `PRESAGE_SIZE_PROXY=exact` restores exact ranking at
+~100 s and is 1,432 B *smaller* than the old baseline — #2 fixed a real
+overpricing). zstd chosen over brotli-q5 as proxy: identical patches on
+Chrome, but q5 mis-ranks a modal-vs-exact margin in TestCorrectionShapes.
+#4 measured (whole-region trial = 10.2 s post-#1, split wins by 26 %) and
+left for a rule; remaining serial floor is elfmod analysis + eqmatch
+(#6/#7). One unlisted lever found: modalPack(split) still brotli-11s
+sub-streams to build usually-discarded candidates, inside that 10.2 s.
