@@ -522,9 +522,16 @@ func planColumns(plan []byte) []planColumn {
 	for !fields.done() && !fields.bad {
 		walkFields(fields.stream(), add)
 	}
+	// --- .rodata: the geometry, then the three decision columns.
+	for range 8 {
+		roData.u()
+	}
+	add(roData.stream(), "rodata keep", ctxGeneric, -1)
+	add(roData.stream(), "rodata seg", ctxGeneric, -1)
+	add(roData.stream(), "rodata cursor", ctxVarint, -1)
 	// --- the layers with no known interior structure, whole.
-	for i, s := range []*planWalk{choices, reloc, ehFrame, roData, dwarf, relr} {
-		add(s, [...]string{"choices", "reloc", "eh-frame", "rodata", "dwarf", "relr"}[i], ctxGeneric, -1)
+	for i, s := range []*planWalk{choices, reloc, ehFrame, dwarf, relr} {
+		add(s, [...]string{"choices", "reloc", "eh-frame", "dwarf", "relr"}[i], ctxGeneric, -1)
 	}
 	// Offset order, with the pair references carried through the permutation.
 	order := make([]int, len(cols))
