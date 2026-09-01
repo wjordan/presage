@@ -61,10 +61,10 @@ Resource cost on the Go and C++ point releases (wall time / peak RSS):
 
 | pair | phase | presage | Zucchini | bsdiff | xdelta3 | zstd `--patch-from` |
 |---|---|---:|---:|---:|---:|---:|
-| prometheus, 94 MB | encode | **4.3 s** / 948 MiB | 21.3 s / 1.05 GiB | 36.8 s / 806 MiB | 8.5 s / 689 MiB | 21.1 s / **421 MiB** |
-| prometheus, 94 MB | apply | 0.75 s / 392 MiB | 0.45 s / 198 MiB | 0.49 s / 187 MiB | 0.38 s / **113 MiB** | **0.13 s** / 183 MiB |
-| Firefox libxul, 186 MB | encode | 30.4 s / 1.72 GiB | 70.0 s / 2.15 GiB | 79.5 s / 1.56 GiB | **21.0 s** / 1.26 GiB | 34.2 s / **764 MiB** |
-| Firefox libxul, 186 MB | apply | 1.57 s / 386 MiB | 0.97 s / 385 MiB | 1.2 s / 366 MiB | 0.86 s / **201 MiB** | **0.28 s** / 358 MiB |
+| prometheus, 94 MB | encode | **4.6 s** / 952 MiB | 21.3 s / 1.05 GiB | 36.8 s / 806 MiB | 8.5 s / 689 MiB | 21.1 s / **421 MiB** |
+| prometheus, 94 MB | apply | 0.89 s / 392 MiB | 0.45 s / 198 MiB | 0.49 s / 187 MiB | 0.38 s / **113 MiB** | **0.13 s** / 183 MiB |
+| Firefox libxul, 186 MB | encode | 24.0 s / 1.72 GiB | 70.0 s / 2.15 GiB | 79.5 s / 1.56 GiB | **21.0 s** / 1.26 GiB | 34.2 s / **764 MiB** |
+| Firefox libxul, 186 MB | apply | 1.91 s / 376 MiB | 0.97 s / 385 MiB | 1.2 s / 366 MiB | 0.86 s / **201 MiB** | **0.28 s** / 358 MiB |
 
 These are medians of three warm-cache runs on the same 24-core Linux host;
 Zucchini includes its external XZ pass. See

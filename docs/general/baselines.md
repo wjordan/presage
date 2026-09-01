@@ -12,11 +12,9 @@ unless a source doc is named. The as-shipped prometheus row — upstream's own
 release binaries, both sides go1.26.5, rather than the go1.27 rebuild the
 other prometheus row uses — has all five columns measured 2026-09-01 at
 container v6 and unchanged at v7, tool versions as listed under the resource
-table. All sizes in
-bytes. The resource table's
-C++ rows predate v6; at v7 the stronger coder and the operand-field walk cost
-apply time (libxul 1.83 s and Chrome 3.29 s, medians of
-three, both under the 3.84 s Zucchini bar).
+table. All sizes in bytes. The Chrome pair, which the resource table does
+not cover, applies in 3.29 s at v7 (median of three), under the 3.84 s
+Zucchini bar.
 
 ## The pairs
 
@@ -94,19 +92,21 @@ more than one Go release.
 
 ## Resource comparison
 
-Measured on 2026-08-31 on the same 24-core Linux 6.17 x86-64 host. Values are
-medians of three serial warm-cache runs; elapsed time and maximum RSS come
-from `/usr/bin/time`. Outputs went to tmpfs to minimise storage variance, and
-every apply was compared byte-for-byte with the target.
+Comparator rows measured on 2026-08-31, presage rows re-measured on
+2026-09-01 at this document's revision (container v7), on the same 24-core
+Linux 6.17 x86-64 host. Values are medians of three serial warm-cache runs;
+elapsed time and maximum RSS come from `/usr/bin/time`. Outputs went to
+tmpfs to minimise storage variance, and every apply was compared
+byte-for-byte with the target.
 
 | pair | tool | encode s | encode RSS KiB | apply s | apply RSS KiB |
 |---|---|---:|---:|---:|---:|
-| prometheus 3.13.1 → 3.13.2 | presage | 4.26 | 970,480 | 0.75 | 401,164 |
+| prometheus 3.13.1 → 3.13.2 | presage | 4.61 | 975,244 | 0.89 | 401,796 |
 | prometheus 3.13.1 → 3.13.2 | Zucchini + XZ | 21.34 | 1,100,484 | 0.45 | 203,012 |
 | prometheus 3.13.1 → 3.13.2 | bsdiff | 36.79 | 825,148 | 0.49 | 191,996 |
 | prometheus 3.13.1 → 3.13.2 | xdelta3 | 8.49 | 705,716 | 0.38 | 115,244 |
 | prometheus 3.13.1 → 3.13.2 | zstd `--patch-from` | 21.13 | 431,124 | 0.13 | 187,668 |
-| libxul 154.0 → 154.0.1 | presage | 30.44 | 1,801,300 | 1.57 | 395,400 |
+| libxul 154.0 → 154.0.1 | presage | 24.03 | 1,801,428 | 1.91 | 384,828 |
 | libxul 154.0 → 154.0.1 | Zucchini + XZ | 70.00 | 2,256,308 | 0.97 | 394,180 |
 | libxul 154.0 → 154.0.1 | bsdiff | 79.46 | 1,633,536 | 1.18 | 374,780 |
 | libxul 154.0 → 154.0.1 | xdelta3 | 21.01 | 1,320,848 | 0.86 | 205,668 |
