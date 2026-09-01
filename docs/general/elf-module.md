@@ -7,11 +7,25 @@ module behind the `Module` seam of `presage/module.go`, so that
 non-Go ELF x86-64 image end to end. Design authority: `SPEC.md` §4–6, §10
 item 3; template: `presage/gomod` (`presage-core.md` §4, §7).*
 
-Container v6 uses the compact CM model, balanced terminal compression, the
-RELR slot layer, exact FDE CIE pointers and an exactly rebuilt
-`.eh_frame_hdr`. Current end-to-end
+Container v6 uses the compact CM model over bit-history states, balanced
+terminal compression, the RELR slot layer, exact FDE CIE pointers and an
+exactly rebuilt `.eh_frame_hdr`. Current end-to-end
 sizes and resource measurements are in `baselines.md`; the status sections
 below retain the measurements that motivated each layer.
+
+## Status (2026-09-01b): the CM engine, second pass
+
+The coder's slots hold a zpaq-family bit history under a per-bank state map
+instead of a 16-bit counter, and an lpaq SSE chain refines the mixer's
+output (`delta/cmcoder.go`; `research/pgo-churn.md` §8, "The engine,
+revisited"). Same contexts, same side information, same codec ids — the
+engine behind them is stronger. Chrome 2,346,975 → **2,320,568**
+(−26,407), libxul 2,337,304 → **2,282,523** (−54,781), applied and
+`cmp`-verified. Apply pays for it: Chrome 2.68 → 3.05 s, libxul
+1.36 → 1.71 s (median of 3 under load 14–16). Encode and peak RSS are flat
+at both ends; decoder table memory per large stream falls, since a slot is
+one byte rather than three. `presage.Version` stays 6 — a pre-release
+format, and an older build refuses these patches by name.
 
 ## Status (2026-09-01): three derivable fields outside `.text`
 

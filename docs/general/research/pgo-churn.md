@@ -553,6 +553,50 @@ squash/stretch tables (lpaq) — floats in the coding path were a latent
 cross-platform decode divergence. Field-class contexts (~a ninth of the
 harness win) deferred; they attach at the `DispContext` seam.
 
+**The engine, revisited** (2026-09-01, `delta/cmcoder.go`). §8's port kept
+the machinery deliberately minimal — a 16-bit counter per slot, one mixer,
+no SSE — on the argument that the win is in the contexts. Half of that
+argument was wrong. Replaying the *real* production streams
+(`bench/cmengine` over a `PRESAGE_CM_DUMP` of both pairs at container v6,
+every variant round-tripped byte-exact) two upgrades pay and the rest do
+not:
+
+| engine | libxul patch | Chrome patch | decode |
+|---|---:|---:|---:|
+| v6 counters (before) | 2,337,304 | 2,346,975 | 1.00x |
+| V1: bit histories + state map | 2,292,070 (−45,234) | 2,335,945 (−11,030) | 1.08–1.10x |
+| **V2: V1 + a 3-stage SSE chain** | **2,282,523 (−54,781)** | **2,320,568 (−26,407)** | **1.23–1.26x** |
+
+V1 replaces the counter with a zpaq-family nonstationary state byte (255
+states) whose worth is learned per bank by an lpaq state map, and feeds the
+mixer `stretch(sm.p)` plus the `n1−n0` confidence. It is the cheaper half
+in both senses: nearly all of libxul's gain, almost none of Chrome's, and
+on its own it makes some *plan* columns worse (Chrome
+`derived_suppression` 33,257 → 34,421) — a bit history is a poor fit for a
+LEB128 column, where the counter's recency was doing real work. V2 adds
+lpaq's APM chain on the mixer output, keyed by `c0`, by
+`hash(p1,sel)^c0`, and by `Pred[i]<<3|k`; it recovers every plan column
+(33,257 → 32,822) and doubles Chrome's gain. Sizing the hashed SSE stage to
+the stream (`apmBits`, 256 rows at 4 KiB up to 64K at 1 MiB) rather than a
+flat 64K rows costs ~300 B across both pairs and buys back a fifth of the
+slowdown — 1.42x → 1.23x on Chrome — by keeping the table in cache.
+
+Measured under load 14–16 on the shared box, median of 3: apply Chrome
+2.678 → 3.054 s, libxul 1.358 → 1.711 s; encode flat (23.6 → 23.4 s,
+28.5 → 30.5 s); peak RSS flat both ways (apply Chrome 669 → 680 MiB,
+libxul 412 → 408 MiB). Decoder table memory per large stream *falls*:
+a slot is one byte instead of three, so five hashed banks go 15 → 5 MiB,
+against 4.5 MiB of SSE tables.
+
+Everything past V2 was measured and rejected on the same streams: a second
+mixer layer with three weight-set selectors, a dual-rate counter beside the
+state, and 4× wider hash tables each buy under 3 K on top of V2 for 1.5–2x
+more decode, and the combination is worse per second than the tier ladder
+in §8.2 already offers. The counters are gone rather than kept beside the
+states: keeping both is worth a further 2,229 B on libxul and 358 B on
+Chrome, and costs a third mixer input per bank, three bytes per slot of
+decoder memory, and half again as much decode time (1.5x V0 → 2.2x).
+
 ### 8.1 Match-into-old and ordering probes, measured under the bar
 
 `-probes` via `cmprobe2.go` (2026-08-31), every rung round-tripped
