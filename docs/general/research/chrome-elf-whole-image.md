@@ -1434,6 +1434,33 @@ recompiled code, and §10's verdict is confirmed rather than merely asserted.
   −194,000**, turning entirely on whether an operand value is cheaper than a
   four-byte displacement delta. Worth one more column-pricing probe before any
   build.
+
+  *Priced 2026-09-01* (`bench/elfpredict -probes opfield`, the layer run
+  as a decoder would: the domain is every instruction the length decoder
+  finds in a mapped body of the prediction, an entry is (index delta, field
+  class, value), every row round-trips). Against the production residual
+  coder — columnar shape, `DispContext`, the prediction-conditioned CM —
+  the `.text` piece is 1,064,218 and the classes price as:
+
+  | class | entries | column | correction | net |
+  |---|---:|---:|---:|---:|
+  | immediate only | 48,720 | +80,782 | −97,414 | **−16,632** |
+  | registers only | 80,628 | +145,878 | −103,024 | **+42,854** |
+  | rsp/rbp displacement | 69,083 | +46,034 | −83,393 | **−37,359** |
+  | all scalar fields (imm, disp, rip, rel, baseless) | 146,238 | +174,785 | −228,567 | **−53,782** |
+  | every repairable class | 235,478 | +346,224 | −357,023 | −10,799 |
+
+  Two things decide it. Indexing each class over its own field domain
+  (§9.15's shape) rather than over all instructions halves the index and
+  flips rsp/rbp from −9,209 to −37,359. And the register class must be left
+  alone: a modrm byte three bits from the prediction's is exactly what
+  `CMSide.Pred` codes cheaply (xz saving 144,064, production 103,024), while
+  the column that would replace it has no prediction under it. The cost is
+  1.47 B/entry, not the 2.72 §9.15's four-byte deltas carried. Net for the
+  scalar classes: **−53,782, 2.4% of the patch**, the largest item on this
+  shelf; a port needs `delta/x86/lendec.go` to report the immediate and
+  displacement field layout it already computes (the `x86asm` walk this
+  probe used is 1.74 s of apply, the length decoder's 0.14 s). Unbuilt.
 - **Extending map coverage**: ≤91,000, and the map extension is itself plan.
 - **A prediction-conditioned correction coder**: the predicted byte is worth
   0.41 bits/byte beyond ordinary literal context (out[i−1] alone costs 916,518;
