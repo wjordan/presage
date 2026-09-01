@@ -158,6 +158,54 @@ func sortDedupShards(shards [][]uint64) []uint64 {
 
 func workersFor(n int) int { return min(max(n, 1), runtime.GOMAXPROCS(0)) }
 
+// sortUint64InPlace partitions s into disjoint value ranges and sorts those
+// ranges concurrently. Unlike sortDedupShards it needs no full-size scatter
+// buffer, which matters when s itself is an output-sized derived domain.
+func sortUint64InPlace(s []uint64) {
+	depth := 0
+	for 1<<depth < 2*workers() {
+		depth++
+	}
+	var sortPart func([]uint64, int)
+	sortPart = func(part []uint64, depth int) {
+		if depth == 0 || len(part) < 1<<16 {
+			slices.Sort(part)
+			return
+		}
+		const samples = 33
+		var sample [samples]uint64
+		for i := range sample {
+			sample[i] = part[i*(len(part)-1)/(samples-1)]
+		}
+		slices.Sort(sample[:])
+		pivot := sample[samples/2]
+		i, j := 0, len(part)
+		for i < j {
+			if part[i] < pivot {
+				i++
+				continue
+			}
+			j--
+			part[i], part[j] = part[j], part[i]
+		}
+		// A heavily duplicated or unrepresentative sample cannot buy useful
+		// parallelism. The standard sort handles that case efficiently.
+		if i < len(part)/16 || i > 15*len(part)/16 {
+			slices.Sort(part)
+			return
+		}
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sortPart(part[:i], depth-1)
+		}()
+		sortPart(part[i:], depth-1)
+		wg.Wait()
+	}
+	sortPart(s, depth)
+}
+
 // sortByKey sorts s in place with cmp, in parallel, where cmp orders first on
 // the ascending integer key. Elements are partitioned into buckets of disjoint
 // key ranges -- so equal keys stay together -- and each bucket is handed to the

@@ -77,6 +77,28 @@ allocations/op. Against the original decoder that is 61.5% fewer allocated
 bytes and 71.1% fewer allocations; against the first pass it is a further
 26.9% reduction in bytes.
 
+## 1.2 Third pass: remove the domain sort's scatter copy
+
+Sampling the second-pass CLI at its new high-water mark found the main
+goroutine in the field repair's address-domain sort. The domain already had
+one exact contiguous entry per field, but the general shard sorter allocated
+a second full-size scatter array and then a compact result while the output
+image and field-site table were live.
+
+The decoder now fills the exact domain concurrently and sorts it in place. A
+sampled partition divides it into disjoint value ranges for parallel sorting;
+badly skewed or duplicate-heavy partitions fall back to Go's serial sort. The
+deduplicated result remains in the domain's own backing array. This preserves
+the plan basis and patch format.
+
+On Chrome, ordinary (non-allocator-outlier) CLI runs moved from about 934 MiB
+to 916 MiB maximum RSS, with wall time unchanged around 3.0 seconds. Without a
+memory limit, median maximum RSS moved from roughly 1,245 MiB to 1,214 MiB.
+The one-shot allocation benchmark moved from 2,574,672,864 to 2,480,408,488
+B/op, 94.3 MB less allocation. Cached patches still apply byte-for-byte on
+Chrome, libxul and Prometheus. libxul remains near 620 MiB and Prometheus near
+400 MiB because another phase already sets their high-water marks.
+
 ## 2. Where the baseline went
 
 The allocation profile's largest rows (`-memprofilerate=1`, one Chrome apply)
@@ -176,6 +198,25 @@ A dense bitset for in-window reference targets removed most target-sort
 allocation but did not change the later residual high-water mark. It also
 penalises sparse code windows, so it was reverted rather than adding a more
 complex representation with no measured peak benefit.
+
+### Shrink the allocations around the new ceiling
+
+The third pass also tested four smaller lifetime cuts: a 32-bit field-site
+representation with a wide fallback, fixed-chunk call-target gathering,
+reusing the compacted domain's spare capacity for the merged remap target set,
+and starting residual prefetch only after materialisation. They removed up to
+about 44 MiB from an individual live set or substantially reduced cumulative
+allocation, but none moved maximum RSS on Chrome or libxul. Once one overlap
+was removed, the next reached the same ceiling. Delaying prefetch also gave up
+useful CPU overlap, so these changes were not retained solely as decoder-peak
+optimisations.
+
+At the field-fix/correction boundary, GC traces now show about 607 MiB of
+managed memory live. Lowering `GOMEMLIMIT` below that knee leaves RSS unchanged
+and increases wall time. A further material reduction therefore needs to
+remove an output- or reference-sized resident object, or change when global
+metadata is needed; another local table packing is unlikely to show up in the
+process peak.
 
 ## 5. What prior art says about the next architecture
 

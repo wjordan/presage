@@ -168,16 +168,19 @@ type fieldStats struct {
 // remapDomain is the sorted list of distinct addresses the prediction points
 // at. The decoder can build it because it holds the prediction.
 func remapDomain(text []byte, textAddr uint64, sites []fieldSite) []uint64 {
-	// Each site reads four bytes of its own, so the addresses come out in
-	// shards and go straight into the parallel sort (psort.go).
-	shards := shardRange(len(sites), func(lo, hi int) []uint64 {
-		part := make([]uint64, hi-lo)
+	// The site table is already contiguous and each address is independent.
+	// Fill one exact array concurrently, then sort it in place: the generic
+	// parallel sorter needs another full-size scatter buffer, which overlaps
+	// the output image and the site table at the decoder's high-water mark.
+	domain := make([]uint64, len(sites))
+	shardRange(len(sites), func(lo, hi int) struct{} {
 		for i := lo; i < hi; i++ {
-			part[i-lo] = sites[i].addr(text, textAddr)
+			domain[i] = sites[i].addr(text, textAddr)
 		}
-		return part
+		return struct{}{}
 	})
-	return sortDedupShards(shards)
+	sortUint64InPlace(domain)
+	return slices.Compact(domain)
 }
 
 // remapTargets is the address set a remapped field's new target is named

@@ -52,6 +52,33 @@ func TestSortDedupShards(t *testing.T) {
 	}
 }
 
+func TestSortUint64InPlace(t *testing.T) {
+	r := rand.New(rand.NewPCG(5, 6))
+	const n = 70000 // crosses the parallel threshold
+	cases := map[string][]uint64{
+		"random":    make([]uint64, n),
+		"constant":  make([]uint64, n),
+		"two-value": make([]uint64, n),
+		"ordered":   make([]uint64, n),
+	}
+	for i := range n {
+		cases["random"][i] = r.Uint64()
+		cases["constant"][i] = 7
+		cases["two-value"][i] = uint64(i & 1)
+		cases["ordered"][i] = uint64(i)
+	}
+	for name, values := range cases {
+		t.Run(name, func(t *testing.T) {
+			want := slices.Sorted(slices.Values(values))
+			got := slices.Clone(values)
+			sortUint64InPlace(got)
+			if !slices.Equal(got, want) {
+				t.Fatal("in-place parallel sort differs from slices.Sort")
+			}
+		})
+	}
+}
+
 func TestSortByKey(t *testing.T) {
 	r := rand.New(rand.NewPCG(3, 4))
 	for _, n := range []int{0, 1, 1000, 1 << 15, 200000} {
