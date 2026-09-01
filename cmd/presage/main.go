@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wjordan/presage/internal/trace"
 	"github.com/wjordan/presage/presage"
 	"github.com/wjordan/presage/presage/elfmod"
 	"github.com/wjordan/presage/presage/modules"
@@ -339,6 +340,7 @@ func apply(args []string) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
+	trace.Report()
 	fmt.Fprintf(os.Stderr, "presage: applied, %d B in %s\n", w.n, time.Since(start).Round(time.Millisecond))
 	return nil
 }

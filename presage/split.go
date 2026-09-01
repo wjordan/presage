@@ -8,6 +8,7 @@ import (
 
 	"github.com/wjordan/presage/delta"
 	"github.com/wjordan/presage/internal/cz"
+	"github.com/wjordan/presage/internal/trace"
 )
 
 // A Cutter is an exact module that can say where the target's character
@@ -301,6 +302,7 @@ type splitPrefetch struct {
 func prefetchSplitResidual(stream []byte, outLen int) *splitPrefetch {
 	pf := &splitPrefetch{done: make(chan struct{})}
 	go func() {
+		defer trace.Stage("residual/prefetch")()
 		defer close(pf.done)
 		ps, err := parsePieces(stream, outLen)
 		if err != nil {
@@ -338,7 +340,9 @@ func (pf *splitPrefetch) take(i, j int) []byte {
 // and applied in place over its span of out, which holds the prediction.
 func applySplitResidual(out, stream []byte, disp func() *delta.DispContext, pf *splitPrefetch) error {
 	if pf != nil {
+		doneWait := trace.Stage("residual/waitPrefetch")
 		<-pf.done
+		doneWait()
 	}
 	ps, err := parsePieces(stream, len(out))
 	if err != nil {
@@ -410,21 +414,29 @@ func applySplitResidual(out, stream []byte, disp func() *delta.DispContext, pf *
 		// columns are decoded first and the conditioning derived from them
 		// and from span, which still holds the prediction.
 		lead := p.leadStreams()
-		if err := getRange(0, lead); err != nil {
+		doneLead := trace.Stagef("residual/piece%d/lead", pi)
+		err := getRange(0, lead)
+		doneLead()
+		if err != nil {
 			return err
 		}
 		if lead == 2 && slices.ContainsFunc(p.codec[2:], isCMCodec) {
+			doneSides := trace.Stagef("residual/piece%d/sides", pi)
 			buckets, err := delta.CMColumnarSides(span, streams[0], streams[1],
 				pieceDisp())
+			doneSides()
 			if err != nil {
 				return fmt.Errorf("%w: piece: %v", ErrCorrupt, err)
 			}
 			sides = colSides(buckets)
 		}
-		if err := getRange(lead, len(streams)); err != nil {
+		doneRest := trace.Stagef("residual/piece%d/rest", pi)
+		err = getRange(lead, len(streams))
+		doneRest()
+		if err != nil {
 			return err
 		}
-		var err error
+		doneApply := trace.Stagef("residual/piece%d/apply", pi)
 		switch {
 		case p.kind == pieceLZ && len(streams) == 1:
 			err = delta.ApplyFlaggedCorrection(span, streams[0])
@@ -435,6 +447,7 @@ func applySplitResidual(out, stream []byte, disp func() *delta.DispContext, pf *
 		default:
 			err = fmt.Errorf("%w: piece kind %d with %d streams", ErrCorrupt, p.kind, len(streams))
 		}
+		doneApply()
 		if err != nil {
 			return err
 		}

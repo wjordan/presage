@@ -116,3 +116,66 @@ func TestPlanPackOff(t *testing.T) {
 		t.Fatalf("whole-plan round trip failed: %v", err)
 	}
 }
+
+// TestPlanPackSegments covers the segmented arm: a column above planSegMax is
+// coded as several independent spans, and a paired column's spans name the
+// whole span range of their index column and their own record base.
+func TestPlanPackSegments(t *testing.T) {
+	defer func(g, m int) { planCMMinGain, planSegMax = g, m }(planCMMinGain, planSegMax)
+	planCMMinGain, planSegMax = 0, 16<<10
+	plan := bigPlan()
+	packed, note := packPlan(plan)
+	if packed[0] != planPackSpans {
+		t.Fatalf("nothing was carved out: %s", note)
+	}
+	if !strings.Contains(note, "/") {
+		t.Errorf("no column was segmented: %s", note)
+	}
+	spans, err := planSpansOf(packed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var segmentedPair, based bool
+	for _, s := range spans {
+		if s.ctx == ctxPair {
+			segmentedPair = segmentedPair || s.npair > 1
+			based = based || s.base > 0
+		}
+	}
+	if !segmentedPair {
+		t.Error("no paired span names a multi-span index column")
+	}
+	if !based {
+		t.Error("no paired span carries a record base")
+	}
+	planCacheKey = [32]byte{}
+	got, err := unpackPlan(packed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, plan) {
+		t.Fatal("the unpacked segmented plan differs from the marshalled one")
+	}
+}
+
+func TestPlanSegBounds(t *testing.T) {
+	defer func(m int) { planSegMax = m }(planSegMax)
+	planSegMax = 8
+	// Three-byte varints: every cut must land on a value boundary.
+	col := bytes.Repeat([]byte{0x81, 0x82, 0x03}, 10)
+	b := planSegBounds(col)
+	if len(b) < 3 {
+		t.Fatalf("30 bytes at a max of 8 gave %d segments", len(b)-1)
+	}
+	for _, at := range b[1 : len(b)-1] {
+		if at%3 != 0 {
+			t.Errorf("cut at %d is inside a varint", at)
+		}
+	}
+	if b[0] != 0 || b[len(b)-1] != len(col) {
+		t.Errorf("bounds %v do not cover the column", b)
+	}
+	if got := records(col); got != 10 {
+		t.Errorf("records = %d, want 10", got)
+	}
+}

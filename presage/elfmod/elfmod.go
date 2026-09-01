@@ -9,6 +9,7 @@ import (
 
 	"github.com/wjordan/presage/delta"
 	"github.com/wjordan/presage/delta/x86"
+	"github.com/wjordan/presage/internal/trace"
 	"github.com/wjordan/presage/presage"
 	"github.com/wjordan/presage/presage/eqmatch"
 	"github.com/wjordan/presage/presage/symbols"
@@ -225,7 +226,9 @@ type predStats struct {
 func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]byte, predStats, error) {
 	var st predStats
 	// One structural plan per code window, in window order.
+	donePM := trace.Stage("planMaps")
 	ep, structures, err := cachedPlanMaps(old, cp)
+	donePM()
 	if err != nil {
 		return nil, st, err
 	}
@@ -241,13 +244,18 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 			return nil, st, errors.New("structural and equivalence plans describe different code windows")
 		}
 	}
-	if ep.Eqs, err = decodeEquivalences(ep, newSrcPredictor(structures, ep.Windows)); err != nil {
+	doneEq := trace.Stage("decodeEquivalences")
+	ep.Eqs, err = decodeEquivalences(ep, newSrcPredictor(structures, ep.Windows))
+	doneEq()
+	if err != nil {
 		return nil, st, err
 	}
 	if releaseReferencePages != nil {
 		releaseReferencePages()
 	}
+	doneLay := trace.Stage("layImage")
 	out := layImage(old, ep, releaseReferencePages)
+	doneLay()
 
 	var rp *relocPlan
 	if len(cp.Reloc) != 0 {
@@ -260,9 +268,14 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 		}
 		rp = &parsed
 	}
+	doneParts := trace.Stage("oracleParts")
 	parts := newOracleParts(ep, structures)
+	doneParts()
 	if rp != nil && rp.NewSize != 0 {
-		if _, err := applyReloc(out, old, *rp, parts.pointer(rp)); err != nil {
+		doneReloc := trace.Stage("applyReloc")
+		_, err := applyReloc(out, old, *rp, parts.pointer(rp))
+		doneReloc()
+		if err != nil {
 			return nil, st, err
 		}
 		if releaseReferencePages != nil {
@@ -280,14 +293,19 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 		if rp == nil {
 			return nil, st, errors.New("relr plan needs the section geometry the relocation plan carries")
 		}
+		doneRelr := trace.Stage("applyRelr")
 		st.Relr = applyRelr(out, old, lp, rp.OldSecs, parts.sm, parts.pointer(rp))
+		doneRelr()
 	}
 	if len(cp.Dwarf) != 0 {
 		dp, err := unmarshalDwarfPlan(cp.Dwarf, old)
 		if err != nil {
 			return nil, st, err
 		}
-		if _, err := applyDwarf(out, old, dp, ep, parts.pointer(rp), funcSizeDeltas(structures)); err != nil {
+		doneDw := trace.Stage("applyDwarf")
+		_, err = applyDwarf(out, old, dp, ep, parts.pointer(rp), funcSizeDeltas(structures))
+		doneDw()
+		if err != nil {
 			return nil, st, err
 		}
 	}
@@ -315,7 +333,9 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 			e, ok := extents[addr]
 			return e.old, e.new, ok
 		}
+		doneEh := trace.Stage("applyEhFrame")
 		st.EhFrame = applyEhFrame(out, old, ep, fp, rp.OldSecs, parts.pointer(rp), extentOf)
+		doneEh()
 	}
 	if len(cp.RoData) != 0 {
 		rd, err := unmarshalRoDataPlan(cp.RoData)
@@ -328,13 +348,20 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 		if rp == nil {
 			return nil, st, errors.New("rodata plan needs the section geometry the relocation plan carries")
 		}
+		doneRo := trace.Stage("applyRoData")
 		applyRoData(out, old, rd, parts.sm, parts.pointer(rp), parts.lk.unitAt)
+		doneRo()
 	}
+	doneOr := trace.Stage("oracleImage")
 	oracle := parts.image(rp)
+	doneOr()
+	doneRt := trace.Stage("retarget")
 	for i, w := range ep.Windows {
 		st.Relocation.Add(retargetEquivalencePrediction(bytesOf(out, w.New), ep, w, structures[i], oracle))
 	}
+	doneRt()
 	if len(cp.Choices) != 0 {
+		doneCh := trace.Stage("choices")
 		cr := &planReader{b: cp.Choices}
 		for i, w := range ep.Windows {
 			b := cr.stream()
@@ -357,6 +384,7 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 		if !cr.done() {
 			return nil, st, errors.New("choice stream does not match the code windows")
 		}
+		doneCh()
 	}
 	if releaseReferencePages != nil {
 		releaseReferencePages()
@@ -364,6 +392,7 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 	// The field fix is last: it names fields by position in a walk of the
 	// finished prediction.
 	if len(cp.Fields) != 0 {
+		doneFF := trace.Stage("fieldFix")
 		fr := &planReader{b: cp.Fields}
 		for i, w := range ep.Windows {
 			b := fr.stream()
@@ -380,10 +409,12 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 		if !fr.done() {
 			return nil, st, errors.New("field stream does not match the code windows")
 		}
+		doneFF()
 	}
 	// The operand-field correction reads the fields the field fix does not
 	// write, so it runs after it over the same walk of the same bytes.
 	if len(cp.OpField) != 0 {
+		doneOF := trace.Stage("opField")
 		or := &planReader{b: cp.OpField}
 		for i, w := range ep.Windows {
 			b := or.stream()
@@ -400,6 +431,7 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 		if !or.done() {
 			return nil, st, errors.New("operand field stream does not match the code windows")
 		}
+		doneOF()
 	}
 	return out, st, nil
 }

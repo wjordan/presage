@@ -14,6 +14,7 @@ import (
 
 	"github.com/wjordan/presage/delta"
 	"github.com/wjordan/presage/internal/cz"
+	"github.com/wjordan/presage/internal/trace"
 )
 
 // The plan ships as one blob inside the patch body, which the container
@@ -35,7 +36,7 @@ import (
 // cannot cost correctness.
 //
 //	byte(mode) [ u(planLen) u(nspans) { u(off) u(rawLen) u(zLen) byte(codec)
-//	  byte(ctx) [u(pair)] }* u(residueLen) residue z... ]
+//	  byte(ctx) [u(pair) u(npair) u(base)] }* u(residueLen) residue z... ]
 
 const (
 	planPackNone  byte = 0 // the plan follows whole
@@ -106,8 +107,58 @@ type planColumn struct {
 	off, n int
 	ctx    byte
 	codec  byte
-	pair   int // index of the paired index column in the list, or -1
-	name   string
+	// pair is the first span of the index column this one is coded against,
+	// npair how many spans that column occupies and base the record index
+	// this span's first value has in it. pair is -1 when there is none.
+	pair, npair, base int
+	name              string
+}
+
+// planSegMax is the largest column the coder is asked to decode as one chain.
+// Columns decode concurrently, so a plan's apply time is its longest column,
+// not its total: on libxul one 281 KB column held the whole decode for 0.30 s
+// while eleven others finished around it. A column above this is coded as
+// evenly sized independent segments, each of which costs the adaptive models
+// one restart.
+var planSegMax = 128 << 10
+
+// planSpan is one coded segment of a column.
+type planSpan struct {
+	off, n, base int
+	z            []byte
+}
+
+// planSegBounds cuts a column into ceil(n/planSegMax) even segments. Cuts are
+// moved forward to the next LEB128 value boundary, so a segment starts on a
+// record and its running parse -- and the index column it may be coded
+// against -- line up with the column's own.
+func planSegBounds(col []byte) []int {
+	k := (len(col) + planSegMax - 1) / planSegMax
+	if k < 2 {
+		return []int{0, len(col)}
+	}
+	bounds := []int{0}
+	for i := 1; i < k; i++ {
+		b := i * len(col) / k
+		for b > 0 && b < len(col) && col[b-1]&0x80 != 0 {
+			b++
+		}
+		if b > bounds[len(bounds)-1] && b < len(col) {
+			bounds = append(bounds, b)
+		}
+	}
+	return append(bounds, len(col))
+}
+
+// records counts the complete LEB128 values in b.
+func records(b []byte) int {
+	n := 0
+	for _, c := range b {
+		if c&0x80 == 0 {
+			n++
+		}
+	}
+	return n
 }
 
 // packPlan is the encoder side. It never fails: a plan it cannot walk, or one
@@ -119,12 +170,45 @@ func packPlan(plan []byte) ([]byte, string) {
 	// which depends on what else was carved -- never has to code anything
 	// again.
 	type coded struct {
-		zc       int    // what ordinary terminal compression makes of the column
-		plain    []byte // the generic or plain-varint arm
-		plainCtx byte
-		paired   []byte // the cross-column arm, when the column has an index
+		zc              int        // what ordinary terminal compression makes of the column
+		plain           []planSpan // the generic or plain-varint arm, per segment
+		paired          []planSpan // the cross-column arm, when the column has an index
+		plainN, pairedN int        // their coded sizes
+		plainCtx        byte
 	}
 	out := make([]coded, len(cols))
+	// Both arms are coded segment by segment, and the segments of one column
+	// are independent chains: each restarts the models, and the decoder runs
+	// as many of them at once as it has cores.
+	code := func(col []byte, off int, bounds []int, side func(base int) *delta.CMSide) ([]planSpan, int) {
+		segs := make([]planSpan, len(bounds)-1)
+		total, base := 0, 0
+		var wg sync.WaitGroup
+		bad := make([]bool, len(segs))
+		for k := range segs {
+			lo, hi := bounds[k], bounds[k+1]
+			segs[k] = planSpan{off: off + lo, n: hi - lo, base: base}
+			base += records(col[lo:hi])
+			wg.Add(1)
+			go func(k, lo, hi, base int) {
+				defer wg.Done()
+				b, err := delta.CMEncodeCompact(col[lo:hi], side(base))
+				if err != nil {
+					bad[k] = true
+					return
+				}
+				segs[k].z = b
+			}(k, lo, hi, segs[k].base)
+		}
+		wg.Wait()
+		for k := range segs {
+			if bad[k] {
+				return nil, 0
+			}
+			total += len(segs[k].z)
+		}
+		return segs, total
+	}
 	var wg sync.WaitGroup
 	for i, c := range cols {
 		if c.n < planCMMin || !planCMWanted(c) {
@@ -139,19 +223,26 @@ func packPlan(plan []byte) ([]byte, string) {
 			if c.ctx != ctxGeneric {
 				r.plainCtx = ctxVarint
 			}
-			var side *delta.CMSide
-			if r.plainCtx == ctxVarint {
-				side = &delta.CMSide{Varint: true}
-			}
-			if b, err := delta.CMEncodeCompact(col, side); err == nil {
-				r.plain = b
-			}
+			varintSide := r.plainCtx == ctxVarint
+			bounds := planSegBounds(col)
+			r.plain, r.plainN = code(col, c.off, bounds, func(int) *delta.CMSide {
+				if varintSide {
+					return &delta.CMSide{Varint: true}
+				}
+				return nil
+			})
 			if c.pair >= 0 && c.ctx == ctxPair {
 				p := cols[c.pair]
 				pair := delta.CMParseVarints(plan[p.off : p.off+p.n])
-				if b, err := delta.CMEncodeCompact(col, &delta.CMSide{Varint: true, Pair: pair}); err == nil {
-					r.paired = b
-				}
+				r.paired, r.pairedN = code(col, c.off, bounds, func(base int) *delta.CMSide {
+					v := pair
+					if base < len(v) {
+						v = v[base:]
+					} else {
+						v = nil
+					}
+					return &delta.CMSide{Varint: true, Pair: v}
+				})
 			}
 			out[i] = r
 		}()
@@ -163,6 +254,7 @@ func packPlan(plan []byte) ([]byte, string) {
 	// before this one. The list is walked in offset order, so a column whose
 	// index column ships after it falls back to the plain varint arm.
 	at := make([]int, len(cols))
+	atN := make([]int, len(cols))
 	for i := range at {
 		at[i] = -1
 	}
@@ -174,19 +266,22 @@ func packPlan(plan []byte) ([]byte, string) {
 		if r.plain == nil && r.paired == nil {
 			continue
 		}
-		z, ctx, pair := r.plain, r.plainCtx, -1
-		if r.paired != nil && len(r.paired) < len(z) {
+		segs, n, ctx, pair, npair := r.plain, r.plainN, r.plainCtx, -1, 0
+		if r.paired != nil && (segs == nil || r.pairedN < n) {
 			if p := at[c.pair]; p >= 0 {
-				z, ctx, pair = r.paired, ctxPair, p
+				segs, n, ctx, pair, npair = r.paired, r.pairedN, ctxPair, p, atN[c.pair]
 			}
 		}
-		if len(z)+planCMMinGain > r.zc {
+		if segs == nil || n+planCMMinGain > r.zc {
 			continue
 		}
-		at[i] = len(spans)
-		spans = append(spans, planColumn{off: c.off, n: c.n, ctx: ctx, codec: planCodecCMCompact, pair: pair})
-		zs = append(zs, z)
-		note.add(c.name, c.n, r.zc, len(z), ctx)
+		at[i], atN[i] = len(spans), len(segs)
+		for _, sg := range segs {
+			spans = append(spans, planColumn{off: sg.off, n: sg.n, ctx: ctx,
+				codec: planCodecCMCompact, pair: pair, npair: npair, base: sg.base})
+			zs = append(zs, sg.z)
+		}
+		note.add(c.name, c.n, r.zc, n, ctx, len(segs))
 	}
 	if len(spans) == 0 {
 		return append([]byte{planPackNone}, plan...), "plan columns: none beat terminal compression by " + fmt.Sprint(planCMMinGain)
@@ -202,6 +297,8 @@ func packPlan(plan []byte) ([]byte, string) {
 		b = append(b, s.codec, s.ctx)
 		if s.ctx == ctxPair {
 			b = appendU(b, uint64(s.pair))
+			b = appendU(b, uint64(s.npair))
+			b = appendU(b, uint64(s.base))
 		}
 	}
 	var residue []byte
@@ -232,11 +329,14 @@ type noteBuilder struct {
 	rows             []string
 }
 
-func (b *noteBuilder) add(name string, raw, was, now int, ctx byte) {
+func (b *noteBuilder) add(name string, raw, was, now int, ctx byte, segs int) {
 	b.n, b.raw, b.was, b.now = b.n+1, b.raw+raw, b.was+was, b.now+now
 	arm := ""
 	if ctx == ctxPair {
 		arm = " paired"
+	}
+	if segs > 1 {
+		arm += fmt.Sprintf(" /%d", segs)
 	}
 	b.rows = append(b.rows, fmt.Sprintf("%s %+d%s", name, now-was, arm))
 }
@@ -275,7 +375,9 @@ func unpackPlan(b []byte) ([]byte, error) {
 	if hit {
 		return val, nil
 	}
+	doneUnpack := trace.Stage("unpackPlan")
 	plan, err := decodePlanSpans(b)
+	doneUnpack()
 	if err != nil {
 		return nil, err
 	}
@@ -291,46 +393,73 @@ var (
 	planCacheVal []byte
 )
 
-func decodePlanSpans(b []byte) ([]byte, error) {
-	r := &planReader{b: b[1:]}
-	planLen := r.u()
+// parsePlanSpans reads a packed plan's span table, validating every field
+// against the plan length it declares.
+func parsePlanSpans(b []byte) (spans []planColumn, zlen []uint64, r *planReader, planLen uint64, err error) {
+	r = &planReader{b: b[1:]}
+	planLen = r.u()
 	n := r.u()
 	if r.err != nil || planLen > maxPlanLen || n > planLen {
-		return nil, errors.New("implausible plan span table")
+		return nil, nil, nil, 0, errors.New("implausible plan span table")
 	}
-	spans := make([]planColumn, 0, n)
-	zlen := make([]uint64, 0, n)
-	var covered uint64
+	spans = make([]planColumn, 0, n)
+	zlen = make([]uint64, 0, n)
 	for i := uint64(0); i < n; i++ {
 		off, size, z := r.u(), r.u(), r.u()
 		codec, ctx := r.byteAt(), r.byteAt()
-		pair := -1
+		pair, npair, base := -1, 0, 0
 		if ctx == ctxPair {
-			p := r.u()
-			if r.err != nil || p >= i {
-				return nil, errors.New("plan span names a later column as its pair")
+			p, np, b := r.u(), r.u(), r.u()
+			if r.err != nil || np == 0 || p+np > i {
+				return nil, nil, nil, 0, errors.New("plan span names a later column as its pair")
 			}
-			pair = int(p)
+			if b > planLen {
+				return nil, nil, nil, 0, errors.New("plan span names an implausible pair record")
+			}
+			pair, npair, base = int(p), int(np), int(b)
 		} else if ctx != ctxGeneric && ctx != ctxVarint {
-			return nil, fmt.Errorf("unsupported plan column context %d", ctx)
+			return nil, nil, nil, 0, fmt.Errorf("unsupported plan column context %d", ctx)
 		}
 		if codec != planCodecCM && codec != planCodecCMCompact {
-			return nil, fmt.Errorf("unsupported plan column codec %d", codec)
+			return nil, nil, nil, 0, fmt.Errorf("unsupported plan column codec %d", codec)
 		}
 		if r.err != nil || off > planLen || size == 0 || size > planLen-off {
-			return nil, errors.New("plan span lies outside the plan")
+			return nil, nil, nil, 0, errors.New("plan span lies outside the plan")
 		}
 		if len(spans) != 0 {
 			if last := spans[len(spans)-1]; uint64(last.off+last.n) > off {
-				return nil, errors.New("plan spans overlap or are unsorted")
+				return nil, nil, nil, 0, errors.New("plan spans overlap or are unsorted")
 			}
 		}
-		covered += size
-		spans = append(spans, planColumn{off: int(off), n: int(size), ctx: ctx, codec: codec, pair: pair})
+		spans = append(spans, planColumn{off: int(off), n: int(size), ctx: ctx, codec: codec,
+			pair: pair, npair: npair, base: base})
 		zlen = append(zlen, z)
 	}
+	return spans, zlen, r, planLen, nil
+}
+
+// coveredOf is how many plan bytes the spans account for.
+func coveredOf(spans []planColumn) uint64 {
+	var n uint64
+	for _, s := range spans {
+		n += uint64(s.n)
+	}
+	return n
+}
+
+// planSpansOf reads a packed plan's span table alone, for tests.
+func planSpansOf(b []byte) ([]planColumn, error) {
+	spans, _, _, _, err := parsePlanSpans(b)
+	return spans, err
+}
+
+func decodePlanSpans(b []byte) ([]byte, error) {
+	spans, zlen, r, planLen, err := parsePlanSpans(b)
+	if err != nil {
+		return nil, err
+	}
 	residue := r.stream()
-	if r.err != nil || uint64(len(residue.b))+covered != planLen {
+	if r.err != nil || uint64(len(residue.b))+coveredOf(spans) != planLen {
 		return nil, errors.New("plan residue does not fill the plan")
 	}
 	// The columns form a forest: a ctxPair column is conditioned on an
@@ -352,6 +481,25 @@ func decodePlanSpans(b []byte) ([]byte, error) {
 	if !r.done() {
 		return nil, errors.New("trailing plan column data")
 	}
+	// An index column may itself be several spans; its values are parsed once
+	// for all the spans coded against it, whichever of them gets there first.
+	pairVals := make([]func() []uint64, len(spans))
+	for _, s := range spans {
+		if s.ctx != ctxPair || pairVals[s.pair] != nil {
+			continue
+		}
+		lo, n := s.pair, s.npair
+		pairVals[lo] = sync.OnceValue(func() []uint64 {
+			if n == 1 {
+				return delta.CMParseVarints(cols[lo])
+			}
+			var b []byte
+			for j := lo; j < lo+n; j++ {
+				b = append(b, cols[j]...)
+			}
+			return delta.CMParseVarints(b)
+		})
+	}
 	var wg sync.WaitGroup
 	for i, s := range spans {
 		wg.Add(1)
@@ -363,13 +511,22 @@ func decodePlanSpans(b []byte) ([]byte, error) {
 			case ctxVarint:
 				side = &delta.CMSide{Varint: true}
 			case ctxPair:
-				<-ready[s.pair]
-				if errs[s.pair] != nil {
-					errs[i] = errs[s.pair]
-					return
+				for j := s.pair; j < s.pair+s.npair; j++ {
+					<-ready[j]
+					if errs[j] != nil {
+						errs[i] = errs[j]
+						return
+					}
 				}
-				side = &delta.CMSide{Varint: true, Pair: delta.CMParseVarints(cols[s.pair])}
+				v := pairVals[s.pair]()
+				if s.base < len(v) {
+					v = v[s.base:]
+				} else {
+					v = nil
+				}
+				side = &delta.CMSide{Varint: true, Pair: v}
 			}
+			defer trace.Stagef("  plancol%d@%d[%dB]", i, s.off, s.n)()
 			var col []byte
 			var err error
 			if s.codec == planCodecCMCompact {

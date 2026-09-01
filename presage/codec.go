@@ -13,6 +13,7 @@ import (
 
 	"github.com/wjordan/presage/delta"
 	"github.com/wjordan/presage/internal/cz"
+	"github.com/wjordan/presage/internal/trace"
 )
 
 // Options controls Encode.
@@ -247,7 +248,9 @@ func applyBody(refs [][]byte, patch []byte, h *Header, reg *Registry, w io.Write
 			return &ErrUnsupported{fmt.Sprintf("module %d", rg.Module)}
 		}
 	}
+	doneBody := trace.Stage("readBody")
 	body, err := readBody(h, patch)
+	doneBody()
 	if err != nil {
 		return err
 	}
@@ -296,19 +299,29 @@ func applyBody(refs [][]byte, patch []byte, h *Header, reg *Registry, w io.Write
 		if h.Flags&FlagSplitResidual != 0 {
 			pf = prefetchSplitResidual(res, int(rg.Length))
 		}
+		doneMat := trace.Stage("Materialise")
 		pred, err := m.Materialise(refs, plan, rg.Length)
+		doneMat()
 		if err != nil {
 			return err
 		}
-		if predictionHash(pred) != root {
+		doneHash := trace.Stage("predictionHash")
+		bad := predictionHash(pred) != root
+		doneHash()
+		if bad {
 			return &ErrPredictionDiverged{Region: i, Module: m.Name()}
 		}
+		doneRes := trace.Stage("applyResidual")
 		bytes, err := applyResidual(m, refs, plan, pred, res, rg.Length, h.Flags, pf)
+		doneRes()
 		if err != nil {
 			return err
 		}
 		if f, ok := m.(Finaliser); ok {
-			if err := f.Finalise(plan, bytes); err != nil {
+			doneFin := trace.Stage("Finalise")
+			err := f.Finalise(plan, bytes)
+			doneFin()
+			if err != nil {
 				return err
 			}
 		}
@@ -329,7 +342,10 @@ func applyBody(refs [][]byte, patch []byte, h *Header, reg *Registry, w io.Write
 	if int64(len(out)) != h.Size {
 		return fmt.Errorf("%w: output is %d bytes, header says %d", ErrCorrupt, len(out), h.Size)
 	}
-	if got := hashOf(out); got != h.Target {
+	doneOut := trace.Stage("hashOf(out)")
+	got := hashOf(out)
+	doneOut()
+	if got != h.Target {
 		return fmt.Errorf("presage: output hashes to %s, patch promises %s", got, h.Target)
 	}
 	// Nothing has reached w yet, so this is the last moment the reference
@@ -339,7 +355,9 @@ func applyBody(refs [][]byte, patch []byte, h *Header, reg *Registry, w io.Write
 	if refsErr != nil {
 		return refsErr
 	}
+	doneWrite := trace.Stage("write")
 	_, err = w.Write(out)
+	doneWrite()
 	return err
 }
 
