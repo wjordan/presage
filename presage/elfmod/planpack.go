@@ -487,6 +487,7 @@ func planColumns(plan []byte) []planColumn {
 	top := &planWalk{b: plan}
 	eq, structure, choices, reloc := top.stream(), top.stream(), top.stream(), top.stream()
 	ehFrame, roData, fields, dwarf := top.stream(), top.stream(), top.stream(), top.stream()
+	relr := top.stream()
 	if !top.done() {
 		return nil
 	}
@@ -522,8 +523,8 @@ func planColumns(plan []byte) []planColumn {
 		walkFields(fields.stream(), add)
 	}
 	// --- the layers with no known interior structure, whole.
-	for i, s := range []*planWalk{choices, reloc, ehFrame, roData, dwarf} {
-		add(s, [...]string{"choices", "reloc", "eh-frame", "rodata", "dwarf"}[i], ctxGeneric, -1)
+	for i, s := range []*planWalk{choices, reloc, ehFrame, roData, dwarf, relr} {
+		add(s, [...]string{"choices", "reloc", "eh-frame", "rodata", "dwarf", "relr"}[i], ctxGeneric, -1)
 	}
 	// Offset order, with the pair references carried through the permutation.
 	order := make([]int, len(cols))

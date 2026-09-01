@@ -184,6 +184,15 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 	}
 	cp := planStreams{Equivalences: epBytes, Structure: structureBytes, Choices: choices, Reloc: rp.marshal()}
 
+	// 4a. RELR relative relocations, where the linker packs them instead of
+	// spelling them out: geometry only, the slots and their pointers are
+	// derived (relr.go).
+	oldRelr, okOldRelr := oi.Sections[".relr.dyn"]
+	_, okNewRelr := ni.Sections[".relr.dyn"]
+	if okOldRelr && okNewRelr {
+		cp.Relr = relrPlan{OldOff: oldRelr.Off, OldSize: oldRelr.Size}.marshal()
+	}
+
 	// 5. The DWARF field layer, for an unstripped pair.
 	parts := newOracleParts(ep, structures)
 	pointer := parts.pointer(&rp)
@@ -263,10 +272,15 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 		st.Notes = append(st.Notes, fmt.Sprintf("eh_frame: %d FDEs, %d retargeted, %d unknown, %d resized, %d hdr entries",
 			e.FDEs, e.Retargeted, e.Unknown, e.Resized, e.HdrEntries))
 	}
+	if len(cp.Relr) != 0 {
+		r := ps.Relr
+		st.Notes = append(st.Notes, fmt.Sprintf("relr: %d slots, %d retargeted, %d oracle unknown, %d unplaced",
+			r.Slots, r.Retargeted, r.Unknown, r.Unplaced))
+	}
 	st.PredictErr = wrongCount(out, target)
 	st.TextPredictErr = wrongCount(bytesOf(out, ni.Text), bytesOf(target, ni.Text))
-	st.Notes = append(st.Notes, fmt.Sprintf("plan %d B (eq %d, structure %d, choices %d, reloc %d, eh %d, rodata %d, fields %d, dwarf %d); %d mispredicted bytes, %d in .text",
-		len(plan), len(cp.Equivalences), len(cp.Structure), len(cp.Choices), len(cp.Reloc), len(cp.EhFrame), len(cp.RoData), len(cp.Fields), len(cp.Dwarf),
+	st.Notes = append(st.Notes, fmt.Sprintf("plan %d B (eq %d, structure %d, choices %d, reloc %d, eh %d, rodata %d, fields %d, dwarf %d, relr %d); %d mispredicted bytes, %d in .text",
+		len(plan), len(cp.Equivalences), len(cp.Structure), len(cp.Choices), len(cp.Reloc), len(cp.EhFrame), len(cp.RoData), len(cp.Fields), len(cp.Dwarf), len(cp.Relr),
 		st.PredictErr, st.TextPredictErr))
 	st.Notes = append(st.Notes, planNote)
 	st.Notes = append(st.Notes, sectionErrNote(out, target, ni, st.PredictErr))

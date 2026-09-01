@@ -36,7 +36,13 @@ const Magic = "PSG1"
 // 5: correction and plan streams may name the compact context-mixing model.
 // It has a distinct codec ID because model table sizes and context selection
 // are part of an arithmetic-coded stream's wire semantics.
-const Version = 5
+//
+// 6: the ELF module's plan gains a ninth stream, the RELR relocation
+// geometry, and its eh_frame stream a flag saying the decoder rebuilds
+// .eh_frame_hdr after the residual (presage.Finaliser). A stream count is
+// not self-announcing -- an older build would read the ninth stream's
+// length as trailing plan data -- so the refusal has to be up front.
+const Version = 6
 
 // Header flags.
 const (
