@@ -284,20 +284,27 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 		st.Notes = append(st.Notes, fmt.Sprintf("relr: %d slots, %d retargeted, %d oracle unknown, %d unplaced",
 			r.Slots, r.Retargeted, r.Unknown, r.Unplaced))
 	}
+	// The counts are against the prediction the residual is priced against
+	// (MaskResidual), not this one: a section Finalise rebuilds afterwards
+	// costs nothing however wrong the prediction of it is.
+	free, haveFree := finalisedSection(cp)
 	st.PredictErr = wrongCount(out, target)
+	if haveFree {
+		st.PredictErr -= wrongCount(bytesOf(out, free), bytesOf(target, free))
+	}
 	st.TextPredictErr = wrongCount(bytesOf(out, ni.Text), bytesOf(target, ni.Text))
 	st.Notes = append(st.Notes, fmt.Sprintf("plan %d B (eq %d, structure %d, choices %d, reloc %d, eh %d, rodata %d, fields %d, dwarf %d, relr %d); %d mispredicted bytes, %d in .text",
 		len(plan), len(cp.Equivalences), len(cp.Structure), len(cp.Choices), len(cp.Reloc), len(cp.EhFrame), len(cp.RoData), len(cp.Fields), len(cp.Dwarf), len(cp.Relr),
 		st.PredictErr, st.TextPredictErr))
 	st.Notes = append(st.Notes, planNote)
-	st.Notes = append(st.Notes, sectionErrNote(out, target, ni, st.PredictErr))
+	st.Notes = append(st.Notes, sectionErrNote(out, target, ni, st.PredictErr, free, haveFree))
 	return plan, out, nil
 }
 
 // sectionErrNote attributes the mispredicted bytes to the new image's
 // sections, largest first. Which section pays is what decides whether a
 // missing layer is worth building, and the total alone never says.
-func sectionErrNote(out, target []byte, ni *image, total int) string {
+func sectionErrNote(out, target []byte, ni *image, total int, free section, haveFree bool) string {
 	type row struct {
 		name string
 		err  int
@@ -307,6 +314,9 @@ func sectionErrNote(out, target []byte, ni *image, total int) string {
 	count := func(name string, s section) {
 		if s.NoBits || s.Off+s.Size > uint64(len(target)) {
 			return
+		}
+		if haveFree && s.Off == free.Off && s.Size == free.Size {
+			return // rebuilt after the residual, so never charged
 		}
 		n := wrongCount(out[s.Off:s.Off+s.Size], target[s.Off:s.Off+s.Size])
 		covered += n

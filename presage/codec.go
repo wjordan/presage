@@ -51,11 +51,14 @@ type Stats struct {
 
 // RegionStats is one region's cost.
 type RegionStats struct {
-	Module     string
-	Length     int64
-	Plan       int
-	Residual   int
-	PredictErr int // bytes where the prediction differed from the target
+	Module   string
+	Length   int64
+	Plan     int
+	Residual int
+	// PredictErr counts the bytes the residual had to carry a correction
+	// for: the prediction against the target, after MaskResidual has
+	// revealed whatever the module recomputes for itself (Finaliser).
+	PredictErr int
 }
 
 // ErrPredictionDiverged means the decoder's materialisation of a region
@@ -171,7 +174,7 @@ func Encode(refs [][]byte, target []byte, o Options) ([]byte, error) {
 	h.Flags |= rflags
 	st.Flags = h.Flags
 	h.Regions = []Region{{Length: int64(len(target)), Module: chosen.ID(), PlanLen: int64(len(plan))}}
-	st.Regions = []RegionStats{{Module: chosen.Name(), Length: int64(len(target)), Plan: len(plan), Residual: len(res), PredictErr: diffBytes(pred, target)}}
+	st.Regions = []RegionStats{{Module: chosen.Name(), Length: int64(len(target)), Plan: len(plan), Residual: len(res), PredictErr: diffBytes(predRes, target)}}
 
 	w := &wbuf{}
 	if h.Flags&FlagDebugZ != 0 {

@@ -56,10 +56,10 @@ the encoder's peak is the matcher's two masked images, long freed by then.
 Apply is unchanged (median of three: libxul 2.28 → 2.12 s, Chrome 3.12 →
 3.16 s; peak RSS 399 → 407 MiB and 678 → 675 MiB).
 
-The `.eh_frame_hdr` row of the encoder's `mispredicted by section` note now
-reports the whole section (libxul 1,903,499, Chrome 219,018): those bytes
-are honestly mispredicted and are honestly free, because the residual is
-priced against the masked prediction and the decoder rebuilds them.
+The encoder's error counts -- `PredictErr` and the `mispredicted by section`
+note -- are taken against the masked prediction the residual is actually
+priced against, so `.eh_frame_hdr` drops out of the note rather than
+appearing as a section wholly mispredicted at no cost.
 
 ## Status (2026-08-31c): the plan side
 

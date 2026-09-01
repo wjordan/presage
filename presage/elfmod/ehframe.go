@@ -299,6 +299,20 @@ func hdrPlan(planb []byte) (ehFramePlan, bool) {
 	return p, true
 }
 
+// finalisedSection is the section MaskResidual reveals, if any: the bytes
+// the residual is not priced for, and so not bytes the encoder's own error
+// counts should charge anyone for.
+func finalisedSection(cp planStreams) (section, bool) {
+	if len(cp.EhFrame) == 0 {
+		return section{}, false
+	}
+	p, err := unmarshalEhFramePlan(cp.EhFrame)
+	if err != nil || !p.HdrExact {
+		return section{}, false
+	}
+	return section{Off: p.HdrOff, Size: p.HdrSize}, true
+}
+
 // MaskResidual implements presage.Finaliser: the prediction the residual is
 // priced against already holds the target's .eh_frame_hdr, so the section
 // costs nothing. The hashed prediction is the unmasked one.
