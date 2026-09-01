@@ -111,16 +111,16 @@ type planColumn struct {
 	// npair how many spans that column occupies and base the record index
 	// this span's first value has in it. pair is -1 when there is none.
 	pair, npair, base int
-	name              string
+	name              string // encoder-side only, for the encode's report
 }
 
-// planSegMax is the largest column the coder is asked to decode as one chain.
+// planSegMax is the largest span the coder is asked to decode as one chain.
 // Columns decode concurrently, so a plan's apply time is its longest column,
 // not its total: on libxul one 281 KB column held the whole decode for 0.30 s
 // while eleven others finished around it. A column above this is coded as
 // evenly sized independent segments, each of which costs the adaptive models
 // one restart.
-var planSegMax = 128 << 10
+var planSegMax = 64 << 10
 
 // planSpan is one coded segment of a column.
 type planSpan struct {
