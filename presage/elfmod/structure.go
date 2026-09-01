@@ -483,7 +483,22 @@ func (l *addressLookup) mapTarget(addr uint64) x86.Target {
 	if addr < p.OldAddr {
 		return x86.Target{}
 	}
-	off := addr - p.OldAddr
+	if m, ok := l.mapAt(addr); ok {
+		delta := addr - p.OldAddr - m.Src
+		if delta < m.DstSize {
+			return x86.Target{Addr: p.NewAddr + m.Dst + delta, Known: true}
+		}
+	}
+	return x86.Target{}
+}
+
+// mapAt is the function map's answer to "which unit owns this old address",
+// before anything is asked of where that unit went.
+func (l *addressLookup) mapAt(addr uint64) (mapping, bool) {
+	if addr < l.p.OldAddr {
+		return mapping{}, false
+	}
+	off := addr - l.p.OldAddr
 	lo, hi := l.maps.bounds(off, len(l.bySrc))
 	i, ok := slices.BinarySearchFunc(l.bySrc[lo:hi], off, func(m mapping, off uint64) int {
 		if m.Src > off {
@@ -494,14 +509,10 @@ func (l *addressLookup) mapTarget(addr uint64) x86.Target {
 		}
 		return 0
 	})
-	if ok {
-		m := l.bySrc[lo+i]
-		delta := off - m.Src
-		if delta < m.DstSize {
-			return x86.Target{Addr: p.NewAddr + m.Dst + delta, Known: true}
-		}
+	if !ok {
+		return mapping{}, false
 	}
-	return x86.Target{}
+	return l.bySrc[lo+i], true
 }
 
 // codeLookup answers address questions across every code window. The order
@@ -538,6 +549,19 @@ func (l *codeLookup) mapTarget(addr uint64) x86.Target {
 		}
 	}
 	return x86.Target{}
+}
+
+// unitAt names the old code unit an address belongs to, by its old start
+// address, which is unique across windows. It answers identity rather than
+// destination: .rodata segmentation groups a table's entries by the function
+// they jump into, and needs no opinion about where that function went.
+func (l *codeLookup) unitAt(addr uint64) (uint64, bool) {
+	for _, w := range l.win {
+		if m, ok := w.mapAt(addr); ok {
+			return w.p.OldAddr + m.Src, true
+		}
+	}
+	return 0, false
 }
 
 func (l *codeLookup) target(addr uint64) x86.Target {
