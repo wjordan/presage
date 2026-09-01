@@ -328,7 +328,7 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 		if rp == nil {
 			return nil, st, errors.New("rodata plan needs the section geometry the relocation plan carries")
 		}
-		applyRoData(out, old, rd, parts.sm, parts.pointer(rp))
+		applyRoData(out, old, rd, parts.sm, parts.pointer(rp), parts.lk.unitAt)
 	}
 	oracle := parts.image(rp)
 	for i, w := range ep.Windows {

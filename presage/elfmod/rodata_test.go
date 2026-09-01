@@ -3,6 +3,7 @@ package elfmod
 import (
 	"bytes"
 	"encoding/binary"
+	"slices"
 	"testing"
 
 	"github.com/wjordan/presage/delta/x86"
@@ -181,21 +182,218 @@ func TestRoDataReplay(t *testing.T) {
 	}
 	p := roDataPlan{OldOff: secOff, OldSize: words * 4, NewOff: secOff, NewSize: words * 4,
 		OldAddr: secAddr, NewAddr: secAddr, TextLo: textLo, TextHi: textHi}
-	keep, est := selectRoDataTables(pred, old, target, p, mapper, lookup)
+	p, est := selectRoDataTables(pred, old, target, p, mapper, lookup, noUnits)
 	if est.Tables != 2 || est.SelfRel != 1 {
 		t.Fatalf("encoder kept %+v, want two tables, one self-relative", est)
 	}
-	p.Keep = keep
 	rt, err := unmarshalRoDataPlan(p.marshal())
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := append([]byte(nil), pred...)
-	st := applyRoData(out, old, rt, mapper, lookup)
+	st := applyRoData(out, old, rt, mapper, lookup, noUnits)
 	if st.Tables != 2 || st.Retargeted != 11 || st.Unresolved != 0 {
 		t.Fatalf("decoder stats %+v", st)
 	}
 	if !bytes.Equal(out, target) {
 		t.Fatalf("replay differs from target:\n got %x\nwant %x", out[secOff:], target[secOff:])
+	}
+}
+
+// noUnits is a function map that owns nothing: a span it segments is one
+// table, which is what a pair with no code window looks like.
+func noUnits(uint64) (uint64, bool) { return 0, false }
+
+// roSpanFixture builds a pair whose .rodata holds one span of self-relative
+// entries assembled from four per-function tables, A B C D. In the new image
+// B's function is gone and a five-word table nothing in the old image owns
+// takes its place, so everything after A sits four words further on than the
+// byte matcher, which has no matched run to work from, will guess.
+type roSpanFixture struct {
+	old, target, pred []byte
+	p                 roDataPlan
+	mapper            sourceEquivalenceMapper
+	lookup            func(uint64) x86.Target
+	unitAt            func(uint64) (uint64, bool)
+	bounds            []int
+}
+
+const (
+	roSecAddr, roSecOff        = uint64(0x10000), uint64(0x40)
+	roTextLo, roTextHi         = uint64(0x80000), uint64(0x90000)
+	roShift                    = uint64(0x400) // where every surviving .text target went
+	roOldWords, roNewWords     = 15, 17
+	roFnA, roFnB, roFnC, roFnD = roTextLo, roTextLo + 0x100, roTextLo + 0x200, roTextLo + 0x300
+)
+
+func newRoSpanFixture() *roSpanFixture {
+	// Table t owns entries [start, end) and jumps into function fn.
+	tables := []struct {
+		start, end int
+		fn         uint64
+	}{{0, 4, roFnA}, {4, 7, roFnB}, {7, 11, roFnC}, {11, 15, roFnD}}
+	f := &roSpanFixture{
+		old:    make([]byte, roSecOff+roOldWords*4+16),
+		target: make([]byte, roSecOff+roNewWords*4+16),
+		bounds: []int{0, 4, 7, 11, 15},
+	}
+	// The old span, and the new one with B's three words replaced by five.
+	newWord := func(k int) int {
+		switch {
+		case k < 4:
+			return k
+		case k < 7:
+			return -1 // B is gone; five words of something else sit here
+		default:
+			return k + 2
+		}
+	}
+	target := func(k int) uint64 {
+		for _, t := range tables {
+			if k >= t.start && k < t.end {
+				return t.fn + uint64(k-t.start)*0x10
+			}
+		}
+		panic("entry outside every table")
+	}
+	put := func(b []byte, i int, v int32) { binary.LittleEndian.PutUint32(b[roSecOff+uint64(i)*4:], uint32(v)) }
+	for k := 0; k < roOldWords; k++ {
+		put(f.old, k, int32(int64(target(k))-int64(roSecAddr+uint64(k)*4)))
+	}
+	for k := 4; k < 9; k++ {
+		put(f.target, k, 0x5a5a5a5a) // the inserted table, which nothing predicts
+	}
+	for k := 0; k < roOldWords; k++ {
+		if n := newWord(k); n >= 0 {
+			put(f.target, n, int32(int64(target(k)+roShift)-int64(roSecAddr+uint64(n)*4)))
+		}
+	}
+	// The matcher copies the old image over, which is all the span's
+	// neighbourhood gives it: every entry after A is then four words early.
+	f.pred = make([]byte, len(f.target))
+	copy(f.pred, f.old)
+	f.mapper = newSourceEquivalenceMapper(equivalencePlan{
+		OldLen: uint64(len(f.old)), NewLen: uint64(len(f.target)),
+		Eqs: []equivalence{{Src: 0, Dst: 0, N: uint64(len(f.old))}}})
+	f.lookup = func(a uint64) x86.Target {
+		if a >= roFnB && a < roFnC {
+			return x86.Target{} // B is gone
+		}
+		if a >= roTextLo && a < roTextHi {
+			return x86.Target{Addr: a + roShift, Known: true}
+		}
+		return x86.Target{}
+	}
+	f.unitAt = func(a uint64) (uint64, bool) {
+		if a < roTextLo || a >= roTextHi {
+			return 0, false
+		}
+		return a &^ 0xff, true
+	}
+	f.p = roDataPlan{
+		OldOff: roSecOff, OldSize: roOldWords * 4, NewOff: roSecOff, NewSize: roNewWords * 4,
+		OldAddr: roSecAddr, NewAddr: roSecAddr, TextLo: roTextLo, TextHi: roTextHi,
+	}
+	return f
+}
+
+// TestRoDataSegmentation checks the split both sides have to agree on: the
+// entries of one span break at every change of owning function, and an entry
+// whose target names no function stays with the table it follows.
+func TestRoDataSegmentation(t *testing.T) {
+	f := newRoSpanFixture()
+	sec := f.old[f.p.OldOff : f.p.OldOff+f.p.OldSize]
+	c := roDataCandidate{Span: [2]int{0, roOldWords}, SelfRel: true}
+	got := segmentSpan(sec, f.p, c, f.unitAt)
+	if !slices.Equal(got, f.bounds) {
+		t.Errorf("segmented at %v, want %v", got, f.bounds)
+	}
+	// An owner nothing answers for does not start a table of its own.
+	blind := func(a uint64) (uint64, bool) {
+		if a >= roFnC {
+			return 0, false
+		}
+		return f.unitAt(a)
+	}
+	if got := segmentSpan(sec, f.p, c, blind); !slices.Equal(got, []int{0, 4, roOldWords}) {
+		t.Errorf("with C and D unowned, segmented at %v, want [0 4 15]", got)
+	}
+	// No function map at all is one table, which is what the projection does.
+	if got := segmentSpan(sec, f.p, c, noUnits); !slices.Equal(got, []int{0, roOldWords}) {
+		t.Errorf("with no owners, segmented at %v, want [0 15]", got)
+	}
+}
+
+// TestRoDataCursorPlacement is the round trip over that fixture: the encoder
+// must choose the cursor arm, spend one correction per table, and the decoder
+// must rebuild every entry whose function survived -- across both a table
+// deleted from the new image and one inserted into it.
+func TestRoDataCursorPlacement(t *testing.T) {
+	f := newRoSpanFixture()
+	p, est := selectRoDataTables(f.pred, f.old, f.target, f.p, f.mapper, f.lookup, f.unitAt)
+	if est.Segmented != 1 || est.Corrections != len(f.bounds)-1 {
+		t.Fatalf("encoder chose %+v, want one segmented span and %d corrections", est, len(f.bounds)-1)
+	}
+	rt, err := unmarshalRoDataPlan(p.marshal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := append([]byte(nil), f.pred...)
+	st := applyRoData(out, f.old, rt, f.mapper, f.lookup, f.unitAt)
+	if st.Segmented != 1 || st.Retargeted != 12 || st.Unresolved != 3 {
+		t.Fatalf("decoder stats %+v, want 12 entries retargeted and B's 3 unresolved", st)
+	}
+	// Everything but the words the inserted table occupies must be exact.
+	for k := 0; k < roNewWords; k++ {
+		off := roSecOff + uint64(k)*4
+		got := binary.LittleEndian.Uint32(out[off:])
+		want := binary.LittleEndian.Uint32(f.target[off:])
+		if k >= 4 && k < 9 {
+			continue
+		}
+		if got != want {
+			t.Errorf("word %d is %#x, want %#x", k, got, want)
+		}
+	}
+}
+
+// TestRoDataCursorBounds is the decoder's guarantee against a plan it did not
+// write: a correction of any size may lose the table, and may never move a
+// write outside the new section.
+func TestRoDataCursorBounds(t *testing.T) {
+	f := newRoSpanFixture()
+	bounds := []int{0, 4, 7, 11, 15}
+	for _, d := range []int64{0, 1 << 40, -1 << 40, 1<<63 - 1, -1 << 63, int64(f.p.NewSize)} {
+		pos := placeTables(f.p, bounds, roSecOff, []int64{d, d, d, d})
+		for i := range pos {
+			if pos[i] == roDataUnplaced {
+				continue
+			}
+			end := pos[i] + uint64(bounds[i+1]-bounds[i])*4
+			if pos[i] < f.p.NewOff || end > f.p.NewOff+f.p.NewSize {
+				t.Fatalf("correction %d placed table %d at [%d,%d), outside [%d,%d)",
+					d, i, pos[i], end, f.p.NewOff, f.p.NewOff+f.p.NewSize)
+			}
+		}
+	}
+	// A span list that runs off the end names no span at all.
+	if got := readSegList(appendU(appendU(nil, 3), 1<<40), 5); !slices.Equal(got, []int{3}) {
+		t.Errorf("readSegList took %v from a list whose second index is out of range, want [3]", got)
+	}
+	// The same through the decoder, with the span segmented and the
+	// corrections nothing but a wild jump.
+	p := f.p
+	p.Keep = make([]byte, 8*roOldWords)
+	p.Seg = appendU(nil, 0)
+	bit := spanBit(0, 1)
+	p.Keep[bit/8] |= 1 << (bit % 8)
+	for range 8 {
+		p.Cursor = appendS(p.Cursor, 1<<62)
+	}
+	out := append([]byte(nil), f.pred...)
+	guard := append([]byte(nil), f.pred...)
+	applyRoData(out, f.old, p, f.mapper, f.lookup, f.unitAt)
+	if !bytes.Equal(out[:roSecOff], guard[:roSecOff]) || !bytes.Equal(out[roSecOff+p.NewSize:], guard[roSecOff+p.NewSize:]) {
+		t.Error("apply wrote outside the new section")
 	}
 }

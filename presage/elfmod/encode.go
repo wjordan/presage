@@ -239,8 +239,9 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 			return nil, nil, fmt.Errorf("elf: rodata selection: %w", err)
 		}
 		var sel roDataStats
-		rd.Keep, sel = selectRoDataTables(p, old, target, rd, parts.sm, pointer)
-		st.Notes = append(st.Notes, fmt.Sprintf("rodata: %d of %d spans kept", sel.Tables, sel.Candidates))
+		rd, sel = selectRoDataTables(p, old, target, rd, parts.sm, pointer, parts.lk.unitAt)
+		st.Notes = append(st.Notes, fmt.Sprintf("rodata: %d of %d spans kept, %d segmented, %d corrections",
+			sel.Tables, sel.Candidates, sel.Segmented, sel.Corrections))
 		cp.RoData = rd.marshal()
 	}
 
