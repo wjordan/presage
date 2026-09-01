@@ -2,14 +2,15 @@
 // the section table, the pclntab with its function table, the moduledata, and
 // the type descriptors.
 //
-// It supports exactly one Go release at a time -- the current stable one, see
-// SupportedGo. Each minor release moves this ground: 1.25 changed entryOff
-// handling, 1.26 moved moduledata into .go.module, 1.27 moved type descriptors
-// and itabs into a sorted .go.type section, dropped .typelink/.itablink, grew
-// MapType by 24 bytes and made go:func.* alignment data-dependent. Supporting
-// a matrix of those is how a codec becomes untestable; supporting one, gated
-// by a byte-exact self-prediction check, is how it stays reviewable
-// (docs/go-module-design.md 2.6, D14). Anything else takes the plain codec.
+// Each minor release moves this ground: 1.25 changed entryOff handling, 1.26
+// moved moduledata into .go.module, 1.27 moved type descriptors and itabs
+// into a sorted .go.type section, dropped .typelink/.itablink and grew
+// MapType by 24 bytes. What varies is held as data -- one Layout descriptor
+// per release, validated against the image's own invariants before it is
+// used -- rather than as a code path, and a release with no descriptor
+// declines to the plain codec (docs/go-module-design.md 2.9, D23). A
+// descriptor is supported when the byte-exact self-prediction check is green
+// on binaries built with that release.
 package gobin
 
 import (
@@ -19,11 +20,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sort"
-	"strings"
 )
-
-// SupportedGo is the toolchain prefix the Go-aware codec understands.
-const SupportedGo = "go1.27"
 
 // PclnMagic is the pcHeader magic of the Go 1.20+ pclntab format.
 const PclnMagic = 0xfffffff1
@@ -76,9 +73,12 @@ type Moduledata struct {
 	Bss, Ebss                                     uint64
 	Noptrbss, Enoptrbss                           uint64
 	Types, Etypes                                 uint64
-	// Typelink-flagged descriptors occupy [Types+8, Types+Typedesclen);
-	// itabs occupy [Types+Itaboffset, +Itabsize).
+	// 1.27: typelink-flagged descriptors occupy [Types+8, Types+Typedesclen)
+	// and itabs [Types+Itaboffset, +Itabsize). Before it, the two slices
+	// point at the .typelink and .itablink sections instead; each release
+	// has one pair or the other, and the absent pair reads zero.
 	Typedesclen, Itaboffset, Itabsize uint64
+	Typelinks, Itablinks              Slice
 	Rodata, Gofunc, Epclntab          uint64
 }
 
@@ -109,6 +109,7 @@ type Bin struct {
 	Pcln   *Pcln
 	Mod    *Moduledata
 	Funcs  []*Func // in functab order, which is address order
+	Lay    *Layout // the release's layout descriptor, never nil after Parse
 	GoVer  string  // from .go.buildinfo, e.g. "go1.27.0"
 	Module string  // main module path, for logs
 	Vers   string  // main module version or vcs.revision, for logs
@@ -169,18 +170,25 @@ func Parse(raw []byte) (*Bin, error) {
 			}
 		}
 	}
-	if !strings.HasPrefix(b.GoVer, SupportedGo) {
-		return nil, unsup("built with %q, the Go-aware codec supports %s", b.GoVer, SupportedGo)
+	if b.Lay = LayoutFor(b.GoVer); b.Lay == nil {
+		return nil, unsup("built with %q, the Go-aware codec knows %s", b.GoVer, SupportedGo())
 	}
 	mod := b.Sects[".go.module"]
 	if mod == nil {
-		return nil, unsup("no .go.module: not the %s layout", SupportedGo)
+		return nil, unsup("no .go.module: not the %s layout", b.Lay.Ver)
 	}
-	if b.Mod, err = parseModuledata(mod.Data); err != nil {
+	if b.Mod, err = parseModuledata(mod.Data, b.Lay); err != nil {
 		return nil, err
 	}
+	// From here every check is a fit test of the descriptor as much as of
+	// the image: a moduledata read at the wrong offsets does not land on
+	// .gopclntab's bounds by accident, so a version string that lies costs
+	// a decline rather than a misparse.
 	if b.SectionOf(b.Mod.Types) == nil {
-		return nil, unsup("moduledata.types %#x is in no section: not the %s layout", b.Mod.Types, SupportedGo)
+		return nil, unsup("moduledata.types %#x is in no section: not the %s layout", b.Mod.Types, b.Lay.Ver)
+	}
+	if !b.Lay.SortedTypes && (b.Sects[".typelink"] == nil || b.Sects[".itablink"] == nil) {
+		return nil, unsup("no .typelink/.itablink: not the %s layout", b.Lay.Ver)
 	}
 	if b.Mod.PcHeader != pcs.Addr {
 		return nil, unsup("moduledata.pcHeader %#x is not .gopclntab %#x", b.Mod.PcHeader, pcs.Addr)
@@ -200,18 +208,29 @@ func Parse(raw []byte) (*Bin, error) {
 	return b, nil
 }
 
-func parseModuledata(d []byte) (*Moduledata, error) {
-	// Field offsets of runtime.moduledata for the supported release; the
-	// order is: pcHeader, funcnametab, cutab, filetab, pctab, pclntable,
-	// ftab, findfunctab, min/maxpc, text..enoptrbss, covctrs, ecovctrs,
-	// end, gcdata, gcbss, types, typedesclen, etypes, itaboffset, itabsize,
-	// rodata, gofunc, epclntab, ...
-	const need = 360
-	if len(d) < need {
-		return nil, unsup(".go.module is %d bytes, want at least %d", len(d), need)
+func parseModuledata(d []byte, lay *Layout) (*Moduledata, error) {
+	// The order up to types has held since 1.20: pcHeader, funcnametab,
+	// cutab, filetab, pctab, pclntable, ftab, findfunctab, min/maxpc,
+	// text..enoptrbss, covctrs, ecovctrs, end, gcdata, gcbss, types. What
+	// follows types is the descriptor's business.
+	if len(d) < lay.Need {
+		return nil, unsup(".go.module is %d bytes, want at least %d for %s", len(d), lay.Need, lay.Ver)
 	}
 	u := func(off int) uint64 { return binary.LittleEndian.Uint64(d[off:]) }
 	sl := func(off int) Slice { return Slice{u(off), u(off + 8), u(off + 16)} }
+	// opt reads a field the release may not have.
+	opt := func(off int) uint64 {
+		if off == 0 {
+			return 0
+		}
+		return u(off)
+	}
+	optSl := func(off int) Slice {
+		if off == 0 {
+			return Slice{}
+		}
+		return sl(off)
+	}
 	m := &Moduledata{
 		PcHeader:    u(0),
 		Funcnametab: sl(8), Cutab: sl(32), Filetab: sl(56), Pctab: sl(80),
@@ -222,9 +241,11 @@ func parseModuledata(d []byte) (*Moduledata, error) {
 		Data: u(208), Edata: u(216),
 		Bss: u(224), Ebss: u(232),
 		Noptrbss: u(240), Enoptrbss: u(248),
-		Types: u(296), Typedesclen: u(304), Etypes: u(312),
-		Itaboffset: u(320), Itabsize: u(328),
-		Rodata: u(336), Gofunc: u(344), Epclntab: u(352),
+		Types: u(lay.Types), Etypes: opt(lay.Etypes),
+		Typedesclen: opt(lay.Typedesclen),
+		Itaboffset:  opt(lay.Itaboffset), Itabsize: opt(lay.Itabsize),
+		Typelinks: optSl(lay.Typelinks), Itablinks: optSl(lay.Itablinks),
+		Rodata: opt(lay.Rodata), Gofunc: opt(lay.Gofunc), Epclntab: opt(lay.Epclntab),
 	}
 	return m, nil
 }

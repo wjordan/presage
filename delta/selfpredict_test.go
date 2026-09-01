@@ -12,15 +12,16 @@ import (
 	"github.com/wjordan/presage/delta/gobin"
 )
 
-// The self-prediction gate (docs/go-module-design.md 2.6, D14). Encoding a binary
+// The self-prediction gate (docs/go-module-design.md 2.9, D23). Encoding a binary
 // against itself exercises every predictor -- the function layout, the
 // pclntab rebuild, the stage-1b blob emulation, the type-descriptor walk,
 // the instruction relocator -- with a known answer: the prediction must
 // reproduce the input byte for byte, so the correction is empty.
 //
-// This is what qualifies a new Go release. It needs binaries built by that
-// release, which the repository does not carry, so it runs over a corpus
-// directory named by BINSYNC_CORPUS (bench/out/bin127 after bench/build.sh).
+// This is what qualifies a Go release: a layout descriptor is supported when
+// this is green on binaries built with that release. It needs such binaries,
+// which the repository does not carry, so it runs over a corpus directory
+// named by BINSYNC_CORPUS (bench/out/bin127 after bench/build.sh).
 func TestSelfPrediction(t *testing.T) {
 	for _, path := range shortCorpus(corpus(t)) {
 		t.Run(filepath.Base(path), func(t *testing.T) {
@@ -84,12 +85,14 @@ func TestCorpusRoundTrip(t *testing.T) {
 
 // TestTransform1Compat holds the previous transform open. An encoder capped
 // at transform 1 (docs/go-module-design.md 2.6) must produce a patch with no
-// segment map that still applies.
+// segment map that still applies. Only the default layout can be written
+// that low: every other release needs transform 4 to name itself (2.9).
 func TestTransform1Compat(t *testing.T) {
 	var old, new []byte
 	for _, p := range corpus(t) {
 		b := readFile(t, p)
-		if _, err := gobin.Parse(b); err != nil {
+		ob, err := gobin.Parse(b)
+		if err != nil || ob.Lay.ID != defaultLayout {
 			continue
 		}
 		if old == nil {
@@ -100,7 +103,7 @@ func TestTransform1Compat(t *testing.T) {
 		}
 	}
 	if new == nil {
-		t.Skip("needs two binaries the Go-aware codec takes")
+		t.Skip("needs two binaries on the default layout")
 	}
 	var st Stats
 	patch, err := Encode(old, new, Options{MaxTransform: TransformGoAMD64, Stats: &st})

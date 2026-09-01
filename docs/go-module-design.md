@@ -707,8 +707,8 @@ binary in the local corpus is built with the pinned release at all
 handling on a `gobin.Layout` descriptor validated against the image's own
 invariants, one reader and one writer per release rather than a pair matrix,
 with the self-prediction check as the per-release acceptance test and as a
-runtime probe for a release with no descriptor. Nothing of it is built; D14
-stands until it is.
+runtime probe for a release with no descriptor. §2.9 resolves that design
+and supersedes D14.
 
 ### 2.7 Determinism and safety
 
@@ -771,6 +771,109 @@ Not doing: zstd `--patch-from` as a codec (3.5× worse than bsdiff on
 one-line and on kube-apiserver), HDiffPatch (C, cgo), xdelta3 (worst sizes,
 8.9× RAM).
 
+### 2.9 Layout descriptors: more than one Go release
+
+*Resolved design; supersedes D14. Built for go1.26 and go1.27; measurements
+in `general/research/toolchain-skew.md`.*
+
+**Why.** The pin is not a rare-input rule. Of the 43 upstream release
+binaries in the local corpus, 33 are built with go1.26.x, 4 with go1.27.0
+and 6 with older releases: the pinned release is the exception, not the
+common case. The pair the pin costs the most on is the ordinary one — the
+same prometheus release pair is 74,636 B in 4.2 s rebuilt with go1.27 and
+2,137,152 B in 27.9 s as upstream ships it.
+
+**What varies.** From the three-release prototype, five sites: where
+moduledata lives (`.go.module` from 1.26; a `.noptrdata` symbol found by its
+pcHeader pointer before), its field offsets after `types` (1.27 replaced the
+`typelinks`/`itablinks` slices with `typedesclen`/`itaboffset`/`itabsize`),
+where the type descriptors live (`.go.type` from 1.27, `.rodata` before),
+whether `go:func.*` and `findfunctab` sit inside `.gopclntab` (1.26+) or in
+`.rodata` (1.25), and descriptor base sizes (`MapType` grew 24 B in 1.27).
+The root rule for the descriptor walk follows the third: typelink-flagged
+roots from the `.typelink`/`.itablink` sections before 1.27, the sorted
+descriptor section after. Everything else — the pclntab magic and shape
+since 1.20, 32-byte function alignment, the matcher, the correction, the
+container — is common to all of them.
+
+Building it found a sixth that is not a descriptor field at all, and the
+distinction matters. The `go:func.*` prediction replays the linker's
+funcdata layout, and the codec modelled it as a table from FUNCDATA index to
+alignment class — a table that reproduces 1.27 and not 1.26 (1,085 wrong
+bytes on a 4.9 MB self-prediction, and a per-release variant of the table
+made it 39,408). The linker's own code says why the table was the wrong
+shape: `generateFuncdata` and `symalign` are byte-identical between
+go1.26.4 and go1.27.0, and both stable-sort the symbols by decreasing
+*symbol* alignment, which the compiler sets per symbol. So the blob is a
+sequence of alignment regions each in first-use order, and where a region
+ends is stated by the image: first-use order restarts. Reading the regions
+off the old blob — with each symbol's size taken as the gap to the next, so
+the linker's padding travels with the symbol before it — is byte-exact on
+both releases by construction, and it deleted the table rather than
+widening it. The rule generalises: model what the release *states*, and
+carry in the descriptor only what it cannot.
+
+**The descriptor.** `gobin.Layout` is a value, not a code path: a wire id, a
+version prefix, the moduledata field offsets after `types`, the descriptor
+base-size table, and the two behavioural flags (where the descriptors live,
+where the roots come from). `gobin.Parse` picks one from `debug/buildinfo`'s
+version string and then *validates* it against the image's own invariants —
+the checks `Parse` already makes: `pcHeader` equals the `.gopclntab`
+address, `epclntab` equals its end, `text` lies inside `.text`, the ftab
+length is `nfunc+1`, the pcHeader offsets agree with moduledata, plus the
+sections the descriptor names. A descriptor that does not fit the image is a
+decline, not a misparse — which is what makes a version string safe to key
+on when a `GOEXPERIMENT` suffix or a vendor build makes it unreliable.
+
+**Same-layout pairs only.** A pair whose sides disagree is declined after
+reading two build strings, in milliseconds. This is the fail-fast selection
+rule the encoder was missing, and it is worth more than the cross-layout
+prediction it forgoes: the common case is N readers and N writers, not N².
+It also means the source and target layouts are the same value, so the plan
+carries one id and the skeleton needs no second descriptor.
+
+**Wire.** `TransformGoLayout = 4`: the layout stream gains a leading layout
+id byte, read when `tf >= 4` and defaulted to the 1.27 descriptor below it,
+the same conditional shape as the segment map (`tf >= 2`) and far pieces
+(`tf == 3`). A pair on the pinned release still encodes as transform 3, byte
+for byte as before, so the corpus ratchet stays a valid test and a decoder
+that predates this work keeps reading everything it read; a pair on any
+other layout needs transform 4 and is declined when the encoder is held
+below it (`Options.MaxTransform`). The decoder derives its own descriptor
+from the reference and requires it to equal the transmitted id: a build
+whose derivation has drifted refuses by name up front instead of diverging
+at the prediction hash.
+
+**Acceptance is the self-prediction gate, per release.** SPEC §4.3 already
+requires `analyse(obj, obj)` to be byte-exact; a layout descriptor is
+supported when that is green on a corpus of binaries built with its release,
+and that is the only sense in which a release is "supported". A widened
+matrix stays honest because each row of it has to pass the same check.
+
+**Unknown releases: probe, do not guess.** The gate is cheap enough to run
+at encode time — 1.62 s for 93.7 MB against the 4.2 s the whole encode takes.
+An encoder meeting a version with no descriptor may try the newest one,
+self-predict the reference image, and accept the layout only if the result
+is byte-exact. A Go minor that moved nothing then keeps working; one that
+moved something declines in under two seconds instead of mispredicting.
+This is safe in the direction that matters — the correction fixes whatever
+the prediction gets wrong and the output is hash-verified either way, so a
+bad guess costs bytes, never correctness — and it is a priced stage like any
+other (`general/presage-core.md` §4): seconds spent for bytes, run
+when `Options.Price` says the bytes are worth them.
+
+**Scope.** 1.26 and 1.27 are built and green. 1.25 needs the moduledata
+scan and the `.rodata` placement of `go:func.*`/`findfunctab`, which is a
+structural change rather than a descriptor, and waits for a measured reason;
+the unknown-release probe is specified above and not built.
+
+*Status: built and met.* The self-prediction gate is byte-exact on both
+releases. The go1.27 prometheus pair is 74,636 B, unchanged to the byte, so
+nothing was traded for this. The pair upstream actually ships — the same two
+releases built with go1.26.5 — is 161,508 B in 4.8 s against 2,137,152 B in
+28.4 s through the generic ELF path: 13.2× the bytes and 6.0× the time, for
+a descriptor of nine numbers and a flag.
+
 ## 3. Testing strategy
 
 Three tiers, split by what they need and how long they take.
@@ -795,7 +898,7 @@ Three tiers, split by what they need and how long they take.
 | D1 | Delta patches, not CDC/CAS | 100× smaller for shifted executables (`cdc-cas.md`) |
 | D2 | Go-aware predict-then-correct as the primary codec; plain bsdiff-class fallback | 5.7–38× over bsdiff on the corpus; scales to 1 GB without a suffix array (§2) |
 | D3 | Correction is positional after a layout-exact prediction | removes the encoder's memory/time cliff; the layout table makes prediction length-exact |
-| D14 | Go-aware codec supports one Go release at a time (the current stable, 1.27); everything else takes the plain codec | pclntab/type layouts change per minor; one version + a self-prediction gate keeps the codec small and testable (§2.6) |
+| D14 | ~~Go-aware codec supports one Go release at a time (the current stable, 1.27); everything else takes the plain codec~~ superseded by D23 | pclntab/type layouts change per minor; one version + a self-prediction gate keeps the codec small and testable (§2.6) |
 | D15 | Correction = positional regions, each written as literals or as a bounded local match, whichever is smaller | recovers the bsdiff-quality bytes inside changed functions that purely positional runs re-send, at O(region) memory, and lets the decoder apply in place (§2.4) |
 | D16 | Every stream takes the smaller of zstd and brotli; brotli quality 11 up to 4 MiB, 10 above | pure-Go zstd is 6–14 % worse than the `zstd -19` the research numbers used, pure-Go brotli is better at both qualities; patch bytes are the product (§2.5) |
 | D17 | Stages 1a and 1b use the plain codec, not the positional correction | their residual is *shifted*, not positional — one pc table that changed length moves every table after it. Positionally, stage 1b costs 66,372 B on prometheus against 17,441 B (§2.4) |
@@ -804,6 +907,7 @@ Three tiers, split by what they need and how long they take.
 | D20 | The encoder transmits the BLAKE3 of its prediction, and every prediction worker count is a compile-time constant | encoder/decoder divergence becomes a named failure and a blob fallback instead of a wrong file caught by the release hash; a prediction that varies with `GOMAXPROCS` is one two hosts can disagree about (§2.7) |
 | D21 | The prediction fills the bytes no allocated section covers: gaps cleared, `.shstrtab` copied from the old file's tail | the base is a copy of the old file, so every section that moved left stale bytes behind in its gap — 3,780 mispredicted bytes on prometheus, 109 after (§2.2) |
 | D22 | Frames are brotli-11, not zstd, and each carries its own codec tag | 18 % smaller than zstd and smaller than a single `zstd -19` stream, for 26 s of encode and 268 ms of decode on a 94 MB input (§2.5). Supersedes the "the largest payloads are always zstd" half of D16; the quality-10 tier it first shipped with was re-measured at 4 % larger and dropped |
+| D23 | Each supported Go release is a `gobin.Layout` descriptor validated against the image's own invariants, not a code path; pairs must share a layout; the id travels in the plan under transform 4 | the pinned release is 4 of 43 corpus binaries and 1.26 is 33 of them, at 28.6× the bytes and 6.6× the time; same-layout pairs need N readers and N writers, not N², and a descriptor that does not fit the image declines instead of misparsing (§2.9) |
 
 D4–D13 were the release-distribution decisions of the project this codec
 grew out of and are not presage's; the numbering is left as it was so the

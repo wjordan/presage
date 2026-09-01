@@ -43,18 +43,46 @@ func predictModuledata(old, new *gobin.Bin, dst []byte) {
 		field{136, uint64(op.NFunc + 1), uint64(np.NFunc + 1)},
 		field{144, uint64(op.NFunc + 1), uint64(np.NFunc + 1)})
 	om, nm := old.Mod, new.Mod
+	lay := old.Lay
+	// Everything up to types has held since 1.20; from there the offsets
+	// are the release's, and a field it does not have has offset 0 and is
+	// skipped (offset 0 is pcHeader, written above).
 	for _, v := range [][3]uint64{
 		{152, om.Findfunctab, nm.Findfunctab},
 		{160, om.Minpc, nm.Minpc}, {168, om.Maxpc, nm.Maxpc},
 		{176, om.Text, nm.Text},
 		{184, (om.Maxpc + 15) &^ 15, (nm.Maxpc + 15) &^ 15},
-		{296, om.Types, nm.Types}, {304, om.Typedesclen, nm.Typedesclen},
-		{312, om.Etypes, nm.Etypes},
-		{320, om.Itaboffset, nm.Itaboffset}, {328, om.Itabsize, nm.Itabsize},
-		{336, om.Rodata, nm.Rodata}, {344, om.Gofunc, nm.Gofunc},
-		{352, om.Epclntab, nm.Epclntab},
+		{uint64(lay.Types), om.Types, nm.Types},
+		{uint64(lay.Typedesclen), om.Typedesclen, nm.Typedesclen},
+		{uint64(lay.Etypes), om.Etypes, nm.Etypes},
+		{uint64(lay.Itaboffset), om.Itaboffset, nm.Itaboffset},
+		{uint64(lay.Itabsize), om.Itabsize, nm.Itabsize},
+		{uint64(lay.Rodata), om.Rodata, nm.Rodata},
+		{uint64(lay.Gofunc), om.Gofunc, nm.Gofunc},
+		{uint64(lay.Epclntab), om.Epclntab, nm.Epclntab},
 	} {
+		if v[0] == 0 {
+			continue
+		}
 		fs = append(fs, field{int(v[0]), v[1], v[2]})
+	}
+	// The typelinks and itablinks slices of the releases before 1.27 are
+	// their sections, so both sides derive them rather than carrying them.
+	for _, t := range []struct {
+		off  int
+		name string
+		elem uint64
+	}{
+		{lay.Typelinks, ".typelink", 4},
+		{lay.Itablinks, ".itablink", 8},
+	} {
+		o, n := old.Sects[t.name], new.Sects[t.name]
+		if t.off == 0 || o == nil || n == nil {
+			continue
+		}
+		fs = append(fs, field{t.off, o.Addr, n.Addr},
+			field{t.off + 8, o.Size / t.elem, n.Size / t.elem},
+			field{t.off + 16, o.Size / t.elem, n.Size / t.elem})
 	}
 	// noptrdata .. enoptrbss, then covctrs, ecovctrs and end, which a build
 	// without coverage counters all leaves at the noptrbss bound.

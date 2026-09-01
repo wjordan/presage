@@ -20,7 +20,7 @@ const (
 	TransformPlain = 0
 	// TransformGoAMD64 is the Go-aware predict-then-correct codec for
 	// stripped, non-PIE linux/amd64 binaries built by the supported Go
-	// release (gobin.SupportedGo).
+	// releases the module has a layout descriptor for.
 	TransformGoAMD64 = 1
 	// TransformGoSegmap is the same codec with a sub-function segment map in
 	// the layout, so that a matched function whose size changed is laid down
@@ -32,8 +32,14 @@ const (
 	// function's own old body (segfar.go), so that the code an edit added
 	// is copied from wherever the compiler emitted it before.
 	TransformGoFar = 3
+	// TransformGoLayout is the same codec on a Go release other than the
+	// default one: the layout stream then names the release's layout
+	// descriptor (docs/go-module-design.md 2.9). A pair on the default
+	// release still encodes as transform 3, byte for byte, so this is only
+	// ever the transform of a patch an older decoder could not have made.
+	TransformGoLayout = 4
 
-	maxTransform = TransformGoFar
+	maxTransform = TransformGoLayout
 )
 
 // FrameSize is the uncompressed size of one patch frame. Frames are

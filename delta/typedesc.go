@@ -13,15 +13,16 @@ import (
 // mispredicted bytes in .go.type, and there are hundreds of thousands of
 // them.
 //
-// The walker starts from the typelink-flagged descriptors -- the range
-// [types+8, types+typedesclen), walked with abi.Type.DescriptorSize -- and
-// the itabs, follows every *Type pointer and typeOff to reach the
+// The walker starts from the release's roots -- the sorted descriptor
+// section's head and the itabs from 1.27, the .typelink and .itablink
+// sections before it -- follows every *Type pointer and typeOff to reach the
 // descriptors that are not typelinked, and re-targets each field through the
 // mapper. The rewritten value is written into the predicted section at the
 // field's own mapped position. Nothing about any of this is transmitted;
 // both sides walk the old binary.
 //
-// Layout constants are internal/abi/type.go's, for the supported release.
+// Layout constants are internal/abi/type.go's; the two that a release moved
+// are in the gobin.Layout descriptor (docs/go-module-design.md 2.9).
 const (
 	kindMask   = 0x1f
 	kindArray  = 17
@@ -43,7 +44,7 @@ const (
 )
 
 // baseSize is sizeof(the kind's descriptor struct) on amd64.
-func baseSize(kind byte) int {
+func baseSize(kind byte, lay *gobin.Layout) int {
 	switch kind {
 	case kindArray:
 		return 72
@@ -54,7 +55,7 @@ func baseSize(kind byte) int {
 	case kindIface:
 		return 80
 	case kindMap:
-		return 136
+		return lay.MapSize
 	case kindPtr, kindSlice:
 		return 56
 	case kindStruct:
@@ -65,12 +66,12 @@ func baseSize(kind byte) int {
 }
 
 // descSize is abi.Type.DescriptorSize for the descriptor at section offset o.
-func descSize(d []byte, o uint64) int {
+func descSize(d []byte, o uint64, lay *gobin.Layout) int {
 	kind := d[o+23] & kindMask
 	if kind == 0 || kind > kindMax {
 		return -1
 	}
-	size := baseSize(kind)
+	size := baseSize(kind, lay)
 	mcount := 0
 	if d[o+20]&tflagUncommon != 0 {
 		ut := o + uint64(size)
@@ -285,8 +286,13 @@ func (w *typeWalk) doText(off uint64) {
 	}
 }
 
-// roots seeds the walk from the typelink-flagged descriptors and the itabs.
+// roots seeds the walk from the release's typelink-flagged descriptors and
+// its itabs, which is the one place the descriptor layout reaches the walk.
 func (w *typeWalk) roots() {
+	if !w.old.Lay.SortedTypes {
+		w.linkRoots()
+		return
+	}
 	om := w.old.Mod
 	a := om.Types + 8
 	for end := om.Types + om.Typedesclen; a < end && w.inSect(a); {
@@ -296,7 +302,7 @@ func (w *typeWalk) roots() {
 			break
 		}
 		w.enqueue(a)
-		sz := descSize(w.d, o)
+		sz := descSize(w.d, o, w.old.Lay)
 		if sz <= 0 {
 			break
 		}
@@ -320,6 +326,29 @@ func (w *typeWalk) roots() {
 	}
 }
 
+// linkRoots seeds the walk from the .typelink and .itablink sections, which
+// is where the releases before 1.27 keep what the sorted section's head and
+// itab range hold after it. .typelink holds 32-bit offsets from
+// moduledata.types; .itablink holds pointers to the itabs themselves.
+func (w *typeWalk) linkRoots() {
+	om := w.old.Mod
+	if tl := w.old.Sects[".typelink"]; tl != nil {
+		for i := 0; i+4 <= len(tl.Data); i += 4 {
+			w.enqueue(om.Types + uint64(binary.LittleEndian.Uint32(tl.Data[i:])))
+		}
+	}
+	if il := w.old.Sects[".itablink"]; il != nil {
+		for i := 0; i+8 <= len(il.Data); i += 8 {
+			a := binary.LittleEndian.Uint64(il.Data[i:])
+			if !w.inSect(a) || a-w.os.Addr+16 > uint64(len(w.d)) {
+				continue
+			}
+			w.enqueue(w.u64(a - w.os.Addr))
+			w.enqueue(w.u64(a - w.os.Addr + 8))
+		}
+	}
+}
+
 // descriptor rewrites one descriptor and enqueues everything it points at.
 func (w *typeWalk) descriptor(o uint64) {
 	if o+sizeType > uint64(len(w.d)) {
@@ -331,7 +360,7 @@ func (w *typeWalk) descriptor(o uint64) {
 	}
 	tflag := w.d[o+20]
 	if w.site != nil {
-		if sz := descSize(w.d, o); sz > 0 {
+		if sz := descSize(w.d, o, w.old.Lay); sz > 0 {
 			w.site(o, sz, 'D')
 		}
 	}
@@ -339,7 +368,7 @@ func (w *typeWalk) descriptor(o uint64) {
 	w.doNameOff(o + 40) // Str
 	w.role = 'p'
 	w.doType(o + 44) // PtrToThis
-	base := uint64(baseSize(kind))
+	base := uint64(baseSize(kind, w.old.Lay))
 	var ut uint64
 	if tflag&tflagUncommon != 0 {
 		ut = o + base

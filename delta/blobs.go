@@ -210,9 +210,9 @@ func predictPctab(old, new *gobin.Bin, m *match, bp *blobPred, oft []byte) []byt
 // fdSym is one funcdata symbol of the old go:func.* blob.
 type fdSym struct {
 	off, size uint32
-	kind      int    // the FUNCDATA index it is used as
-	first     int    // the first old function that uses it
-	class     uint32 // the linker's alignment class
+	kind      int // the FUNCDATA index it is used as
+	first     int // the first old function that uses it
+	region    int // the alignment region of the old blob it sits in
 }
 
 // predictGofunc replays generateFuncdata: the funcdata symbols in new
@@ -238,9 +238,9 @@ func predictGofunc(old, new *gobin.Bin, m *match, bp *blobPred, mp *mapper, oft 
 		}
 	}
 	sort.Slice(offs, func(a, b int) bool { return offs[a] < offs[b] })
-	classify(syms, offs, uint32(len(oldGf)))
+	aligns := classify(syms, offs, uint32(len(oldGf)))
 
-	var classes [6][]*fdSym // 32, 16, 8, 4, 2, 1
+	regions := make([][]*fdSym, len(aligns))
 	placed := map[uint32]bool{}
 	for j := range new.Funcs {
 		i := m.NewToOld[j]
@@ -254,7 +254,7 @@ func predictGofunc(old, new *gobin.Bin, m *match, bp *blobPred, mp *mapper, oft 
 			off := binary.LittleEndian.Uint32(rec[gobin.FuncSize+4*int(npc)+4*k:])
 			if s := syms[off]; s != nil && !placed[off] {
 				placed[off] = true
-				classes[classIdx(s.class)] = append(classes[classIdx(s.class)], s)
+				regions[s.region] = append(regions[s.region], s)
 			}
 		}
 	}
@@ -262,11 +262,11 @@ func predictGofunc(old, new *gobin.Bin, m *match, bp *blobPred, mp *mapper, oft 
 	nmap := newNameOffMap(op.Table(op.Funcnametab), np.Table(np.Funcnametab))
 	om, nm := old.Mod, new.Mod
 	var gf []byte
-	for _, cl := range classes {
+	for r, cl := range regions {
+		for uint64(len(gf))%uint64(aligns[r]) != 0 {
+			gf = append(gf, 0)
+		}
 		for _, s := range cl {
-			for uint64(len(gf))%uint64(s.class) != 0 {
-				gf = append(gf, 0)
-			}
 			p := uint32(len(gf))
 			bp.GfOff[s.off] = p
 			gf = append(gf, oldGf[s.off:s.off+s.size]...)
@@ -302,25 +302,23 @@ func predictGofunc(old, new *gobin.Bin, m *match, bp *blobPred, mp *mapper, oft 
 	return gf
 }
 
-// classify assigns each funcdata symbol the alignment class the compiler
-// gave it. The linker sorts the blob by decreasing class, stably, so the old
-// blob is a sequence of regions each in first-use order: stack-object
-// records are 8, pointer maps / inline trees / wrapinfo 4, and the varint
-// streams (opendefer, arginfo, argliveinfo) 1 -- except the argument maps of
-// assembly functions, which are 8 and therefore sit in the first region,
-// before the first break in first-use order. There is no padding within a
-// region, so each symbol's size is the gap to the next.
-func classify(syms map[uint32]*fdSym, offs []uint32, total uint32) {
-	firstBreak := len(offs)
-	prevFirst := -1
-	for k, off := range offs {
-		if f := syms[off].first; f < prevFirst {
-			firstBreak = k
-			break
-		} else {
-			prevFirst = f
-		}
-	}
+// classify splits the old blob into the linker's alignment regions and sizes
+// every symbol. The linker sorts the funcdata symbols by decreasing symbol
+// alignment, stably (cmd/link/internal/ld/pcln.go, generateFuncdata), so the
+// blob is a sequence of regions each in first-use order, and a region ends
+// exactly where first-use order restarts. Which alignment the compiler gave
+// which symbol is not modelled: that is a table that has changed between
+// releases, and the image states the answer. Each symbol's size is the gap
+// to the next, so the padding the linker inserted travels with the symbol
+// before it and a blob whose order does not change is rebuilt byte for byte.
+//
+// The regions' own alignments are inferred the same way -- the largest power
+// of two, up to the linker's maximum, that divides every offset in the
+// region -- and are used only where a region has to start somewhere new.
+func classify(syms map[uint32]*fdSym, offs []uint32, total uint32) []uint32 {
+	const maxAlign = 32
+	aligns := []uint32{maxAlign}
+	region, prevFirst := 0, -1
 	for k, off := range offs {
 		s := syms[off]
 		if k+1 < len(offs) {
@@ -328,34 +326,15 @@ func classify(syms map[uint32]*fdSym, offs []uint32, total uint32) {
 		} else {
 			s.size = total - off
 		}
-		switch s.kind {
-		case 2: // FUNCDATA_StackObjects
-			s.class = 8
-		case 0: // FUNCDATA_ArgsPointerMaps
-			s.class = 4
-			if k < firstBreak && s.size%8 == 0 {
-				s.class = 8
-			}
-		case 1, 3, 7: // LocalsPointerMaps, InlTree, WrapInfo
-			s.class = 4
-		default: // OpenCodedDeferInfo, ArgInfo, ArgLiveInfo
-			s.class = 1
+		if s.first < prevFirst {
+			region++
+			aligns = append(aligns, maxAlign)
+		}
+		prevFirst = s.first
+		s.region = region
+		for aligns[region] > 1 && off%aligns[region] != 0 {
+			aligns[region] >>= 1
 		}
 	}
-}
-
-func classIdx(c uint32) int {
-	switch c {
-	case 32:
-		return 0
-	case 16:
-		return 1
-	case 8:
-		return 2
-	case 4:
-		return 3
-	case 2:
-		return 4
-	}
-	return 5
+	return aligns
 }

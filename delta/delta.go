@@ -98,8 +98,8 @@ func Encode(old, new []byte, o Options) ([]byte, error) {
 	var body []byte
 	var err error
 	if !o.PlainOnly && o.transformCap() >= TransformGoAMD64 {
-		tf := byte(o.transformCap())
-		body, err = encodeGoAMD64(old, new, tf, o, st)
+		var tf byte
+		body, tf, err = encodeGoAMD64(old, new, byte(o.transformCap()), o, st)
 		if err == nil {
 			h.Transform = tf
 		} else if !isUnsupported(err) {
@@ -166,7 +166,7 @@ func Apply(old, patch []byte, w io.Writer) error {
 	switch h.Transform {
 	case TransformPlain:
 		out, err = applyPlain(old, body, &inner)
-	case TransformGoAMD64, TransformGoSegmap, TransformGoFar:
+	case TransformGoAMD64, TransformGoSegmap, TransformGoFar, TransformGoLayout:
 		out, err = applyGoAMD64(old, body, &inner)
 	default:
 		return &ErrUnsupportedTransform{Transform: h.Transform}

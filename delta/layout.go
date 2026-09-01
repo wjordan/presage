@@ -20,6 +20,9 @@ import (
 // where the predicted content is wrong. That is what lets the correction be
 // positional and lets the encoder skip the whole-file suffix array.
 type layout struct {
+	// Lay is the release's layout descriptor id, on the wire only for a
+	// release that is not the default one (layoutIDOnWire).
+	Lay    gobin.LayoutID
 	NewLen uint64
 	Sects  []sectInfo
 
@@ -221,9 +224,18 @@ func oldTabOffs(p *gobin.Pcln) [7]uint64 {
 	return [7]uint64{p.Funcnametab.Off, p.Cutab.Off, p.Filetab.Off, p.Pctab.Off, p.Functab.Off, p.Gofunc.Off, p.Findfunctab.Off}
 }
 
+// layoutIDOnWire says whether the layout stream names its release. It does
+// for every release but the default one, so a pair on the default encodes
+// byte for byte as it did before layouts became data; and the condition is
+// read off the reference, which both sides have, not off the stream.
+func layoutIDOnWire(old *gobin.Bin) bool { return old.Lay.ID != defaultLayout }
+
 func (l *layout) encode(old *gobin.Bin, tf byte) []byte {
 	w := &wbuf{}
 	w.raw([]byte(layoutMagic))
+	if layoutIDOnWire(old) {
+		w.raw([]byte{byte(l.Lay)})
+	}
 	w.s(int64(l.NewLen) - int64(len(old.File)))
 	encodeSects(w, old, l.Sects)
 	for _, v := range l.modValues(old.Mod) {
@@ -304,7 +316,16 @@ func decodeLayout(b []byte, old *gobin.Bin, tf byte) (*layout, error) {
 	if string(r.take(4)) != layoutMagic {
 		return nil, fmt.Errorf("%w: bad layout magic", errCorrupt)
 	}
-	l := &layout{Shifts: map[string]*shiftTable{}, DataMaps: map[string]*dataMap{}}
+	l := &layout{Lay: old.Lay.ID, Shifts: map[string]*shiftTable{}, DataMaps: map[string]*dataMap{}}
+	if layoutIDOnWire(old) {
+		// The decoder derived a descriptor from the reference already; the
+		// transmitted id is what the encoder derived from it. A build whose
+		// table has drifted refuses here, by name, instead of diverging at
+		// the prediction hash.
+		if id := gobin.LayoutID(r.byte()); id != l.Lay {
+			return nil, fmt.Errorf("%w: patch was written for layout %d, this build reads the reference as %d", errCorrupt, id, l.Lay)
+		}
+	}
 	l.NewLen = uint64(int64(len(old.File)) + r.s())
 	l.Sects = decodeSects(r, old)
 	for _, v := range l.modValues(old.Mod) {
@@ -607,7 +628,7 @@ func decodeFuncLayout(old *gobin.Bin, l *layout) ([]*gobin.Func, *match, error) 
 
 // buildLayout is the encoder side.
 func buildLayout(old, new *gobin.Bin, m *match, dmaps map[string]*dataMap, shifts map[string]*shiftTable, ov []addrOverride, segs []segMap, tf byte) *layout {
-	l := &layout{NewLen: uint64(len(new.File)), Shifts: shifts, DataMaps: dmaps, Overrides: ov, Segs: segs}
+	l := &layout{Lay: new.Lay.ID, NewLen: uint64(len(new.File)), Shifts: shifts, DataMaps: dmaps, Overrides: ov, Segs: segs}
 	for _, s := range new.Order {
 		l.Sects = append(l.Sects, sectInfo{s.Name, s.Addr, s.Off, s.Size, s.NoBits})
 	}
@@ -646,7 +667,7 @@ func buildLayout(old, new *gobin.Bin, m *match, dmaps map[string]*dataMap, shift
 // whose tables are filled in by stage 1. Nothing of the real new file is
 // read, which is the point -- the predictors run identically on both sides.
 func skeleton(old *gobin.Bin, l *layout) (*gobin.Bin, *match, error) {
-	b := &gobin.Bin{Sects: map[string]*gobin.Section{}, GoVer: old.GoVer}
+	b := &gobin.Bin{Sects: map[string]*gobin.Section{}, GoVer: old.GoVer, Lay: old.Lay}
 	for _, s := range l.Sects {
 		if !s.NoBits && (s.Off > l.NewLen || s.Size > l.NewLen || s.Off+s.Size > l.NewLen) {
 			return nil, nil, fmt.Errorf("%w: section %s runs past the new file", errCorrupt, s.Name)

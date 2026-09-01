@@ -21,6 +21,7 @@ type goPred struct {
 	s1a, s1b       []byte
 	s1aNew, s1bNew []byte
 	pred           []byte
+	tf             byte // the effective transform, lowered from the caller's cap
 	xst            x86.Stats
 }
 
@@ -37,6 +38,10 @@ func predictGoAMD64(old, new []byte, tf byte) (*goPred, error) {
 		return nil, asUnsupported("new", err)
 	}
 	ob, nb := g.ob, g.nb
+	if tf, err = layoutTransform(ob, nb, tf); err != nil {
+		return nil, err
+	}
+	g.tf = tf
 	g.m = matchFuncs(ob, nb)
 
 	dmaps, shifts := buildMaps(ob, nb, g.m)
@@ -97,21 +102,21 @@ func predictGoAMD64(old, new []byte, tf byte) (*goPred, error) {
 // four streams are compressed as one frame: a frame per stream would cost a
 // 32-byte hash and a table entry each and buys nothing -- compressed
 // separately they come to within 0.1 % of the same total.
-func encodeGoAMD64(old, new []byte, tf byte, o Options, st *Stats) ([]byte, error) {
+func encodeGoAMD64(old, new []byte, tf byte, o Options, st *Stats) ([]byte, byte, error) {
 	g, plan, err := goAnalyse(old, new, tf, st)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	s2, err := encodeCorrection(g.pred, new, tf >= TransformGoSegmap)
+	s2, err := encodeCorrection(g.pred, new, g.tf >= TransformGoSegmap)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	st.Stage2 = len(s2)
 	w := &wbuf{b: plan}
 	sum := hashOf(g.pred)
 	w.raw(sum[:])
 	w.raw(s2)
-	return w.b, nil
+	return w.b, g.tf, nil
 }
 
 // goAnalyse runs the transform to its prediction and serialises what the
@@ -217,6 +222,12 @@ func goPredict(old, body []byte, tf byte, maxLen int64) (g *goPred, rest []byte,
 	if err != nil {
 		return nil, nil, fmt.Errorf("delta: this patch needs a Go binary the codec understands: %w", err)
 	}
+	// The same lowering the encoder applied, from the same input: the
+	// reference names the release, and the release fixes the transform a
+	// pair on it is written at.
+	if tf, err = layoutTransform(ob, ob, tf); err != nil {
+		return nil, nil, err
+	}
 	r := &rbuf{b: body}
 	layRaw := r.bytes()
 	s1aLen := r.un(uint64(maxLen), "stage 1a table length")
@@ -274,6 +285,32 @@ func newMapper(old, skel *gobin.Bin, m *match, l *layout) *mapper {
 	}
 	mp.segs, mp.segLocal = segsByIdx(l.Segs, old, skel, m)
 	return mp
+}
+
+// defaultLayout is the release the codec was pinned to before layouts became
+// data. A pair on it encodes exactly as it did then: no layout id on the
+// wire and transform 3, so every patch a decoder could read before this
+// work it can still read.
+const defaultLayout = gobin.LayoutGo127
+
+// layoutTransform settles the transform a pair is written at, from the two
+// images' layouts and the caller's cap. Both sides derive it from what they
+// have -- the encoder from the pair, the decoder from the reference twice,
+// which the same-layout rule makes the same answer.
+func layoutTransform(ob, nb *gobin.Bin, cap byte) (byte, error) {
+	if ob.Lay.ID != nb.Lay.ID {
+		// Cross-layout prediction is a different problem from the one the
+		// module solves, and this is also the cheap decline the encoder
+		// wants: two build strings, milliseconds (docs 2.9).
+		return 0, unsupported("old is %s and new is %s: the module predicts within one release", ob.Lay.Ver, nb.Lay.Ver)
+	}
+	if ob.Lay.ID == defaultLayout {
+		return min(cap, TransformGoFar), nil
+	}
+	if cap < TransformGoLayout {
+		return 0, unsupported("%s needs transform %d, capped at %d", ob.Lay.Ver, TransformGoLayout, cap)
+	}
+	return cap, nil
 }
 
 // asUnsupported turns a gobin rejection into the codec's own sentinel, so

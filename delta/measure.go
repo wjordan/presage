@@ -142,7 +142,7 @@ func WalkDescriptors(b *gobin.Bin) []Descriptor {
 			break
 		}
 		push(a)
-		sz := descSize(d, a-base)
+		sz := descSize(d, a-base, b.Lay)
 		if sz <= 0 {
 			break
 		}
@@ -173,7 +173,7 @@ func WalkDescriptors(b *gobin.Bin) []Descriptor {
 			continue
 		}
 		kind := d[o+23] & kindMask
-		sz := descSize(d, o)
+		sz := descSize(d, o, b.Lay)
 		if kind == 0 || kind > kindMax || sz <= 0 {
 			continue
 		}
@@ -184,7 +184,7 @@ func WalkDescriptors(b *gobin.Bin) []Descriptor {
 				de.Refs = append(de.Refs, t-base)
 			}
 		}
-		base0 := uint64(baseSize(kind))
+		base0 := uint64(baseSize(kind, b.Lay))
 		addStart := o + base0
 		if d[o+20]&tflagUncommon != 0 {
 			addStart += sizeUncommon

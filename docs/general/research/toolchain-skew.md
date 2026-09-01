@@ -138,6 +138,18 @@ It understates the gain where there is one, which makes it conservative in
 the direction of skipping a stage that would have paid, and it separates
 "worth a quarter megabyte a second" from "worth nothing" on every pair.
 
+**Where the sample is empty it fails again.** The first sampler read 32
+evenly spaced 64 KiB windows of the *file*. On prom-127 the correction is
+0.06 % of the file in clusters, so the sample held about 1.5 KB of coded
+correction, the three shapes' fixed costs swamped a 6 % margin, and the
+gate skipped shapes worth 7,385 B: 82,021 B instead of 74,636 B (+9.9 %)
+for 0.1 s. Two rules fix it. Windows are drawn from the 64 KiB blocks in
+which prediction and target differ — the shapes differ only where the
+buffers do — and a stream smaller than the sample (2 MiB) is priced by
+writing it, since the estimate would cost more than the work it prices.
+Chrome's estimate is unchanged by either (gain 0 against 20,803 B worth;
+the shapes still do not run) and prom-127 is 74,636 B again.
+
 ### The work model
 
 Seconds are modelled from byte counts at rates calibrated on this corpus
@@ -179,6 +191,8 @@ Measured end to end:
 | --- | --- | ---: | ---: |
 | chrome | a second is free | 32.5 s | 2,376,189 B |
 | " | **default** | **28.4 s** | **2,376,189 B** |
+| prom-127 | a second is free | 4.4 s | 74,636 B |
+| " | **default** | **4.3 s** | **74,636 B** |
 | ts, stripped | a second is free | 28.7 s | 4,573,629 B |
 | " | **default** | **18.2 s** | **4,573,629 B** |
 | " | 1 MB/s | **9.6 s** | 5,083,438 B |
@@ -213,8 +227,8 @@ The Go module reads `go1.27` only (`gobin.SupportedGo`, D14). The measured
 consequences:
 
 - **prom-126 vs prom-127**: the same source change, the same two binaries
-  modulo toolchain, is 2,137,152 B instead of 74,636 B — 28.6× — and 27.9 s
-  instead of 4.2 s. Nothing about that pair is hard; it is 1.26.5 on both
+  modulo toolchain, was 2,137,152 B instead of 74,636 B — 28.6× — and 27.9 s
+  instead of 4.2 s (§6 has since closed most of that gap). Nothing about that pair is hard; it is 1.26.5 on both
   sides, a layout the codec simply does not read.
 - The local corpus of upstream releases had to be *rebuilt* with go1.27
   (`corpus127/`) before the Go module could be measured on it at all. That
@@ -229,7 +243,13 @@ self-prediction gate that goes with it caught a bug no round-trip test
 would have (§2.7 of `go-module-design.md`). Both stay. What changes is
 where the version knowledge lives.
 
-## 6. Proposal: layouts as data, not as a pin
+## 6. Layouts as data, not as a pin
+
+*Built for go1.26 and go1.27; the resolved design and what implementing it
+changed are `go-module-design.md` §2.9 (D23). The upstream-shipped 1.26
+prometheus pair is 161,508 B in 4.8 s where §5 measured 2,137,152 B in
+27.9 s, and the go1.27 pair is unchanged to the byte. What follows is the
+proposal as it was written; §2.9 supersedes it.*
 
 **What actually varies between releases.** From the prototype that carried
 1.25, 1.26 and 1.27 at once (`bench/gotransform`, 5,725 lines, five
