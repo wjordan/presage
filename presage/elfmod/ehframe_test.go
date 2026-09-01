@@ -65,18 +65,8 @@ func TestEhFrameWalkAndHeader(t *testing.T) {
 		NewOff: secOff, NewSize: uint64(len(sec)), NewAddr: secAddr,
 		HdrOff: hdrOff, HdrSize: hdrSize, HdrAddr: hdrAddr,
 	}
-	// Deliberately supplied out of address order, as the link order they are
-	// walked in would give them.
-	placed := []ehNewFDE{}
-	for _, f := range fdes {
-		stored := int32(binary.LittleEndian.Uint32(sec[f.locOff:]))
-		placed = append(placed, ehNewFDE{
-			target:    uint64(int64(secAddr+f.locOff) + int64(stored)),
-			entryAddr: secAddr + f.entry,
-		})
-	}
-	if n := regenerateEhFrameHdr(image, p, placed); n != 3 {
-		t.Fatalf("regenerated %d header entries, want 3", n)
+	if !buildEhFrameHdr(hdr, image[secOff:secOff+p.NewSize], p) {
+		t.Fatal("buildEhFrameHdr declined a well-formed section")
 	}
 	if got := int32(binary.LittleEndian.Uint32(hdr[4:])); got != int32(secAddr)-int32(hdrAddr+4) {
 		t.Errorf("eh_frame_ptr = %d, want %d", got, int32(secAddr)-int32(hdrAddr+4))
@@ -95,9 +85,10 @@ func TestEhFrameWalkAndHeader(t *testing.T) {
 
 // TestEhFrameReplay is the decoder path end to end on a synthetic pair: the
 // old section's FDEs are projected through an identity-shifted equivalence,
-// retargeted through a lookup that moves every function, resized where the
-// map agrees about the old size, and the header regenerated. The result must
-// equal a section built directly for the new layout.
+// retargeted through a lookup that moves every function and resized where
+// the map agrees about the old size. The result must equal a section built
+// directly for the new layout, and the header rebuilt from it must equal the
+// header the new layout implies.
 func TestEhFrameReplay(t *testing.T) {
 	const oldAddr, oldOff = uint64(0x40000), uint64(0x1000)
 	const newAddr, newOff = uint64(0x50000), uint64(0x1800) // section moved
@@ -121,7 +112,7 @@ func TestEhFrameReplay(t *testing.T) {
 	ep := equivalencePlan{OldLen: uint64(len(old)), NewLen: uint64(len(out)),
 		Eqs: []equivalence{{Src: oldOff, Dst: newOff, N: uint64(len(oldSec))}}}
 	p := ehFramePlan{OldOff: oldOff, OldSize: uint64(len(oldSec)), NewOff: newOff, NewSize: uint64(len(newSec)),
-		OldAddr: oldAddr, NewAddr: newAddr, HdrOff: hdrOff, HdrSize: hdrSize, HdrAddr: hdrAddr}
+		OldAddr: oldAddr, NewAddr: newAddr, HdrOff: hdrOff, HdrSize: hdrSize, HdrAddr: hdrAddr, HdrExact: true}
 	rt, err := unmarshalEhFramePlan(p.marshal())
 	if err != nil || rt != p {
 		t.Fatalf("plan round trip: %v %+v", err, rt)
@@ -135,11 +126,15 @@ func TestEhFrameReplay(t *testing.T) {
 		return 0, 0, false
 	}
 	st := applyEhFrame(out, old, ep, rt, oldSecs, lookup, extent)
-	if st.FDEs != 3 || st.Retargeted != 3 || st.Resized != 1 || st.HdrEntries != 3 {
+	if st.FDEs != 3 || st.Retargeted != 3 || st.Resized != 1 {
 		t.Fatalf("stats %+v", st)
 	}
 	if got := out[newOff : newOff+uint64(len(newSec))]; !bytes.Equal(got, newSec) {
 		t.Fatalf("replayed .eh_frame differs:\n got %x\nwant %x", got, newSec)
+	}
+	// The header is the decoder's last step, over the corrected section.
+	if !buildEhFrameHdr(out[hdrOff:hdrOff+hdrSize], out[newOff:newOff+uint64(len(newSec))], rt) {
+		t.Fatal("buildEhFrameHdr declined the replayed section")
 	}
 	hdr := out[hdrOff : hdrOff+hdrSize]
 	want := []int32{0x7100 - int32(hdrAddr), 0x8100 - int32(hdrAddr), 0x9100 - int32(hdrAddr)}
@@ -184,12 +179,64 @@ func TestEhFrameHeaderFoldedDuplicates(t *testing.T) {
 	copy(image[hdrOff:], []byte{1, ehPtrEncPCRelSData4, ehEncUData4, ehTableEncDataRel4})
 	p := ehFramePlan{OldOff: secOff, OldSize: uint64(len(sec)), NewOff: secOff, NewSize: uint64(len(sec)),
 		OldAddr: secAddr, NewAddr: secAddr, HdrOff: hdrOff, HdrSize: hdrSize, HdrAddr: hdrAddr}
-	fdes := []ehNewFDE{{0x8000, secAddr + 24}, {0x7000, secAddr + first}, {0x7000, secAddr + first + 20}}
-	if n := regenerateEhFrameHdr(image, p, fdes); n != 2 {
-		t.Fatalf("indexed %d entries, want 2", n)
+	if !buildEhFrameHdr(image[hdrOff:hdrOff+hdrSize], image[secOff:secOff+p.NewSize], p) {
+		t.Fatal("buildEhFrameHdr declined a folded section")
 	}
 	hdr := image[hdrOff:]
+	if got := binary.LittleEndian.Uint32(hdr[8:]); got != 2 {
+		t.Fatalf("fde_count = %d, want 2", got)
+	}
 	if got := binary.LittleEndian.Uint32(hdr[ehHdrPrefix+4:]); uint64(int32(got)) != secAddr+first-hdrAddr {
 		t.Fatalf("first entry points at %#x, want the first FDE at %#x", got, secAddr+first-hdrAddr)
 	}
+}
+
+// The Finaliser seam: the encoder masks the section it does not ship, the
+// decoder rebuilds it from the corrected .eh_frame, and what the two agree
+// on is the target's own bytes.
+func TestEhFrameHdrFinaliser(t *testing.T) {
+	const secAddr, secOff = uint64(0x40000), uint64(0x1000)
+	const hdrAddr, hdrOff = uint64(0x30000), uint64(0x800)
+	sec := buildCIE()
+	sec = append(sec, buildFDE(secAddr, uint64(len(sec)), 0, 0x9000, 0x40)...)
+	sec = append(sec, buildFDE(secAddr, uint64(len(sec)), 0, 0x7000, 0x30)...)
+	sec = append(sec, 0, 0, 0, 0)
+	hdrSize := uint64(ehHdrPrefix + 2*8)
+	p := ehFramePlan{NewOff: secOff, NewSize: uint64(len(sec)), NewAddr: secAddr,
+		HdrOff: hdrOff, HdrSize: hdrSize, HdrAddr: hdrAddr}
+
+	target := make([]byte, 0x2000)
+	copy(target[secOff:], sec)
+	if ehFrameHdrDerivable(target, p) {
+		t.Fatal("an unwritten header must not read as derivable")
+	}
+	buildEhFrameHdr(target[hdrOff:hdrOff+hdrSize], target[secOff:secOff+p.NewSize], p)
+	if !ehFrameHdrDerivable(target, p) {
+		t.Fatal("the target's own header must read as derivable")
+	}
+
+	p.HdrExact = true
+	plan := packedPlan(t, planStreams{EhFrame: p.marshal()})
+	// The prediction has the section right and the header wrong.
+	pred := make([]byte, len(target))
+	copy(pred[secOff:], sec)
+	if masked := (Module{}).MaskResidual(plan, pred, target); !bytes.Equal(masked[hdrOff:hdrOff+hdrSize], target[hdrOff:hdrOff+hdrSize]) {
+		t.Fatal("MaskResidual left the header unmasked")
+	} else if bytes.Equal(pred[hdrOff:hdrOff+hdrSize], target[hdrOff:hdrOff+hdrSize]) {
+		t.Fatal("MaskResidual must not disturb the hashed prediction")
+	}
+	if err := (Module{}).Finalise(plan, pred); err != nil {
+		t.Fatalf("Finalise: %v", err)
+	}
+	if !bytes.Equal(pred, target) {
+		t.Fatal("Finalise did not reproduce the target's header")
+	}
+}
+
+// packedPlan marshals and packs a plan the way Analyse ships it, so the
+// Finaliser seam is exercised on the bytes the container carries.
+func packedPlan(t *testing.T, cp planStreams) []byte {
+	t.Helper()
+	b, _ := packPlan(cp.marshal())
+	return b
 }

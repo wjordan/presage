@@ -209,16 +209,20 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 		st.Notes = append(st.Notes, fmt.Sprintf("dwarf: plan %d B", len(cp.Dwarf)))
 	}
 
-	// 6. Unwind tables: geometry only, both sections are regenerated.
+	// 6. Unwind tables: geometry only. .eh_frame is retargeted from the old
+	// one; .eh_frame_hdr is the index over the finished section, rebuilt
+	// after the residual wherever the target agrees it is derivable.
 	oldEh, okOldEh := oi.Sections[".eh_frame"]
 	newEh, okNewEh := ni.Sections[".eh_frame"]
 	newHdr, okHdr := ni.Sections[".eh_frame_hdr"]
 	if okOldEh && okNewEh && okHdr {
-		cp.EhFrame = ehFramePlan{
+		fp := ehFramePlan{
 			OldOff: oldEh.Off, OldSize: oldEh.Size, NewOff: newEh.Off, NewSize: newEh.Size,
 			OldAddr: oldEh.Addr, NewAddr: newEh.Addr,
 			HdrOff: newHdr.Off, HdrSize: newHdr.Size, HdrAddr: newHdr.Addr,
-		}.marshal()
+		}
+		fp.HdrExact = ehFrameHdrDerivable(target, fp)
+		cp.EhFrame = fp.marshal()
 	}
 
 	// 7. .rodata switch tables: predict once, keep the candidates that help.
@@ -268,9 +272,12 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 	}
 	st.Relocation = ps.Relocation
 	if len(cp.EhFrame) != 0 {
-		e := ps.EhFrame
-		st.Notes = append(st.Notes, fmt.Sprintf("eh_frame: %d FDEs, %d retargeted, %d unknown, %d resized, %d hdr entries",
-			e.FDEs, e.Retargeted, e.Unknown, e.Resized, e.HdrEntries))
+		e, hdr := ps.EhFrame, "hdr from the residual"
+		if fp, _ := unmarshalEhFramePlan(cp.EhFrame); fp.HdrExact {
+			hdr = "hdr rebuilt after the residual"
+		}
+		st.Notes = append(st.Notes, fmt.Sprintf("eh_frame: %d FDEs, %d retargeted, %d unknown, %d resized; %s",
+			e.FDEs, e.Retargeted, e.Unknown, e.Resized, hdr))
 	}
 	if len(cp.Relr) != 0 {
 		r := ps.Relr

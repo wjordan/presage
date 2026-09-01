@@ -1,6 +1,7 @@
 package elfmod
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"slices"
@@ -18,7 +19,11 @@ import (
 //
 // .eh_frame_hdr is the derived index over it -- a header plus fde_count
 // (initial_location, fde_pointer) pairs sorted by address -- and is 86.312%
-// wrong in the byte prediction while being fully regenerable from .eh_frame.
+// wrong in the byte prediction while being a pure function of the finished
+// .eh_frame. Predicting it from the *projected* FDEs was a guess that a few
+// unplaced entries shifted wholesale; rebuilding it from the *corrected*
+// section is exact, so it is done after the residual through
+// presage.Finaliser and the residual is told the section is already right.
 
 const (
 	ehPtrEncPCRelSData4 = 0x1b
@@ -35,6 +40,10 @@ type ehFramePlan struct {
 	OldAddr, NewAddr uint64
 	HdrOff, HdrSize  uint64
 	HdrAddr          uint64
+	// HdrExact says the encoder checked that rebuilding .eh_frame_hdr from
+	// the target's own .eh_frame reproduces it byte for byte, so the
+	// residual does not carry the section and Finalise rebuilds it.
+	HdrExact bool
 }
 
 func (p ehFramePlan) marshal() []byte {
@@ -42,7 +51,7 @@ func (p ehFramePlan) marshal() []byte {
 	for _, v := range []uint64{p.OldOff, p.OldSize, p.NewOff, p.NewSize, p.OldAddr, p.NewAddr, p.HdrOff, p.HdrSize, p.HdrAddr} {
 		b = binary.AppendUvarint(b, v)
 	}
-	return b
+	return append(b, boolByte(p.HdrExact))
 }
 
 func unmarshalEhFramePlan(b []byte) (ehFramePlan, error) {
@@ -51,17 +60,24 @@ func unmarshalEhFramePlan(b []byte) (ehFramePlan, error) {
 		OldOff: r.u(), OldSize: r.u(), NewOff: r.u(), NewSize: r.u(),
 		OldAddr: r.u(), NewAddr: r.u(), HdrOff: r.u(), HdrSize: r.u(), HdrAddr: r.u(),
 	}
-	if r.err != nil {
-		return ehFramePlan{}, errors.New("invalid eh_frame plan")
+	p.HdrExact = r.u() != 0
+	if r.err != nil || len(r.b) != 0 {
+		return ehFramePlan{}, errors.New("trailing or invalid eh_frame plan data")
 	}
 	return p, nil
+}
+
+func boolByte(b bool) byte {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 type ehFrameStats struct {
 	FDEs       int
 	Retargeted int
 	Unknown    int
-	HdrEntries int
 	Resized    int
 }
 
@@ -167,16 +183,14 @@ func cieFDEPointerEncoding(cie []byte) byte {
 // defensive walker stops there -- in practice after 530 of 31,477 FDEs. The
 // old section is exact, so each FDE is located there and its field projected
 // forward through the equivalence map to wherever those bytes landed.
-func retargetEhFrame(out, old []byte, ep equivalencePlan, p ehFramePlan, oldSecs sectionMap, mapper sourceEquivalenceMapper, lookup func(uint64) x86.Target, extentOf func(uint64) (uint64, uint64, bool)) (ehFrameStats, []ehNewFDE) {
+func retargetEhFrame(out, old []byte, ep equivalencePlan, p ehFramePlan, oldSecs sectionMap, mapper sourceEquivalenceMapper, lookup func(uint64) x86.Target, extentOf func(uint64) (uint64, uint64, bool)) ehFrameStats {
 	var st ehFrameStats
 	oldSec := old[p.OldOff : p.OldOff+p.OldSize]
 	fdes, _ := walkEhFrame(oldSec)
 	st.FDEs = len(fdes)
-	placed := make([]ehNewFDE, 0, len(fdes))
 	for _, f := range fdes {
 		newLoc, ok := mapper.project(p.OldOff + f.locOff)
-		newEntry, ok2 := mapper.project(p.OldOff + f.entry)
-		if !ok || !ok2 || newLoc < p.NewOff || newLoc+4 > p.NewOff+p.NewSize {
+		if !ok || newLoc < p.NewOff || newLoc+4 > p.NewOff+p.NewSize {
 			st.Unknown++
 			continue
 		}
@@ -212,47 +226,108 @@ func retargetEhFrame(out, old []byte, ep equivalencePlan, p ehFramePlan, oldSecs
 				}
 			}
 		}
-		placed = append(placed, ehNewFDE{target: target.Addr, entryAddr: p.NewAddr + (newEntry - p.NewOff)})
 	}
-	return st, placed
+	return st
 }
 
-// ehNewFDE is one FDE as it is expected to appear in the new image: where its
-// entry starts and which function it describes.
-type ehNewFDE struct{ target, entryAddr uint64 }
-
-// regenerateEhFrameHdr rebuilds .eh_frame_hdr from the projected FDEs. The
-// section is a pure index: a header, then one (initial_location, fde_pointer)
-// pair per FDE, both section-relative and sorted by address.
-func regenerateEhFrameHdr(out []byte, p ehFramePlan, fdes []ehNewFDE) int {
-	if p.HdrSize < ehHdrPrefix || len(fdes) == 0 {
-		return 0
+// buildEhFrameHdr writes into hdr the .eh_frame_hdr that a finished
+// .eh_frame implies: the four encoding bytes, the pointer back to
+// .eh_frame, the entry count, then one (initial_location, fde_pointer) pair
+// per FDE, both relative to the header's own address and sorted by address.
+// It writes every byte of the section, so what it produces depends on the
+// finished .eh_frame alone and on nothing that was there before.
+func buildEhFrameHdr(hdr, frame []byte, p ehFramePlan) bool {
+	if uint64(len(hdr)) < ehHdrPrefix {
+		return false
 	}
-	hdr := out[p.HdrOff : p.HdrOff+p.HdrSize]
-	if hdr[0] != 1 || hdr[1] != ehPtrEncPCRelSData4 || hdr[2] != ehEncUData4 || hdr[3] != ehTableEncDataRel4 {
-		return 0
+	fdes, _ := walkEhFrame(frame)
+	entries := make([]ehHdrEntry, 0, len(fdes))
+	for _, f := range fdes {
+		stored := int32(binary.LittleEndian.Uint32(frame[f.locOff:]))
+		fieldAddr := p.NewAddr + f.locOff
+		entries = append(entries, ehHdrEntry{
+			loc: uint64(int64(fieldAddr) + int64(stored)),
+			ptr: p.NewAddr + f.entry,
+		})
 	}
 	// Folded functions leave several FDEs with one initial_location; the
 	// linker indexes only the first of them in .eh_frame order.
-	sorted := slices.Clone(fdes)
-	slices.SortStableFunc(sorted, func(a, b ehNewFDE) int { return cmpU(a.target, b.target) })
-	sorted = slices.CompactFunc(sorted, func(a, b ehNewFDE) bool { return a.target == b.target })
-	binary.LittleEndian.PutUint32(hdr[4:], uint32(int32(int64(p.NewAddr)-int64(p.HdrAddr+4))))
-	binary.LittleEndian.PutUint32(hdr[8:], uint32(len(sorted)))
-	for i, e := range sorted {
-		off := uint64(ehHdrPrefix + i*8)
-		if off+8 > p.HdrSize {
-			break
-		}
-		binary.LittleEndian.PutUint32(hdr[off:], uint32(int32(int64(e.target)-int64(p.HdrAddr))))
-		binary.LittleEndian.PutUint32(hdr[off+4:], uint32(int32(int64(e.entryAddr)-int64(p.HdrAddr))))
+	slices.SortStableFunc(entries, func(a, b ehHdrEntry) int { return cmpU(a.loc, b.loc) })
+	entries = slices.CompactFunc(entries, func(a, b ehHdrEntry) bool { return a.loc == b.loc })
+	if ehHdrPrefix+8*len(entries) > len(hdr) {
+		return false
 	}
-	return len(sorted)
+	hdr[0], hdr[1], hdr[2], hdr[3] = 1, ehPtrEncPCRelSData4, ehEncUData4, ehTableEncDataRel4
+	binary.LittleEndian.PutUint32(hdr[4:], uint32(int32(int64(p.NewAddr)-int64(p.HdrAddr+4))))
+	binary.LittleEndian.PutUint32(hdr[8:], uint32(len(entries)))
+	for i, e := range entries {
+		off := ehHdrPrefix + i*8
+		binary.LittleEndian.PutUint32(hdr[off:], uint32(int32(int64(e.loc)-int64(p.HdrAddr))))
+		binary.LittleEndian.PutUint32(hdr[off+4:], uint32(int32(int64(e.ptr)-int64(p.HdrAddr))))
+	}
+	fill(hdr[ehHdrPrefix+8*len(entries):], 0)
+	return true
+}
+
+// ehHdrEntry is one row of the index: the function an FDE describes and the
+// FDE's own address.
+type ehHdrEntry struct{ loc, ptr uint64 }
+
+// ehFrameHdrDerivable is the encoder's check that the rule holds on this
+// target. Nothing is masked unless rebuilding the section from the target's
+// own .eh_frame reproduces the target's own bytes.
+func ehFrameHdrDerivable(target []byte, p ehFramePlan) bool {
+	if p.HdrSize == 0 || p.HdrOff+p.HdrSize > uint64(len(target)) || p.NewOff+p.NewSize > uint64(len(target)) {
+		return false
+	}
+	want := target[p.HdrOff : p.HdrOff+p.HdrSize]
+	got := make([]byte, len(want))
+	return buildEhFrameHdr(got, target[p.NewOff:p.NewOff+p.NewSize], p) && bytes.Equal(got, want)
+}
+
+// hdrPlan is the eh_frame geometry of a plan that says .eh_frame_hdr is
+// rebuilt after the residual, or false.
+func hdrPlan(planb []byte) (ehFramePlan, bool) {
+	cp, err := parsePlanStreams(planb)
+	if err != nil || len(cp.EhFrame) == 0 {
+		return ehFramePlan{}, false
+	}
+	p, err := unmarshalEhFramePlan(cp.EhFrame)
+	if err != nil || !p.HdrExact {
+		return ehFramePlan{}, false
+	}
+	return p, true
+}
+
+// MaskResidual implements presage.Finaliser: the prediction the residual is
+// priced against already holds the target's .eh_frame_hdr, so the section
+// costs nothing. The hashed prediction is the unmasked one.
+func (Module) MaskResidual(planb, pred, target []byte) []byte {
+	p, ok := hdrPlan(planb)
+	if !ok || p.HdrOff+p.HdrSize > uint64(len(pred)) || p.HdrOff+p.HdrSize > uint64(len(target)) {
+		return pred
+	}
+	masked := slices.Clone(pred)
+	copy(masked[p.HdrOff:p.HdrOff+p.HdrSize], target[p.HdrOff:p.HdrOff+p.HdrSize])
+	return masked
+}
+
+// Finalise implements presage.Finaliser: rebuild the index over the
+// corrected .eh_frame, which is exact where the prediction was a guess.
+func (Module) Finalise(planb, out []byte) error {
+	p, ok := hdrPlan(planb)
+	if !ok {
+		return nil
+	}
+	if p.HdrOff+p.HdrSize > uint64(len(out)) || p.NewOff+p.NewSize > uint64(len(out)) {
+		return corrupt(errors.New("eh_frame plan exceeds the output"))
+	}
+	if !buildEhFrameHdr(out[p.HdrOff:p.HdrOff+p.HdrSize], out[p.NewOff:p.NewOff+p.NewSize], p) {
+		return corrupt(errors.New("the plan says to rebuild .eh_frame_hdr, but the corrected .eh_frame does not index into it"))
+	}
+	return nil
 }
 
 func applyEhFrame(out, old []byte, ep equivalencePlan, p ehFramePlan, oldSecs sectionMap, lookup func(uint64) x86.Target, extentOf func(uint64) (uint64, uint64, bool)) ehFrameStats {
-	mapper := newSourceEquivalenceMapper(ep)
-	st, placed := retargetEhFrame(out, old, ep, p, oldSecs, mapper, lookup, extentOf)
-	st.HdrEntries = regenerateEhFrameHdr(out, p, placed)
-	return st
+	return retargetEhFrame(out, old, ep, p, oldSecs, newSourceEquivalenceMapper(ep), lookup, extentOf)
 }
