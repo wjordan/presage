@@ -8,7 +8,11 @@ placed by cursor), the Go rows
 on 2026-08-31 (derived function map, displacement columns, compact CM coder
 over correction and plan streams, parallel decode) and re-confirmed
 unchanged at v6; baseline columns measured 2026-08-29. All on this machine
-unless a source doc is named. All sizes in bytes. The resource table's
+unless a source doc is named. The as-shipped prometheus row — upstream's own
+release binaries, both sides go1.26.5, rather than the go1.27 rebuild the
+other prometheus row uses — has all five columns measured 2026-09-01 at
+container v6, tool versions as listed under the resource table. All sizes in
+bytes. The resource table's
 C++ rows predate v6; at v6 the stronger coder costs apply time (libxul
 1.73 s and Chrome 3.06 s single runs under load 10, both under the 3.84 s
 Zucchini bar).
@@ -19,6 +23,7 @@ Zucchini bar).
 |---|---|---|---:|
 | one-line change | `bench/out/bin127/v1-F2` | `v2c-F2` | 29,995,271 |
 | prometheus patch release | `corpus127/prometheus/3.13.1` | `3.13.2` | 93,741,283 |
+| prometheus as shipped | `corpus/prometheus/3.13.1/prometheus.stripped` | `3.13.2/prometheus.stripped` | 97,577,304 |
 | Chrome | `chrome-151.0.7922.169` | `.173` | 291,290,440 |
 | libxul | `libxul-154.0.so` | `libxul-154.0.1.so` | 185,738,000 |
 
@@ -41,7 +46,7 @@ presage diff -symbols ~/.cache/presage-pairs/libxul-154.0.funcs,~/.cache/presage
 ```
 
 Encoder trial pricing uses a zstd proxy above a 128 MiB target and the real
-compressor below it (`PRESAGE_SIZE_PROXY` overrides); the prometheus row is
+compressor below it (`PRESAGE_SIZE_PROXY` overrides); both prometheus rows are
 exact-priced by that default. The harness's own best on these pairs, with the
 same matcher and two `xz -9e` streams, is
 2,617,700 / 3,632,264; the Zucchini-stream runs the earlier drafts of this
@@ -69,12 +74,20 @@ around 40% on the smaller pairs. Earlier drafts of the README quoted
 |---|---:|---:|---:|---:|---:|
 | one-line change, 30 MB | 1,100 | 173,060 | 150,475 | 1,390,889 | 538,493 |
 | prometheus 3.13.1 → 3.13.2 | 74,636 | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
+| prometheus 3.13.1 → 3.13.2 as shipped | 161,508 | 3,012,208 | 2,714,204 | 11,238,692 | 8,279,163 |
 | Chrome 151.0.7922.169 → .173 | 2,305,394 | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
 | libxul 154.0 → 154.0.1 | 2,148,134 | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
 
 Two checks that the rows are scoped consistently: `bsdiff` on the one-line
 pair reproduces `go-module-results.md`'s 150,475 exactly, and the ordering
 bsdiff < xdelta3 < zstd `--patch-from` holds on all four rows.
+
+The two prometheus rows are the same release pair from two toolchains. Both
+are claimed by the `go` module; the go1.26.5 pair carries a larger residual
+because the layout prediction is less exact one release back from the
+toolchain the module was written against. `research/toolchain-skew.md` has the
+breakdown; the 2,137,152 it quotes for this pair predates the module reading
+more than one Go release.
 
 ## Resource comparison
 
