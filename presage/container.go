@@ -42,7 +42,11 @@ const Magic = "PSG1"
 // .eh_frame_hdr after the residual (presage.Finaliser). A stream count is
 // not self-announcing -- an older build would read the ninth stream's
 // length as trailing plan data -- so the refusal has to be up front.
-const Version = 6
+//
+// 7: the ELF module's plan gains a tenth stream, the operand-field
+// correction over the scalar immediate and displacement fields the field
+// fix does not write. A stream count is not self-announcing, as above.
+const Version = 7
 
 // Header flags.
 const (

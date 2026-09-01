@@ -40,10 +40,11 @@ var pairs = []pair{
 		new:     home(".cache", "presage-chrome-zucchini", "chrome-151.0.7922.173"),
 		oldSyms: home(".cache", "presage-chrome-zucchini", "symbols-151.0.7922.169", "debug-info", "chrome.debug"),
 		newSyms: home(".cache", "presage-chrome-zucchini", "symbols-151.0.7922.173", "debug-info", "chrome.debug"),
-		// parity is the measured container-v6 patch with the compact CM model
-		// over bit-history states, balanced terminal compression and
-		// cursor-placed .rodata tables, a ratchet against regression.
-		parity: 2305394, product: 2634264,
+		// parity is the measured container-v7 patch with the compact CM model
+		// over bit-history states, balanced terminal compression,
+		// cursor-placed .rodata tables and the operand-field correction, a
+		// ratchet against regression.
+		parity: 2257676, product: 2634264,
 	},
 	{
 		name:    "libxul-154.0-154.0.1",

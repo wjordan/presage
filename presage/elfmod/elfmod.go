@@ -49,16 +49,16 @@ func (Module) ID() byte     { return ModuleELF }
 func (Module) Name() string { return "elf" }
 func (Module) Exact() bool  { return true }
 
-// planStreams is the plan's wire form: nine uvarint-length-prefixed
+// planStreams is the plan's wire form: ten uvarint-length-prefixed
 // streams in a fixed order, an absent layer being an empty stream
 // (elf-module.md §2).
 type planStreams struct {
-	Equivalences, Structure, Choices, Reloc, EhFrame, RoData, Fields, Dwarf, Relr []byte
+	Equivalences, Structure, Choices, Reloc, EhFrame, RoData, Fields, Dwarf, Relr, OpField []byte
 }
 
 func (p planStreams) marshal() []byte {
 	var b []byte
-	for _, s := range [][]byte{p.Equivalences, p.Structure, p.Choices, p.Reloc, p.EhFrame, p.RoData, p.Fields, p.Dwarf, p.Relr} {
+	for _, s := range [][]byte{p.Equivalences, p.Structure, p.Choices, p.Reloc, p.EhFrame, p.RoData, p.Fields, p.Dwarf, p.Relr, p.OpField} {
 		b = appendStream(b, s)
 	}
 	return b
@@ -71,7 +71,7 @@ func parsePlanStreams(packed []byte) (planStreams, error) {
 	}
 	r := &planReader{b: b}
 	var p planStreams
-	for _, s := range []*[]byte{&p.Equivalences, &p.Structure, &p.Choices, &p.Reloc, &p.EhFrame, &p.RoData, &p.Fields, &p.Dwarf, &p.Relr} {
+	for _, s := range []*[]byte{&p.Equivalences, &p.Structure, &p.Choices, &p.Reloc, &p.EhFrame, &p.RoData, &p.Fields, &p.Dwarf, &p.Relr, &p.OpField} {
 		*s = r.stream().b
 	}
 	if !r.done() {
@@ -379,6 +379,26 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 		}
 		if !fr.done() {
 			return nil, st, errors.New("field stream does not match the code windows")
+		}
+	}
+	// The operand-field correction reads the fields the field fix does not
+	// write, so it runs after it over the same walk of the same bytes.
+	if len(cp.OpField) != 0 {
+		or := &planReader{b: cp.OpField}
+		for i, w := range ep.Windows {
+			b := or.stream()
+			if or.err != nil {
+				return nil, st, errors.New("invalid operand field stream")
+			}
+			if len(b.b) == 0 {
+				continue
+			}
+			if _, err := applyOpField(bytesOf(out, w.New), structures[i].Maps, b.b); err != nil {
+				return nil, st, err
+			}
+		}
+		if !or.done() {
+			return nil, st, errors.New("operand field stream does not match the code windows")
 		}
 	}
 	return out, st, nil

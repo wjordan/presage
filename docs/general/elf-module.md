@@ -7,9 +7,10 @@ module behind the `Module` seam of `presage/module.go`, so that
 non-Go ELF x86-64 image end to end. Design authority: `SPEC.md` §4–6, §10
 item 3; template: `presage/gomod` (`presage-core.md` §4, §7).*
 
-Container v6 uses the compact CM model over bit-history states, balanced terminal compression, the
+Container v7 uses the compact CM model over bit-history states, balanced terminal compression, the
 RELR slot layer, exact FDE CIE pointers, an exactly rebuilt
-`.eh_frame_hdr` and cursor-placed `.rodata` switch tables. Current end-to-end
+`.eh_frame_hdr`, cursor-placed `.rodata` switch tables and the operand-field
+correction. Current end-to-end
 sizes and resource measurements are in `baselines.md`; the status sections
 below retain the measurements that motivated each layer.
 
@@ -86,6 +87,94 @@ dense form carries is encoder-side, where `packPlan` offers every column over
 4 KB to the CM coder and spends about a tenth of a second coding 144 KB of
 zeros it will never carve. Dropped; the format is unchanged and
 `presage.Version` stays 6.
+
+## Status (2026-09-01d): the operand-field correction
+
+The field fix below corrects four-byte PC-relative displacements, because
+those are the fields the retargeter writes. Everything else inside an
+instruction it hands to the byte correction, and §11.4 of
+`chrome-elf-whole-image.md` measured what that costs: 31.1% of Chrome's
+`.text` residual sits in instructions the prediction placed on the right
+boundary, with the right opcode and the right length, and filled in with the
+wrong value. §11.4's own probe priced the scalar half of that at −53,782.
+
+`presage/elfmod/opfield.go` ships it. The domain is every instruction the
+length decoder finds in a mapped body of the prediction, split into one list
+per **field class** -- immediate, branch displacement, and a displacement based
+on rsp/rbp, on another register, on rip, or on nothing -- and an entry is a
+gap in one of those lists plus one signed varint. The decoder holds the
+prediction and the map before any of this is applied, so it enumerates the
+same lists; field values do not change instruction lengths, so the lists are
+the same before and after the layer rewrites one. Two columns per class, an
+index and a value, carved into the plan packer like every other column.
+`presage.Version` is 7: a stream count is not self-announcing, so the tenth
+stream has to be refused up front by an older build.
+
+Three things decide what it is worth.
+
+**The field layout comes from the length decoder, not from a disassembler.**
+`delta/x86/lendec.go` already located the displacement and read the immediate
+width on its way to the length; `Fields`, `FieldsAt` and `WalkFields` return
+what it passed over instead of discarding it, and the walk costs one decode
+per instruction rather than a walk plus a lookup. The probe used
+`x86asm`, whose apply cost §11.4 measured at 1.74 s against the length
+decoder's 0.14 s. The price of that is coverage: where the tables defer --
+vector prefixes above all -- the instruction has no locatable field and joins
+no domain, which is why this finds 63,684 rsp/rbp corrections where the probe
+found 69,083.
+
+**An entry exists only where the fields explain the whole instruction.** The
+encoder writes the target's field bytes into the prediction's instruction and
+keeps the entry only if the result *is* the target, byte for byte. An
+instruction that differs anywhere else is a different instruction, not a
+different value, and belongs to the residual. Nothing on the decode side reads
+the target or re-decodes anything: it adds the value to the field and writes it
+back.
+
+**Each class prices itself, and most of them lose.** A class ships only where
+its two columns, compressed, cost less than the wrong bytes they take out of
+the residual -- `.rodata`'s rule for a cursor correction, with the column
+priced the way it ships. On the corpus:
+
+| class | Chrome entries | column | wrong bytes | libxul entries | column | wrong bytes |
+|---|---:|---:|---:|---:|---:|---:|
+| immediate | 48,919 | 86,335 | **93,560** ✓ | 12,145 | 29,710 | 16,167 ✗ |
+| rsp/rbp displacement | 63,684 | 48,830 | **67,806** ✓ | 127,589 | 91,786 | **141,221** ✓ |
+| branch displacement | 25,217 | 44,872 | 25,217 ✗ | 8,287 | 15,974 | 8,287 ✗ |
+| other-register displacement | 4,802 | 8,435 | 5,614 ✗ | 2,264 | 5,450 | 2,682 ✗ |
+| baseless displacement | 32 | 87 | 34 ✗ | 11 | 44 | 11 ✗ |
+| rip displacement | 0 | — | — | 0 | — | — |
+
+The rip class is empty by construction: the field fix has already made every
+four-byte PC-relative displacement in a mapped body exact, so what reaches
+this layer is the fields it does not name. The branch class is what is left of
+them -- one-byte `rel8` displacements -- and every one of its entries fixes
+exactly one byte, which no column can carry for less. The immediate class
+carries the new *value* and not the difference, because an immediate that
+changed is a constant and not an offset: on Chrome that is worth 15,490 over
+the difference basis, and on libxul it is still not enough. Forcing every
+class on regardless costs Chrome 692 bytes over letting them price
+themselves, so the rule is not merely conservative.
+
+| pair | patch before | after | mispredicted `.text` | opfield stream | apply |
+|---|---:|---:|---:|---:|---:|
+| Chrome 151 .169 → .173 | 2,305,394 | **2,257,676** (−47,718) | 1,219,717 → 1,058,351 | 325,279 B raw | 3.06 → 3.29 s |
+| libxul 154.0 → 154.0.1 | 2,148,134 | **2,092,567** (−55,567) | −141,221 | 272,804 B raw | 1.80 → 1.83 s |
+| prometheus 3.13.1 → 3.13.2 | 74,636 | 74,636 (0) | — | — | — |
+
+Applied and `cmp`-verified through the CLI on all three. The plan grows by
+208,424 on Chrome and the residual falls by 173,018; the terminal compressor
+turns that into −47,718, 2.1% of the patch. Encode is 29.2 → 32.2 s on Chrome
+and unchanged on libxul; apply pays about 0.3 s on Chrome for the walk that
+enumerates the domain -- one pass over 225 MB of `.text` to count the
+per-class lists, and a second that touches only the bodies holding an entry,
+112,603 of 925,344 -- at no cost in peak RSS (673,656 → 660,468 KiB).
+
+The register and structural classes the same domain could carry are not here
+and should not be: §11.4 measured them as a net loss, because a modrm byte
+three bits from the prediction's is exactly what the residual coder's
+prediction context codes cheaply, while a column replacing it would have no
+prediction under it.
 
 ## Status (2026-09-01c): `.rodata` tables placed by cursor
 
@@ -378,7 +467,8 @@ the old image and what from the plan.
 | 8 | `.rodata` switch tables: enumerate candidate spans in the old section by signature (`roDataSpans`), apply only the variants whose `Keep` bit is set, retarget entries through the pointer oracle; a span the plan lists in `Seg` is segmented into its per-function tables from the old image and placed by running cursor plus one correction each, instead of by projection | `rodata.go:175, 208, 241, 361, 387` | old `.rodata`, `Keep` bits, `Seg`/`Cursor` | `.rodata` |
 | 9 | retarget `.text`: walk references in every mapped body of the laid prediction, resolve each field's old target through the **image oracle** (projection first inside `.text`), rewrite the displacement | `equivalence.go:616` | — | `.text` fields |
 | 10 | per-function choice: structural prediction of old `.text` relocated through `addressLookup.target`, copy chosen bodies over the retargeted ones | `image.go:158–175`, `plan.go:669` | old `.text`, choice bits | chosen bodies |
-| 11 | field fix, last: enumerate 4-byte displacement sites by walking the finished `.text`; apply address remaps (index into the sorted distinct-target domain + shift), then per-field deltas | `fieldfix.go:245, 42, 119` | plan columns | `.text` fields |
+| 11 | field fix: enumerate 4-byte displacement sites by walking the finished `.text`; apply address remaps (index into the sorted distinct-target domain + shift), then per-field deltas | `fieldfix.go:245, 42, 119` | plan columns | `.text` fields |
+| 12 | operand-field correction, last: walk the same bodies again, count each field class's domain, and add the plan's signed value to the field an entry names | `opfield.go:108, 306`, `lendec.go:69` | plan columns | `.text` immediate and displacement fields |
 
 Then the core: `applyResidual` → `delta.ApplyFlaggedCorrection` (positional,
 `Exact() == true`), prediction hash check, `Finalise` — rebuild
@@ -389,25 +479,29 @@ check (`presage/codec.go:157`).
 Stages 5–8 are each conditional on their sub-plan being non-empty, exactly as
 the harness treats every sub-plan as optional (`image.go:63, 103, 114, 143`).
 Stage 10 is conditional on a non-empty choice stream; stage 11 on a non-empty
-field stream. Stage 1 with zero mappings (no symbols, §3.4) leaves `Maps`
-empty: stages 2, 9, 10, 11 take their no-map branches (`equivalence.go:269`
-`pred == nil`, `:616` whole-section walk, `fieldfix.go:42` `len(maps)==0`).
+field stream; stage 12 on a non-empty operand-field stream, which is what a
+pair whose classes all price out ships. Stage 1 with zero mappings (no
+symbols, §3.4) leaves `Maps` empty: stages 2, 9, 10, 11 take their no-map
+branches (`equivalence.go:269` `pred == nil`, `:616` whole-section walk,
+`fieldfix.go:42` `len(maps)==0`), and stage 12 has no bodies to enumerate.
 
 **Layer order is not negotiable.** §13.1 of `chrome-elf-whole-image.md`
-measured the alternatives; and stage 11 names fields by position in a walk
-of the finished prediction, so every stage that can move a `.text` byte runs
-before it.
+measured the alternatives; and stages 11 and 12 name fields by position in a
+walk of the finished prediction, so every stage that can move a `.text` byte
+runs before them. Stage 12 runs after stage 11 and enumerates what stage 11
+wrote: the encoder replays the field fix through the decoder's own apply
+before it looks for operand fields, so both sides read the same bytes.
 
 ## 2. Wire format
 
 The module's plan is the harness's combined plan (`equivalence.go:686`)
-re-cut as a fixed sequence of nine uvarint-length-prefixed streams, no
+re-cut as a fixed sequence of ten uvarint-length-prefixed streams, no
 magic (the container's region header names the module), no "optional
 trailing streams" convention (that existed to keep old measurements
 byte-comparable; an absent layer is an empty stream):
 
 ```
-plan := eq structure choices reloc ehframe rodata fields dwarf relr
+plan := eq structure choices reloc ehframe rodata fields dwarf relr opfield
         each: uvarint(len) bytes
 ```
 
@@ -425,6 +519,7 @@ changes listed.
 | `ehframe` | nine uvarints of geometry then the `HdrExact` byte (`ehframe.go:49`) | geometry, one flag | FDE list, `.eh_frame_hdr` contents | the flag is new: it says `Finalise` rebuilds the header after the residual |
 | `rodata` | eight uvarints of geometry then three streams, `Keep Seg Cursor` (`rodata.go:53`) | geometry, one bit per (span, variant); the segmented spans as ascending index deltas; one signed varint per table of those spans | candidate spans, their segmentation | `Seg`/`Cursor` are new. `Keep` stays a dense bitmap: it is 99.98% zero and compresses to 190 B on libxul and 1,384 on Chrome, which every sparse form measured ties or loses to (2026-09-01e) |
 | `fields` | streams `RemapIndex RemapShift FieldIndex FieldDelta` (`fieldfix.go:89`) | | site list, remap domain | none |
+| `opfield` | one stream per code window: a class mask byte then, per class the mask names, an index column of gaps in that class's field domain and a column of signed values (`opfield.go:289`) | which classes ship, and their two columns | the per-class field domains, from a walk of the prediction | new |
 | `relr` | two uvarints: the old `.relr.dyn`'s offset and size (`relr.go:30`) | geometry | the slot list, where each slot lands, what it points at | new |
 | `dwarf` | `presage/dwarf` `Plan.Marshal()`; the runs are *not* carried (`Plan.MarshalRuns`) — the decoder clips the whole-image equivalences per section (`dwarf.go:48`) exactly as the harness does | | | none |
 

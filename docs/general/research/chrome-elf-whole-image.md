@@ -1460,7 +1460,17 @@ recompiled code, and §10's verdict is confirmed rather than merely asserted.
   scalar classes: **−53,782, 2.4% of the patch**, the largest item on this
   shelf; a port needs `delta/x86/lendec.go` to report the immediate and
   displacement field layout it already computes (the `x86asm` walk this
-  probe used is 1.74 s of apply, the length decoder's 0.14 s). Unbuilt.
+  probe used is 1.74 s of apply, the length decoder's 0.14 s).
+
+  *Built 2026-09-01* as `presage/elfmod/opfield.go`, on the length decoder's
+  own field layout (`x86.Fields`, `WalkFields`) and with each class priced
+  against the residual bytes it removes. Chrome **−47,718**, libxul
+  **−55,567**; two classes ship on Chrome and one on libxul, and the rip
+  class is empty because the field fix already made those exact. The 6,064
+  short of the probe on Chrome is coverage: where the length tables defer --
+  vector prefixes above all -- an instruction has no locatable field, which
+  costs 5,399 of the probe's 69,083 rsp/rbp entries. `elf-module.md`
+  "Status (2026-09-01d)" has the per-class ledger.
 - **Extending map coverage**: ≤91,000, and the map extension is itself plan.
 - **A prediction-conditioned correction coder**: the predicted byte is worth
   0.41 bits/byte beyond ordinary literal context (out[i−1] alone costs 916,518;

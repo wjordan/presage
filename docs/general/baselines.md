@@ -1,21 +1,22 @@
 # The README table: what each number is
 
 Provenance for the headline comparison in `README.md`. presage column
-measured at container v6: the C++ rows on 2026-09-01 (RELR relocation slots,
+measured at container v7: the C++ rows on 2026-09-01 (RELR relocation slots,
 exact FDE `cie_ptr`, `.eh_frame_hdr` rebuilt after the residual, the CM
 coder over bit-history states with an SSE chain, `.rodata` switch tables
-placed by cursor), the Go rows
+placed by cursor, the operand-field correction), the Go rows
 on 2026-08-31 (derived function map, displacement columns, compact CM coder
 over correction and plan streams, parallel decode) and re-confirmed
-unchanged at v6; baseline columns measured 2026-08-29. All on this machine
+unchanged at v7; baseline columns measured 2026-08-29. All on this machine
 unless a source doc is named. The as-shipped prometheus row — upstream's own
 release binaries, both sides go1.26.5, rather than the go1.27 rebuild the
 other prometheus row uses — has all five columns measured 2026-09-01 at
-container v6, tool versions as listed under the resource table. All sizes in
+container v6 and unchanged at v7, tool versions as listed under the resource
+table. All sizes in
 bytes. The resource table's
-C++ rows predate v6; at v6 the stronger coder costs apply time (libxul
-1.73 s and Chrome 3.06 s single runs under load 10, both under the 3.84 s
-Zucchini bar).
+C++ rows predate v6; at v7 the stronger coder and the operand-field walk cost
+apply time (libxul 1.83 s and Chrome 3.29 s, medians of
+three, both under the 3.84 s Zucchini bar).
 
 ## The pairs
 
@@ -75,8 +76,8 @@ around 40% on the smaller pairs. Earlier drafts of the README quoted
 | one-line change, 30 MB | 1,100 | 173,060 | 150,475 | 1,390,889 | 538,493 |
 | prometheus 3.13.1 → 3.13.2 | 74,636 | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
 | prometheus 3.13.1 → 3.13.2 as shipped | 161,508 | 3,012,208 | 2,714,204 | 11,238,692 | 8,279,163 |
-| Chrome 151.0.7922.169 → .173 | 2,305,394 | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
-| libxul 154.0 → 154.0.1 | 2,148,134 | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
+| Chrome 151.0.7922.169 → .173 | 2,257,676 | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
+| libxul 154.0 → 154.0.1 | 2,092,567 | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
 
 Two checks that the rows are scoped consistently: `bsdiff` on the one-line
 pair reproduces `go-module-results.md`'s 150,475 exactly, and presage <

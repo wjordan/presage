@@ -3,6 +3,8 @@ package x86
 import (
 	"math/rand"
 	"testing"
+
+	"golang.org/x/arch/x86/x86asm"
 )
 
 // referenceStep is the oracle: exactly what step's defer branch computes.
@@ -135,4 +137,149 @@ func TestStepCorpus(t *testing.T) {
 		i += gl
 	}
 	t.Logf("%d positions, %d deferred (%.3f%%)", positions, deferred, 100*float64(deferred)/float64(positions))
+}
+
+// fieldMask is the low bits of a field of the given width.
+func fieldMask(width int) uint64 {
+	if width == 8 {
+		return ^uint64(0)
+	}
+	return uint64(1)<<(8*width) - 1
+}
+
+func fieldValue(b []byte, width int) uint64 {
+	var v uint64
+	for i := width - 1; i >= 0; i-- {
+		v = v<<8 | uint64(b[i])
+	}
+	return v
+}
+
+// TestFieldsDifferential checks the exported field layout against x86asm: a
+// field the tables locate must hold the value x86asm reads out of that
+// instruction, and a displacement's base class must be the register x86asm
+// says the memory operand is based on. Locating a field one byte off, or
+// classing r13 as rbp, would round-trip through a rewrite and still ship the
+// wrong bytes, so the check is against the meaning and not the arithmetic.
+func TestFieldsDifferential(t *testing.T) {
+	buf := make([]byte, 1<<20)
+	rand.New(rand.NewSource(11)).Read(buf)
+	var seenBase [4]int
+	imms, rels, disps, unnamed := 0, 0, 0, 0
+	for i := range buf {
+		code := buf[i:min(i+18, len(buf))]
+		f, ok := FieldsAt(code)
+		if !ok {
+			continue
+		}
+		inst, err := decode(code)
+		if err != nil || inst.Len != f.Len {
+			continue // the one-byte pseudo-instruction of an invalid opcode
+		}
+		if f.ImmLen != 0 {
+			mask := fieldMask(f.ImmLen)
+			want := fieldValue(code[f.ImmOff:], f.ImmLen) & mask
+			found := false
+			for _, a := range inst.Args {
+				switch v := a.(type) {
+				case x86asm.Imm:
+					found = found || !f.Rel && uint64(v)&mask == want
+				case x86asm.Rel:
+					found = found || f.Rel && uint64(int64(v))&mask == want
+				case x86asm.Mem:
+					// The moffs forms (A0-A3) carry an absolute address in the
+					// trailing constant, where the table reports the immediate.
+					found = found || !f.Rel && uint64(v.Disp)&mask == want
+				}
+			}
+			if !found {
+				t.Fatalf("% x: immediate at %d/%d reads %#x, %v says %v", code[:inst.Len], f.ImmOff, f.ImmLen, want, inst.Op, inst.Args)
+			}
+			if f.Rel {
+				rels++
+			} else {
+				imms++
+			}
+		}
+		if f.DispLen == 0 {
+			continue
+		}
+		mask := fieldMask(f.DispLen)
+		want := fieldValue(code[f.DispOff:], f.DispLen) & mask
+		var mem x86asm.Mem
+		found, hasMem := false, false
+		for _, a := range inst.Args {
+			m, ok := a.(x86asm.Mem)
+			if !ok {
+				continue
+			}
+			hasMem = true
+			if uint64(m.Disp)&mask == want {
+				mem, found = m, true
+				break
+			}
+		}
+		if !hasMem {
+			// The mod-ignored forms -- 0F 20..26, the moves to and from the
+			// control, debug and test registers -- consume a modrm byte and
+			// whatever it says the displacement is, but name no memory operand.
+			// Their bytes are still the instruction's, so a rewrite of them is
+			// still a rewrite of it; there is nothing to check the value against.
+			unnamed++
+			continue
+		}
+		if !found {
+			t.Fatalf("% x: displacement at %d/%d reads %#x, %v says %v", code[:inst.Len], f.DispOff, f.DispLen, want, inst.Op, inst.Args)
+		}
+		base := BaseOther
+		switch mem.Base {
+		case 0:
+			base = BaseAbs
+		case x86asm.RIP, x86asm.EIP:
+			base = BaseRIP
+		case x86asm.RSP, x86asm.RBP:
+			base = BaseSP
+		}
+		if base != f.Base {
+			t.Fatalf("% x: base class %d, x86asm says %v (%d)", code[:inst.Len], f.Base, mem.Base, base)
+		}
+		seenBase[f.Base]++
+		disps++
+	}
+	for b, n := range seenBase {
+		if n == 0 {
+			t.Fatalf("base class %d never occurred; the sweep does not cover it", b)
+		}
+	}
+	if unnamed*20 > disps {
+		t.Fatalf("%d of %d displacements had no memory operand to check against", unnamed, disps)
+	}
+	t.Logf("checked %d immediates, %d branch displacements, %d displacements %v (%d unnamed)", imms, rels, disps, seenBase, unnamed)
+}
+
+// TestWalkFieldsBoundaries checks WalkFields places instruction boundaries
+// exactly where WalkInsns does, and reports what FieldsAt would have said at
+// each of them. The two walks are the field layer's encoder and decoder
+// halves; a boundary they disagreed on would shift a whole domain.
+func TestWalkFieldsBoundaries(t *testing.T) {
+	buf := make([]byte, 1<<20)
+	rand.New(rand.NewSource(13)).Read(buf)
+	var want []Insn
+	WalkInsns(buf, func(in Insn) { want = append(want, in) })
+	i := 0
+	WalkFields(buf, func(start int, f Fields, ok bool) {
+		if i >= len(want) {
+			t.Fatalf("WalkFields visits %d instructions, WalkInsns %d", i+1, len(want))
+		}
+		if want[i].Start != start || want[i].Length != f.Len {
+			t.Fatalf("instruction %d at %d/%d, WalkInsns says %d/%d", i, start, f.Len, want[i].Start, want[i].Length)
+		}
+		if g, gok := FieldsAt(buf[start:]); gok != ok || ok && g != f {
+			t.Fatalf("instruction %d at %d: walk says %v/%v, FieldsAt %v/%v", i, start, f, ok, g, gok)
+		}
+		i++
+	})
+	if i != len(want) {
+		t.Fatalf("WalkFields visits %d instructions, WalkInsns %d", i, len(want))
+	}
 }

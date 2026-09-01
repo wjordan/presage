@@ -487,7 +487,7 @@ func planColumns(plan []byte) []planColumn {
 	top := &planWalk{b: plan}
 	eq, structure, choices, reloc := top.stream(), top.stream(), top.stream(), top.stream()
 	ehFrame, roData, fields, dwarf := top.stream(), top.stream(), top.stream(), top.stream()
-	relr := top.stream()
+	relr, opField := top.stream(), top.stream()
 	if !top.done() {
 		return nil
 	}
@@ -521,6 +521,10 @@ func planColumns(plan []byte) []planColumn {
 	// --- one field plan per code window.
 	for !fields.done() && !fields.bad {
 		walkFields(fields.stream(), add)
+	}
+	// --- one operand-field plan per code window.
+	for !opField.done() && !opField.bad {
+		walkOpField(opField.stream(), add)
 	}
 	// --- .rodata: the geometry, then the three decision columns.
 	for range 8 {
@@ -596,6 +600,23 @@ func walkStructure(s *planWalk, add planAdd) {
 	add(s.stream(), "point offset", ctxPair, i)
 	add(s.stream(), "point shift-delta", ctxPair, i)
 	// The range map is inline varints, not a stream: it stays where it is.
+}
+
+// walkOpField carves the per-class index and value columns of one window's
+// operand-field plan; the class mask says which are there.
+func walkOpField(s *planWalk, add planAdd) {
+	if s.bad || s.at >= len(s.b) {
+		return
+	}
+	mask := s.b[s.at]
+	s.skip(1)
+	for c := range nOpClass {
+		if mask&(1<<c) == 0 {
+			continue
+		}
+		i := add(s.stream(), "opfield idx["+opClassNames[c]+"]", ctxVarint, -1)
+		add(s.stream(), "opfield value["+opClassNames[c]+"]", ctxPair, i)
+	}
 }
 
 func walkFields(s *planWalk, add planAdd) {

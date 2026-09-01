@@ -38,17 +38,114 @@ const (
 	fSpec   = 1 << 7 // hand-written handler below
 )
 
+// Fields is where an instruction's operand fields sit: the displacement the
+// length decoder locates on its way past the modrm and SIB bytes, and the
+// immediate whose width it reads from the table. A width is zero where the
+// instruction has no field of that kind, and only widths a value can be read
+// from are reported (1, 2, 4 and 8 bytes).
+type Fields struct {
+	Len              int
+	DispOff, DispLen int
+	ImmOff, ImmLen   int
+	Base             uint8 // what the displacement is based on; only with DispLen != 0
+	Rel              bool  // the immediate is a branch displacement
+	pcOff, pcN       int   // the PC-relative field the reference walk reports
+}
+
+// Displacement bases. What a displacement is based on decides whether its
+// value is a frame offset, an address or a structure offset, so it is what a
+// correction layer over these fields classes on.
+const (
+	BaseAbs   uint8 = iota // a SIB form with no base register: the field is the address
+	BaseRIP                // mod=00 rm=101
+	BaseSP                 // rsp or rbp: a frame offset
+	BaseOther              // any other base register
+)
+
+// FieldsAt reports the operand-field layout of the instruction at the head of
+// code, and whether the table vouches for it. A caller that needs a field
+// located must drop the instruction where it does not: x86asm would answer,
+// but not from the tables the coding path walks with.
+func FieldsAt(code []byte) (Fields, bool) {
+	f, ok, handled := fastFields(code)
+	if !ok || !handled {
+		return Fields{}, false
+	}
+	return f, true
+}
+
+// WalkFields visits every instruction in code, in order, with the fields the
+// tables located in it; ok is false where they did not vouch for the
+// instruction, and it then has no locatable field. It places boundaries
+// exactly as WalkInsns does -- the same step, the same skip-a-byte recovery --
+// for one decode per instruction instead of a walk and a lookup.
+func WalkFields(code []byte, visit func(start int, f Fields, ok bool)) {
+	for i := 0; i < len(code); {
+		f, ok, handled := fastFields(code[i:])
+		if !handled {
+			inst, err := decode(code[i:])
+			if err != nil || inst.Len == 0 {
+				i++
+				continue
+			}
+			visit(i, Fields{Len: inst.Len}, false)
+			i += inst.Len
+			continue
+		}
+		if !ok {
+			i++
+			continue
+		}
+		visit(i, f, true)
+		i += f.Len
+	}
+}
+
+// memBase classes the base register of a memory form.
+func memBase(mod, rm, sib byte, hasSIB, rexB bool) uint8 {
+	base := rm
+	switch {
+	case hasSIB:
+		if mod == 0 && sib&7 == 5 {
+			return BaseAbs
+		}
+		base = sib & 7
+	case mod == 0 && rm == 5:
+		return BaseRIP
+	}
+	if !rexB && (base == 4 || base == 5) {
+		return BaseSP
+	}
+	return BaseOther
+}
+
+// setImm records an immediate of imm bytes ending the instruction, where its
+// width is one a value can be read from.
+func (f *Fields) setImm(imm int, rel bool) {
+	switch imm {
+	case 1, 2, 4, 8:
+		f.ImmOff, f.ImmLen, f.Rel = f.Len-imm, imm, rel
+	}
+}
+
 // fastStep decodes the head of code. handled reports whether the fast path
 // owns this byte sequence; when false the caller must consult x86asm. When
 // handled, (length, off, n, ok) mean exactly what a decode()+pcrelField pair
 // would have produced: ok false is the advance-one-byte outcome, n is 0 when
 // the instruction has no PC-relative field.
 func fastStep(code []byte) (length, off, n int, ok, handled bool) {
+	f, ok, handled := fastFields(code)
+	return f.Len, f.pcOff, f.pcN, ok, handled
+}
+
+// fastFields is that decode with the fields it passed over on the way to the
+// length kept rather than discarded.
+func fastFields(code []byte) (f Fields, ok, handled bool) {
 	i := 0
-	var has66, hasRep, hasSeg, hasLegacy, rexW bool
+	var has66, hasRep, hasSeg, hasLegacy, rexW, rexB bool
 	for {
 		if i >= len(code) || i >= 14 {
-			return 0, 0, 0, false, false
+			return Fields{}, false, false
 		}
 		switch code[i] {
 		case 0x66:
@@ -58,7 +155,7 @@ func fastStep(code []byte) (length, off, n int, ok, handled bool) {
 		case 0x2E, 0x36, 0x3E, 0x26, 0x64, 0x65:
 			hasSeg = true
 		case 0x67, 0xF0:
-			return 0, 0, 0, false, false // address-size & lock: defer
+			return Fields{}, false, false // address-size & lock: defer
 		default:
 			goto opcode
 		}
@@ -68,13 +165,13 @@ func fastStep(code []byte) (length, off, n int, ok, handled bool) {
 opcode:
 	b := code[i]
 	if i == 0 && (b == 0xC4 || b == 0xC5 || b == 0x62) {
-		return 0, 0, 0, false, false // vector prefix: defer
+		return Fields{}, false, false // vector prefix: defer
 	}
 	if b&0xF0 == 0x40 {
-		rexW = b&8 != 0
+		rexW, rexB = b&8 != 0, b&1 != 0
 		i++
 		if i >= len(code) {
-			return 0, 0, 0, false, false
+			return Fields{}, false, false
 		}
 		b = code[i]
 	}
@@ -82,7 +179,7 @@ opcode:
 	if b == 0x0F {
 		i++
 		if i >= len(code) {
-			return 0, 0, 0, false, false
+			return Fields{}, false, false
 		}
 		b = code[i]
 		switch b {
@@ -94,7 +191,7 @@ opcode:
 			}
 			i++
 			if i >= len(code) {
-				return 0, 0, 0, false, false
+				return Fields{}, false, false
 			}
 			b = code[i]
 		default:
@@ -103,12 +200,12 @@ opcode:
 	}
 	e := &lenTab[m][b]
 	if e.flags&fSpec != 0 {
-		return group3or11(code, i, b, has66, rexW, hasLegacy, hasRep, hasSeg)
+		return group3or11(code, i, b, has66, rexW, rexB, hasLegacy, hasRep, hasSeg)
 	}
 	if e.flags&fValid == 0 ||
 		hasRep && e.flags&fF2OK == 0 ||
 		hasSeg && e.flags&fSegOK == 0 {
-		return 0, 0, 0, false, false
+		return Fields{}, false, false
 	}
 	imm, rel := e.immPlain, e.relPlain
 	if rexW {
@@ -121,17 +218,18 @@ opcode:
 	}
 	i++
 	if e.flags&fModrm == 0 {
-		length = i + int(imm)
-		if length > len(code) || length > 15 {
-			return 0, 0, 0, false, false
+		f.Len = i + int(imm)
+		if f.Len > len(code) || f.Len > 15 {
+			return Fields{}, false, false
 		}
 		if rel > 0 {
-			off, n = i, int(rel)
+			f.pcOff, f.pcN = i, int(rel)
 		}
-		return length, off, n, true, true
+		f.setImm(int(imm), rel > 0)
+		return f, true, true
 	}
 	if i >= len(code) {
-		return 0, 0, 0, false, false
+		return Fields{}, false, false
 	}
 	modrm := code[i]
 	mod, reg, rm := modrm>>6, (modrm>>3)&7, modrm&7
@@ -144,13 +242,14 @@ opcode:
 	}
 	i++
 	var dispLen int
-	rip := false
+	var sib byte
+	hasSIB := false
 	if mod != 3 {
 		if rm == 4 {
 			if i >= len(code) {
-				return 0, 0, 0, false, false
+				return Fields{}, false, false
 			}
-			sib := code[i]
+			sib, hasSIB = code[i], true
 			i++
 			switch {
 			case mod == 1:
@@ -162,34 +261,36 @@ opcode:
 			switch {
 			case mod == 1:
 				dispLen = 1
-			case mod == 2:
+			case mod == 2, rm == 5:
 				dispLen = 4
-			case rm == 5:
-				dispLen, rip = 4, true
 			}
 		}
 	}
 	dispPos := i
 	i += dispLen
-	length = i + int(imm)
-	if length > len(code) || length > 15 {
-		return 0, 0, 0, false, false
+	f.Len = i + int(imm)
+	if f.Len > len(code) || f.Len > 15 {
+		return Fields{}, false, false
 	}
-	if rip && e.flags&fRipRel != 0 {
-		off, n = dispPos, 4
+	if dispLen != 0 {
+		f.DispOff, f.DispLen, f.Base = dispPos, dispLen, memBase(mod, rm, sib, hasSIB, rexB)
+		if f.Base == BaseRIP && e.flags&fRipRel != 0 {
+			f.pcOff, f.pcN = dispPos, 4
+		}
 	}
-	return length, off, n, true, true
+	f.setImm(int(imm), false)
+	return f, true, true
 }
 
 // invalidOutcome is what x86asm does with an unrecognized opcode: with any
 // legacy prefix present it emits the first prefix byte as a one-byte
 // pseudo-instruction; bare, it errors and the walk advances one byte. The
 // generator verified this shape for every invalid table row.
-func invalidOutcome(hasLegacy bool) (length, off, n int, ok, handled bool) {
+func invalidOutcome(hasLegacy bool) (Fields, bool, bool) {
 	if hasLegacy {
-		return 1, 0, 0, true, true
+		return Fields{Len: 1}, true, true
 	}
-	return 0, 0, 0, false, true
+	return Fields{}, false, true
 }
 
 // group3or11 handles the four opcodes whose immediate depends on modrm.reg:
@@ -197,13 +298,13 @@ func invalidOutcome(hasLegacy bool) (length, off, n int, ok, handled bool) {
 // (group 11: MOV carries one, and mod=11 reg=7 rm=0 hides XABORT/XBEGIN --
 // XBEGIN's immediate being a branch displacement). i indexes the opcode byte.
 // The differential tests sweep this space exhaustively against x86asm.
-func group3or11(code []byte, i int, op byte, has66, rexW, hasLegacy, hasRep, hasSeg bool) (length, off, n int, ok, handled bool) {
+func group3or11(code []byte, i int, op byte, has66, rexW, rexB, hasLegacy, hasRep, hasSeg bool) (f Fields, ok, handled bool) {
 	if hasRep || hasSeg {
-		return 0, 0, 0, false, false // unprobed combinations: defer
+		return Fields{}, false, false // unprobed combinations: defer
 	}
 	i++
 	if i >= len(code) {
-		return 0, 0, 0, false, false
+		return Fields{}, false, false
 	}
 	modrm := code[i]
 	mod, reg, rm := modrm>>6, (modrm>>3)&7, modrm&7
@@ -242,13 +343,14 @@ func group3or11(code []byte, i int, op byte, has66, rexW, hasLegacy, hasRep, has
 	}
 	i++
 	var dispLen int
-	rip := false
+	var sib byte
+	hasSIB := false
 	if mod != 3 {
 		if rm == 4 {
 			if i >= len(code) {
-				return 0, 0, 0, false, false
+				return Fields{}, false, false
 			}
-			sib := code[i]
+			sib, hasSIB = code[i], true
 			i++
 			switch {
 			case mod == 1:
@@ -260,26 +362,28 @@ func group3or11(code []byte, i int, op byte, has66, rexW, hasLegacy, hasRep, has
 			switch {
 			case mod == 1:
 				dispLen = 1
-			case mod == 2:
+			case mod == 2, rm == 5:
 				dispLen = 4
-			case rm == 5:
-				dispLen, rip = 4, true
 			}
 		}
 	}
 	dispPos := i
 	i += dispLen
-	length = i + imm
-	if length > len(code) || length > 15 {
-		return 0, 0, 0, false, false
+	f.Len = i + imm
+	if f.Len > len(code) || f.Len > 15 {
+		return Fields{}, false, false
+	}
+	if dispLen != 0 {
+		f.DispOff, f.DispLen, f.Base = dispPos, dispLen, memBase(mod, rm, sib, hasSIB, rexB)
 	}
 	switch {
 	case rel: // XBEGIN: the displacement is the trailing immediate itself
-		off, n = length-imm, imm
-	case rip:
-		off, n = dispPos, 4
+		f.pcOff, f.pcN = f.Len-imm, imm
+	case f.Base == BaseRIP && dispLen != 0:
+		f.pcOff, f.pcN = dispPos, 4
 	}
-	return length, off, n, true, true
+	f.setImm(imm, rel)
+	return f, true, true
 }
 
 // step is the one decode the walking passes share: fastStep where the table

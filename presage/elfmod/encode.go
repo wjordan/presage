@@ -245,21 +245,37 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 		cp.RoData = rd.marshal()
 	}
 
-	// 8. The field fix over each finished code window.
+	// 8. The field fix over each finished code window, then the operand
+	// fields it leaves behind. The second layer reads what the first wrote,
+	// so each window is replayed through the decoder's own apply before it is
+	// enumerated -- which also proves that apply on every encode.
 	{
 		p, _, err := predictImage(old, cp, nil)
 		if err != nil {
 			return nil, nil, fmt.Errorf("elf: field fix: %w", err)
 		}
 		var total fieldStats
+		var ops opStats
 		for i, w := range windows {
-			fx, fst := encodeFieldFix(bytesOf(p, w.New), bytesOf(target, w.New), w.New.Addr, structures[i].Maps)
+			text, wantText := bytesOf(p, w.New), bytesOf(target, w.New)
+			fx, fst := encodeFieldFix(text, wantText, w.New.Addr, structures[i].Maps)
 			total.Sites += fst.Sites
 			total.Remaps += fst.Remaps
 			total.Deltas += fst.Deltas
-			cp.Fields = appendStream(cp.Fields, fx.marshal())
+			b := fx.marshal()
+			cp.Fields = appendStream(cp.Fields, b)
+			if _, err := applyFieldFix(text, w.New.Addr, structures[i].Maps, b); err != nil {
+				return nil, nil, fmt.Errorf("elf: field fix: %w", err)
+			}
+			ob, ost := encodeOpField(text, wantText, structures[i].Maps)
+			ops.add(ost)
+			cp.OpField = appendStream(cp.OpField, ob)
 		}
 		st.Notes = append(st.Notes, fmt.Sprintf("fields: %d sites, %d remaps, %d deltas", total.Sites, total.Remaps, total.Deltas))
+		if domain, entries, kept, gain, cost := ops.totals(); entries != 0 {
+			st.Notes = append(st.Notes, fmt.Sprintf("operand fields: %d in domain, %d correctable, %d shipped for %d B removing %d wrong bytes; %s",
+				domain, entries, kept, cost, gain, opClassNote(ops)))
+		}
 	}
 
 	// 9. What the decoder will build.
@@ -294,8 +310,8 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 		st.PredictErr -= wrongCount(bytesOf(out, free), bytesOf(target, free))
 	}
 	st.TextPredictErr = wrongCount(bytesOf(out, ni.Text), bytesOf(target, ni.Text))
-	st.Notes = append(st.Notes, fmt.Sprintf("plan %d B (eq %d, structure %d, choices %d, reloc %d, eh %d, rodata %d, fields %d, dwarf %d, relr %d); %d mispredicted bytes, %d in .text",
-		len(plan), len(cp.Equivalences), len(cp.Structure), len(cp.Choices), len(cp.Reloc), len(cp.EhFrame), len(cp.RoData), len(cp.Fields), len(cp.Dwarf), len(cp.Relr),
+	st.Notes = append(st.Notes, fmt.Sprintf("plan %d B (eq %d, structure %d, choices %d, reloc %d, eh %d, rodata %d, fields %d, dwarf %d, relr %d, opfield %d); %d mispredicted bytes, %d in .text",
+		len(plan), len(cp.Equivalences), len(cp.Structure), len(cp.Choices), len(cp.Reloc), len(cp.EhFrame), len(cp.RoData), len(cp.Fields), len(cp.Dwarf), len(cp.Relr), len(cp.OpField),
 		st.PredictErr, st.TextPredictErr))
 	st.Notes = append(st.Notes, planNote)
 	st.Notes = append(st.Notes, sectionErrNote(out, target, ni, st.PredictErr, free, haveFree))
