@@ -240,12 +240,12 @@ map borrow code from anywhere in old `.text` (far pieces, go-module-design.md
 no equivalences: 2,356 → 1,536 xz, joint brotli 1,314 against the codec's
 1,184. Numbers and the DWARF findings in `go-module-results.md`.
 
-### 4.5 Built-in module: DWARF
+### 4.5 Shared prediction layer: DWARF
 
 Status: (a) built in the codec (`delta/debugz.go`, container flag
 `debugz`; `bench/dwarfz` is its CLI) and measured end to end on shipped
-files; (b) built in the codec too (`presage/dwarf`, run by the Go module
-as `presage-core.md` §7 describes; the harness is an adapter over it):
+files; (b) built in the codec too (`presage/dwarf`, composed into both the
+Go and ELF linker modules; the harness is also an adapter over it):
 prometheus 3.13.1 → 3.13.2 with DWARF 332,414 on the shipped files.
 Research: `dwarf-research.md`; measurements: `go-module-results.md` "DWARF
 builds". The problem it answers: a default `go build` keeps DWARF — 13 MB

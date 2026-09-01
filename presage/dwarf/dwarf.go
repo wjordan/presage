@@ -1,5 +1,13 @@
-// Package dwarf is the DWARF field layer, spec docs/general/SPEC.md
-// §4.5 (b).
+// Package dwarf is the shared linked-DWARF prediction layer, spec
+// docs/general/SPEC.md §4.5 (b). Linker-aware modules own the surrounding
+// image prediction and give this package section geometry, equivalence runs
+// and an address map; the package places the linked debug data and rewrites
+// the fields that refer across it.
+//
+// The layer deliberately is not a presage module. A presage module owns a
+// region, while this layer overlays debug data in the same region already
+// owned by a linker-aware module. Both gomod and elfmod compose it into their
+// predictions.
 //
 // The layer models the fields in .debug_info that shift when a compilation
 // unit changes size: DW_FORM_ref_addr type references (section offsets into
@@ -37,6 +45,14 @@ const (
 
 // Names are the section names of the layer's sections, in index order.
 var Names = [NSec]string{".debug_info", ".debug_abbrev", ".debug_line", ".debug_loclists", ".debug_rnglists", ".debug_addr", ".debug_frame", ".symtab", ".strtab"}
+
+// RecordsRequired reports whether a section must be placed by its record
+// table even when equivalence runs cover it. These fixed-row sections contain
+// fields that commonly all change together; byte matching can then align rows
+// by chance rather than by identity, so the table must own their placement.
+func RecordsRequired(k int) bool {
+	return k == Symtab || k == Addr || k == Strtab || k == Frame
+}
 
 // recordSecs are the sections made of length-prefixed records whose
 // pairing the plan can carry: units, line programs, list contributions,

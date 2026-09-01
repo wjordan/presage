@@ -9,6 +9,7 @@ import (
 
 	"github.com/wjordan/presage/delta/x86"
 	"github.com/wjordan/presage/presage"
+	"github.com/wjordan/presage/presage/dwarf"
 	"github.com/wjordan/presage/presage/eqmatch"
 )
 
@@ -191,8 +192,8 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 		return t.Addr, t.Known
 	}
 	withRecords := func(k int) bool {
-		s, ok := ni.Debug[dwarfSecNames[k]]
-		return ok && (!eqCovers(ep, s.Off, s.Size) || k == dwSymtab || k == dwAddr || k == dwStrtab || k == dwFrame)
+		s, ok := ni.Debug[dwarf.Names[k]]
+		return ok && (!eqCovers(ep, s.Off, s.Size) || dwarf.RecordsRequired(k))
 	}
 	if dp, ok := buildDwarfPlan(oi, ni, ep, withRecords, addrMap); ok {
 		cp.Dwarf = dp.Marshal()

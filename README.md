@@ -78,7 +78,7 @@ A patch is a sequence of **regions**, each claimed by one module:
   name from symbols the encoder has (the decoder never sees them), finds
   equivalence runs modulo relocation with the native matcher, regenerates
   `.rela.dyn`, `.eh_frame` and jump tables, repairs the address fields the
-  runs leave wrong, and shares the Go module's DWARF layer.
+  runs leave wrong, and uses the same shared DWARF layer as `go`.
 
 Each module emits a **plan**, a small description of the change, and the
 core materialises the prediction natively from it, then codes the residual.

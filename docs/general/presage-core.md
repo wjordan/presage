@@ -94,8 +94,8 @@ literal stream, and measures 2.5–2.8× larger than `lz` on every pair tried
 (prometheus stripped 7,218,625 vs 2,604,181; synthetic 420,341 vs 169,914;
 libxul 154.0 → 154.0.1 16,403,799 vs 10,594,355); as a declared region with
 an `lz` residual it only ties `lz` at 3× the time. Its runs are the base
-under a module that models part of a file — the layered DWARF plan — which
-is where the matcher's measured gain came from. `4 elf` (`presage/elfmod`,
+under a prediction layer that models part of a file — the shared DWARF
+layer — which is where the matcher's measured gain came from. `4 elf` (`presage/elfmod`,
 `elf-module.md`) — any other ELF x86-64 image: plan is the function map,
 reference points, equivalence runs, per-function choices and the
 regenerator plans (`.rela.dyn`, `.eh_frame`, jump tables, field fix, DWARF);
@@ -142,7 +142,7 @@ region's prediction; the references are read-only.
 
 Fine-grained plan ops (`map`, `relocate`, `table`) — the Go module is one
 op, which is SPEC open question 2 answered "coarse first". Multi-region
-selection with measurement. Nested regions. Wasm tier. The DWARF module —
+selection with measurement. Nested regions. Wasm tier. The DWARF layer —
 it is the first thing to build on this core (harness layer (b),
 `bench/elfpredict/dwarf.go`), and it is what forces multi-region and the
 input DAG (its `.text` map comes from the Go region), so those come with it.

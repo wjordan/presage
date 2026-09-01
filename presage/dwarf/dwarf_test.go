@@ -251,6 +251,15 @@ func TestPairByDiff(t *testing.T) {
 	}
 }
 
+func TestRecordsRequired(t *testing.T) {
+	for k := range NSec {
+		want := k == Symtab || k == Addr || k == Strtab || k == Frame
+		if got := RecordsRequired(k); got != want {
+			t.Fatalf("section %s: RecordsRequired = %v, want %v", Names[k], got, want)
+		}
+	}
+}
+
 func TestListBounds(t *testing.T) {
 	recs, err := listBounds(testLists(1, 2), true)
 	if err != nil {

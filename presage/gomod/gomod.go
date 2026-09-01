@@ -73,7 +73,7 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 	}
 	fp := fipsPart(target)
 	bare := plan{tf: tf, fips: fp}
-	secs, ok := debugSecs(old, target)
+	secs, ok := dwarfSecs(old, target)
 	if !ok {
 		return bare.marshal(), img.Pred, nil
 	}
@@ -87,7 +87,7 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 	// inserted row puts every later field between two runs, where only
 	// the table says which row it is.
 	withRecords := func(k int) bool {
-		return len(runs[k]) == 0 || k == dwarf.Symtab || k == dwarf.Addr || k == dwarf.Strtab || k == dwarf.Frame
+		return len(runs[k]) == 0 || dwarf.RecordsRequired(k)
 	}
 	dp, ok := dwarf.Build(old, target, secs, withRecords, img.Lookup, func(k int) []eqmatch.Run { return runs[k] })
 	if !ok {
@@ -167,12 +167,12 @@ func layer(old []byte, img *delta.GoImage, p plan) ([]byte, error) {
 	return img.Pred, nil
 }
 
-// debugSecs is the geometry of the sections the DWARF layer handles in
+// dwarfSecs is the geometry of the sections the DWARF layer handles in
 // both files. They are unallocated, so the transform's layout does not
 // carry them and the DWARF plan does; the layer needs .debug_info and
 // .debug_abbrev in both. A file that is not an ELF the standard parser
 // reads has none.
-func debugSecs(old, new []byte) ([dwarf.NSec]dwarf.Sec, bool) {
+func dwarfSecs(old, new []byte) ([dwarf.NSec]dwarf.Sec, bool) {
 	var secs [dwarf.NSec]dwarf.Sec
 	for i, b := range [][]byte{old, new} {
 		f, err := elf.NewFile(bytes.NewReader(b))

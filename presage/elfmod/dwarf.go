@@ -6,33 +6,13 @@ import (
 	"github.com/wjordan/presage/presage/eqmatch"
 )
 
-// The DWARF field layer is presage/dwarf; this is the module's adapter to
-// it: the section geometry comes from the two images, and the equivalence
-// runs the layer projects through are the module's equivalences clipped to
-// one section.
-
-type dwarfPlan = dwarf.Plan
-type dwarfStats = dwarf.Stats
-
-const (
-	dwInfo        = dwarf.Info
-	dwAbbrev      = dwarf.Abbrev
-	dwLine        = dwarf.Line
-	dwLoclists    = dwarf.Loclists
-	dwRnglists    = dwarf.Rnglists
-	dwAddr        = dwarf.Addr
-	dwFrame       = dwarf.Frame
-	dwSymtab      = dwarf.Symtab
-	dwStrtab      = dwarf.Strtab
-	dwarfSecCount = dwarf.NSec
-)
-
-var dwarfSecNames = dwarf.Names
+// The DWARF field layer is presage/dwarf; this file only adapts the ELF
+// module's image geometry, equivalences and address map to it.
 
 // dwarfSecs is the geometry of the layer's sections in the two images.
-func dwarfSecs(oldImage, newImage *image) [dwarfSecCount]dwarf.Sec {
-	var secs [dwarfSecCount]dwarf.Sec
-	for i, name := range dwarfSecNames {
+func dwarfSecs(oldImage, newImage *image) [dwarf.NSec]dwarf.Sec {
+	var secs [dwarf.NSec]dwarf.Sec
+	for i, name := range dwarf.Names {
 		o, okOld := oldImage.Debug[name]
 		n, okNew := newImage.Debug[name]
 		if okOld && okNew {
@@ -60,19 +40,19 @@ func sectionRuns(ep equivalencePlan, s dwarf.Sec) []eqmatch.Run {
 	return runs
 }
 
-func buildDwarfPlan(oldImage, newImage *image, ep equivalencePlan, withRecords func(k int) bool, addrMap func(uint64) (uint64, bool)) (dwarfPlan, bool) {
+func buildDwarfPlan(oldImage, newImage *image, ep equivalencePlan, withRecords func(k int) bool, addrMap func(uint64) (uint64, bool)) (dwarf.Plan, bool) {
 	secs := dwarfSecs(oldImage, newImage)
 	return dwarf.Build(oldImage.Data, newImage.Data, secs, withRecords, addrMap, func(k int) []eqmatch.Run {
 		return sectionRuns(ep, secs[k])
 	})
 }
 
-func unmarshalDwarfPlan(b, old []byte) (dwarfPlan, error) { return dwarf.Unmarshal(b, old) }
+func unmarshalDwarfPlan(b, old []byte) (dwarf.Plan, error) { return dwarf.Unmarshal(b, old) }
 
 // applyDwarf hands the layer the equivalences of each section it does not
 // place itself. The whole-image equivalence pass has already written those
 // bytes; the layer writes the same ones again.
-func applyDwarf(out, old []byte, p dwarfPlan, ep equivalencePlan, ptr func(uint64) x86.Target, sizeDelta func(uint64) (int64, bool)) (dwarfStats, error) {
+func applyDwarf(out, old []byte, p dwarf.Plan, ep equivalencePlan, ptr func(uint64) x86.Target, sizeDelta func(uint64) (int64, bool)) (dwarf.Stats, error) {
 	for k := range p.Runs {
 		p.Runs[k] = sectionRuns(ep, p.Secs[k])
 	}
