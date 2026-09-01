@@ -101,6 +101,43 @@ func WalkFields(code []byte, visit func(start int, f Fields, ok bool)) {
 	}
 }
 
+// WalkAll is WalkReferences and WalkFields in one pass. It places boundaries
+// exactly as both do -- the same step, the same skip-a-byte recovery -- and
+// reports, per instruction, the PC-relative field the reference walk names
+// (Insn.Off and Insn.N, N being 0 where there is none) together with the
+// operand layout the tables located. vouched is false where the tables did
+// not own the instruction: it then has no operand fields, but x86asm still
+// names its PC-relative one, exactly as the reference walk reports it.
+func WalkAll(code []byte, visit func(in Insn, f Fields, vouched bool)) {
+	for i := 0; i < len(code); {
+		f, ok, handled := fastFields(code[i:])
+		if !handled {
+			inst, err := decode(code[i:])
+			if err != nil || inst.Len == 0 {
+				i++
+				continue
+			}
+			off, n := pcrelField(inst, code[i:])
+			if n != 1 && n != 2 && n != 4 {
+				off, n = 0, 0
+			}
+			visit(Insn{Start: i, Length: inst.Len, Off: i + off, N: n}, Fields{Len: inst.Len}, false)
+			i += inst.Len
+			continue
+		}
+		if !ok {
+			i++
+			continue
+		}
+		off, n := f.pcOff, f.pcN
+		if n != 1 && n != 2 && n != 4 {
+			off, n = 0, 0
+		}
+		visit(Insn{Start: i, Length: f.Len, Off: i + off, N: n}, f, true)
+		i += f.Len
+	}
+}
+
 // memBase classes the base register of a memory form.
 func memBase(mod, rm, sib byte, hasSIB, rexB bool) uint8 {
 	base := rm

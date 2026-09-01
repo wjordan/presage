@@ -1,6 +1,7 @@
 package x86
 
 import (
+	"debug/elf"
 	"math/rand"
 	"testing"
 
@@ -282,4 +283,79 @@ func TestWalkFieldsBoundaries(t *testing.T) {
 	if i != len(want) {
 		t.Fatalf("WalkFields visits %d instructions, WalkInsns %d", i, len(want))
 	}
+}
+
+// TestWalkAllMatchesBothWalks asserts the fused walk is exactly the two walks
+// it replaces: the same references WalkReferences reports and the same
+// (start, fields, ok) triples WalkFields visits, over the same bytes.
+func TestWalkAllMatchesBothWalks(t *testing.T) {
+	bufs := [][]byte{make([]byte, 1<<19), realCode()}
+	rand.New(rand.NewSource(7)).Read(bufs[0])
+	for _, code := range bufs {
+		var gotRefs, wantRefs []Reference
+		WalkReferences(code, 0x1000, func(r Reference) { wantRefs = append(wantRefs, r) })
+		type fieldVisit struct {
+			start int
+			f     Fields
+			ok    bool
+		}
+		var gotFields, wantFields []fieldVisit
+		WalkFields(code, func(start int, f Fields, ok bool) {
+			wantFields = append(wantFields, fieldVisit{start, f, ok})
+		})
+		WalkAll(code, func(in Insn, f Fields, vouched bool) {
+			gotFields = append(gotFields, fieldVisit{in.Start, f, vouched})
+			if in.N == 1 || in.N == 2 || in.N == 4 {
+				d := disp(code[in.Off : in.Off+in.N])
+				gotRefs = append(gotRefs, Reference{
+					Start: in.Start, Off: in.Off, N: in.N, Next: in.Start + in.Length,
+					Target: uint64(int64(0x1000) + int64(in.Start) + int64(in.Length) + d),
+				})
+			}
+		})
+		if len(gotRefs) != len(wantRefs) {
+			t.Fatalf("WalkAll found %d references, WalkReferences %d", len(gotRefs), len(wantRefs))
+		}
+		for i := range gotRefs {
+			if gotRefs[i] != wantRefs[i] {
+				t.Fatalf("reference %d: %+v, want %+v", i, gotRefs[i], wantRefs[i])
+			}
+		}
+		if len(gotFields) != len(wantFields) {
+			t.Fatalf("WalkAll visited %d instructions, WalkFields %d", len(gotFields), len(wantFields))
+		}
+		for i := range gotFields {
+			// The fused walk fills the fields WalkFields leaves zero on the
+			// unvouched arm; everything WalkFields states must still match.
+			g, w := gotFields[i], wantFields[i]
+			if g.start != w.start || g.ok != w.ok || g.f.Len != w.f.Len {
+				t.Fatalf("instruction %d: %+v, want %+v", i, g, w)
+			}
+			if w.ok && g.f != w.f {
+				t.Fatalf("instruction %d fields %+v, want %+v", i, g.f, w.f)
+			}
+		}
+		if len(gotRefs) == 0 || len(gotFields) == 0 {
+			t.Fatal("the walk found nothing")
+		}
+	}
+}
+
+// realCode is a slab of this test binary's own .text, so the walk is exercised
+// on instructions a compiler actually emits as well as on random bytes.
+func realCode() []byte {
+	f, err := elf.Open("/proc/self/exe")
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	s := f.Section(".text")
+	if s == nil {
+		return nil
+	}
+	b, err := s.Data()
+	if err != nil {
+		return nil
+	}
+	return b[:min(len(b), 1<<20)]
 }

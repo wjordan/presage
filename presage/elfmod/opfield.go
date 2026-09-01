@@ -12,6 +12,7 @@ import (
 
 	"github.com/wjordan/presage/delta/x86"
 	"github.com/wjordan/presage/internal/cz"
+	"github.com/wjordan/presage/internal/trace"
 )
 
 // The field fix (fieldfix.go) corrects the four-byte PC-relative
@@ -105,38 +106,37 @@ type opBody struct {
 // destination order, overlaps dropped, so an instruction belongs to exactly
 // one body on both sides. It returns the per-class domain sizes; each body's
 // bases are the prefix sums, so a body can be walked on its own.
-func opBodies(text []byte, maps []mapping) ([]opBody, [nOpClass]int) {
+func opBodies(text []byte, maps []mapping, w *textWalk) ([]opBody, [nOpClass]int) {
 	var total [nOpClass]int
 	if len(text) > math.MaxInt32 {
 		return nil, total
 	}
-	bodies := make([]opBody, 0, len(maps))
-	for _, m := range maps {
+	if w == nil {
+		w = newTextWalk(text, maps, false, true)
+	}
+	// cand carries the mapping index through the sort, so each kept body can
+	// read the counts the shared walk left for it.
+	type cand struct{ off, size, k int32 }
+	cands := make([]cand, 0, len(maps))
+	for k, m := range maps {
 		if m.DstSize == 0 || m.Dst+m.DstSize > uint64(len(text)) {
 			continue
 		}
-		bodies = append(bodies, opBody{off: int32(m.Dst), size: int32(m.DstSize)})
+		cands = append(cands, cand{int32(m.Dst), int32(m.DstSize), int32(k)})
 	}
-	slices.SortFunc(bodies, func(a, b opBody) int { return cmp.Compare(a.off, b.off) })
-	kept, end := bodies[:0], int32(0)
-	for _, b := range bodies {
-		if b.off < end {
+	slices.SortFunc(cands, func(a, b cand) int { return cmp.Compare(a.off, b.off) })
+	bodies, end := make([]opBody, 0, len(cands)), int32(0)
+	for _, c := range cands {
+		if c.off < end {
 			continue
 		}
-		kept = append(kept, b)
-		end = b.off + b.size
-	}
-	bodies = kept
-	eachRange(len(bodies), func(lo, hi int) {
-		for i := lo; i < hi; i++ {
-			b := &bodies[i]
-			opWalkBody(text[b.off:b.off+b.size], func(_, _ int, fields []opField) {
-				for _, f := range fields {
-					b.base[f.class]++
-				}
-			})
+		b := opBody{off: c.off, size: c.size}
+		if w.counts != nil {
+			copy(b.base[:], w.counts[int(c.k)*nOpClass:])
 		}
-	})
+		bodies = append(bodies, b)
+		end = c.off + c.size
+	}
 	for i := range bodies {
 		for c := range total {
 			n := int(bodies[i].base[c])
@@ -186,9 +186,9 @@ func (s opStats) totals() (domain, entries, kept, gain, cost int) {
 // encodeOpField builds the layer over one code window. text is the prediction
 // and is left untouched; applyOpField reproduces the result from it and the
 // returned plan.
-func encodeOpField(text, want []byte, maps []mapping) ([]byte, opStats) {
+func encodeOpField(text, want []byte, maps []mapping, w *textWalk) ([]byte, opStats) {
 	var st opStats
-	bodies, total := opBodies(text, maps)
+	bodies, total := opBodies(text, maps, w)
 	st.Domain = total
 	if len(bodies) == 0 {
 		return nil, st
@@ -303,7 +303,7 @@ type opRun struct {
 }
 
 // applyOpField replays the layer over a predicted code window.
-func applyOpField(text []byte, maps []mapping, b []byte) (opStats, error) {
+func applyOpField(text []byte, maps []mapping, b []byte, w *textWalk) (opStats, error) {
 	var st opStats
 	r := &planReader{b: b}
 	mask := r.byteAt()
@@ -317,7 +317,9 @@ func applyOpField(text []byte, maps []mapping, b []byte) (opStats, error) {
 	if r.err != nil || !r.done() {
 		return st, errors.New("invalid operand field plan")
 	}
-	bodies, total := opBodies(text, maps)
+	doneB := trace.Stage("  opField/bodies")
+	bodies, total := opBodies(text, maps, w)
+	doneB()
 	st.Domain = total
 	var ents [nOpClass][]opRun
 	for c := range cols {
@@ -350,6 +352,7 @@ func applyOpField(text []byte, maps []mapping, b []byte) (opStats, error) {
 	// the same ordering says whether a body holds an entry at all, from the
 	// next body's bases alone. Nearly none do, and the ones that do not are
 	// never walked.
+	defer trace.Stage("  opField/replay")()
 	applied := shardRange(len(bodies), func(lo, hi int) [nOpClass]int {
 		var n [nOpClass]int
 		if lo >= hi {

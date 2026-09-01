@@ -37,10 +37,10 @@ func TestFieldFixRoundTrip(t *testing.T) {
 	call(want, textAddr, 40, D)
 
 	maps := []mapping{{Dst: 0, DstSize: 48}}
-	if n := len(fieldSites(pred, maps)); n != 6 {
+	if n := len(fieldSites(pred, maps, nil)); n != 6 {
 		t.Fatalf("walked %d fields, want 6", n)
 	}
-	fx, st := encodeFieldFix(pred, want, textAddr, maps)
+	fx, st := encodeFieldFix(pred, want, textAddr, maps, nil)
 	if st.Remaps != 1 || st.Skipped != 1 {
 		t.Errorf("kept %d remaps and rejected %d, want 1 and 1", st.Remaps, st.Skipped)
 	}
@@ -52,7 +52,7 @@ func TestFieldFixRoundTrip(t *testing.T) {
 	}
 
 	got := append([]byte(nil), pred...)
-	rst, err := applyFieldFix(got, textAddr, maps, fx.marshal())
+	rst, err := applyFieldFix(got, textAddr, maps, fx.marshal(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,11 +72,11 @@ func TestFieldFixRejectsTruncation(t *testing.T) {
 	call(pred, textAddr, 0, 0x2100)
 	call(want, textAddr, 0, 0x2200)
 	maps := []mapping{{Dst: 0, DstSize: 32}}
-	fx, _ := encodeFieldFix(pred, want, textAddr, maps)
+	fx, _ := encodeFieldFix(pred, want, textAddr, maps, nil)
 	b := fx.marshal()
 	for n := range b {
 		buf := append([]byte(nil), pred...)
-		if _, err := applyFieldFix(buf, textAddr, maps, b[:n]); err == nil {
+		if _, err := applyFieldFix(buf, textAddr, maps, b[:n], nil); err == nil {
 			t.Fatalf("accepted truncation to %d bytes", n)
 		}
 	}
@@ -88,12 +88,12 @@ func TestFieldFixNoWork(t *testing.T) {
 	pred := bytes.Repeat([]byte{0x90}, 32)
 	call(pred, textAddr, 0, 0x2100)
 	maps := []mapping{{Dst: 0, DstSize: 32}}
-	fx, st := encodeFieldFix(pred, pred, textAddr, maps)
+	fx, st := encodeFieldFix(pred, pred, textAddr, maps, nil)
 	if st.Remaps != 0 || st.Deltas != 0 {
 		t.Fatalf("a correct prediction produced %+v", st)
 	}
 	got := append([]byte(nil), pred...)
-	if _, err := applyFieldFix(got, textAddr, maps, fx.marshal()); err != nil {
+	if _, err := applyFieldFix(got, textAddr, maps, fx.marshal(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(got, pred) {
@@ -116,12 +116,12 @@ func TestFieldFixWrappingAddress(t *testing.T) {
 	call(want, textAddr, 0, below(0x800))
 	call(want, textAddr, 8, below(0x800))
 	maps := []mapping{{Dst: 0, DstSize: 32}}
-	fx, st := encodeFieldFix(pred, want, textAddr, maps)
+	fx, st := encodeFieldFix(pred, want, textAddr, maps, nil)
 	if st.Remaps != 1 || st.Remade != 2 {
 		t.Fatalf("encoder produced %+v, want one remap over two fields", st)
 	}
 	got := append([]byte(nil), pred...)
-	if _, err := applyFieldFix(got, textAddr, maps, fx.marshal()); err != nil {
+	if _, err := applyFieldFix(got, textAddr, maps, fx.marshal(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(got, want) {

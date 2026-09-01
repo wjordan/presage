@@ -4,10 +4,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"runtime"
 	"slices"
 
-	"github.com/wjordan/presage/delta/x86"
 	"github.com/wjordan/presage/internal/cz"
 )
 
@@ -46,46 +44,13 @@ func (s fieldSite) next() int { return s.off() + int(uint64(s)&0xff) }
 // fieldSites lists the four-byte displacement fields of a predicted .text, in
 // the order the retargeter walked them. Instruction lengths do not depend on
 // the displacement values, so this list is the same before and after either
-// layer rewrites a field.
-func fieldSites(text []byte, maps []mapping) []fieldSite {
-	keep := func(out []fieldSite, refs []x86.Reference, base int) []fieldSite {
-		for _, ref := range refs {
-			if ref.N == 4 && base+ref.Off+4 <= len(text) {
-				out = append(out, makeFieldSite(base+ref.Off, base+ref.Next))
-			}
-		}
-		return out
+// layer rewrites a field -- which is why the walk can be shared with the
+// operand-field layer that runs after this one (textwalk.go).
+func fieldSites(text []byte, maps []mapping, w *textWalk) []fieldSite {
+	if w == nil {
+		w = newTextWalk(text, maps, true, false)
 	}
-	if len(maps) == 0 {
-		return keep(nil, x86.References(text, 0), 0)
-	}
-	// Project each mapping into a body only when its worker reaches it, avoiding
-	// a large duplicate body table. The shards stay in map order, so joining
-	// them reproduces the exact site list -- and thus the exact plan basis -- a
-	// serial walk built.
-	bodyAt := func(k int) x86.Body {
-		m := maps[k]
-		if m.Dst > uint64(len(text)) || m.DstSize > uint64(len(text))-m.Dst {
-			return x86.Body{}
-		}
-		return x86.Body{Code: text[m.Dst : m.Dst+m.DstSize], PC: m.Dst}
-	}
-	shards := x86.CollectReferences(len(maps), runtime.GOMAXPROCS(0), bodyAt, func(_ int, body x86.Body, ref x86.Reference) (fieldSite, bool) {
-		base := int(body.PC)
-		if ref.N != 4 || base+ref.Off+4 > len(text) {
-			return 0, false
-		}
-		return makeFieldSite(base+ref.Off, base+ref.Next), true
-	})
-	n := 0
-	for _, p := range shards {
-		n += len(p)
-	}
-	out := make([]fieldSite, 0, n)
-	for _, p := range shards {
-		out = append(out, p...)
-	}
-	return out
+	return w.sites
 }
 
 func (s fieldSite) addr(text []byte, textAddr uint64) uint64 {
@@ -209,8 +174,8 @@ func remapTargets(domain []uint64, maps []mapping, textAddr uint64) []uint64 {
 
 // encodeFieldFix builds both layers. text is the prediction's .text and is
 // left untouched; applyFieldFix reproduces the result from the same inputs.
-func encodeFieldFix(text, want []byte, textAddr uint64, maps []mapping) (fieldPlan, fieldStats) {
-	sites := fieldSites(text, maps)
+func encodeFieldFix(text, want []byte, textAddr uint64, maps []mapping, w *textWalk) (fieldPlan, fieldStats) {
+	sites := fieldSites(text, maps, w)
 	st := fieldStats{Sites: len(sites)}
 	domain := remapDomain(text, textAddr, sites)
 	st.Domain = len(domain)
@@ -336,12 +301,12 @@ func encodeFieldFix(text, want []byte, textAddr uint64, maps []mapping) (fieldPl
 }
 
 // applyFieldFix replays both layers over a predicted .text.
-func applyFieldFix(text []byte, textAddr uint64, maps []mapping, b []byte) (fieldStats, error) {
+func applyFieldFix(text []byte, textAddr uint64, maps []mapping, b []byte, w *textWalk) (fieldStats, error) {
 	p, err := unmarshalFieldPlan(b)
 	if err != nil {
 		return fieldStats{}, err
 	}
-	sites := fieldSites(text, maps)
+	sites := fieldSites(text, maps, w)
 	st := fieldStats{Sites: len(sites)}
 	domain := remapDomain(text, textAddr, sites)
 	st.Domain = len(domain)

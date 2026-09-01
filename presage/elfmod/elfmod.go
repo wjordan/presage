@@ -389,8 +389,20 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 	if releaseReferencePages != nil {
 		releaseReferencePages()
 	}
-	// The field fix is last: it names fields by position in a walk of the
-	// finished prediction.
+	// Both remaining layers name their fields by position in a walk of the
+	// finished prediction, and neither changes what that walk sees, so the
+	// windows are walked once for the two of them (textwalk.go).
+	var walks []*textWalk
+	if len(cp.Fields) != 0 || len(cp.OpField) != 0 {
+		doneW := trace.Stage("textWalk")
+		walks = make([]*textWalk, len(ep.Windows))
+		for i, w := range ep.Windows {
+			walks[i] = newTextWalk(bytesOf(out, w.New), structures[i].Maps,
+				len(cp.Fields) != 0, len(cp.OpField) != 0)
+		}
+		doneW()
+	}
+	// The field fix is last: it names fields by position in that walk.
 	if len(cp.Fields) != 0 {
 		doneFF := trace.Stage("fieldFix")
 		fr := &planReader{b: cp.Fields}
@@ -402,9 +414,13 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 			if len(b.b) == 0 {
 				continue
 			}
-			if _, err := applyFieldFix(bytesOf(out, w.New), w.New.Addr, structures[i].Maps, b.b); err != nil {
+			if _, err := applyFieldFix(bytesOf(out, w.New), w.New.Addr, structures[i].Maps, b.b, walks[i]); err != nil {
 				return nil, st, err
 			}
+			// The site list is this layer's alone and is the largest thing the
+			// apply holds after the image; the operand layer needs only the
+			// counts beside it.
+			walks[i].sites = nil
 		}
 		if !fr.done() {
 			return nil, st, errors.New("field stream does not match the code windows")
@@ -424,7 +440,7 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 			if len(b.b) == 0 {
 				continue
 			}
-			if _, err := applyOpField(bytesOf(out, w.New), structures[i].Maps, b.b); err != nil {
+			if _, err := applyOpField(bytesOf(out, w.New), structures[i].Maps, b.b, walks[i]); err != nil {
 				return nil, st, err
 			}
 		}

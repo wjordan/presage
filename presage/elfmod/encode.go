@@ -258,16 +258,17 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 		var ops opStats
 		for i, w := range windows {
 			text, wantText := bytesOf(p, w.New), bytesOf(target, w.New)
-			fx, fst := encodeFieldFix(text, wantText, w.New.Addr, structures[i].Maps)
+			walk := newTextWalk(text, structures[i].Maps, true, true)
+			fx, fst := encodeFieldFix(text, wantText, w.New.Addr, structures[i].Maps, walk)
 			total.Sites += fst.Sites
 			total.Remaps += fst.Remaps
 			total.Deltas += fst.Deltas
 			b := fx.marshal()
 			cp.Fields = appendStream(cp.Fields, b)
-			if _, err := applyFieldFix(text, w.New.Addr, structures[i].Maps, b); err != nil {
+			if _, err := applyFieldFix(text, w.New.Addr, structures[i].Maps, b, walk); err != nil {
 				return nil, nil, fmt.Errorf("elf: field fix: %w", err)
 			}
-			ob, ost := encodeOpField(text, wantText, structures[i].Maps)
+			ob, ost := encodeOpField(text, wantText, structures[i].Maps, walk)
 			ops.add(ost)
 			cp.OpField = appendStream(cp.OpField, ob)
 		}

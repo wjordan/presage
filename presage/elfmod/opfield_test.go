@@ -52,7 +52,7 @@ func TestOpFieldRoundTrip(t *testing.T) {
 	want := opCase(opHi, 1, 0x49)
 	maps := []mapping{{Dst: 0, DstSize: uint64(len(pred))}}
 
-	plan, st := encodeOpField(pred, want, maps)
+	plan, st := encodeOpField(pred, want, maps, nil)
 	if len(plan) == 0 {
 		t.Fatal("no plan for a body of six correctable fields")
 	}
@@ -64,7 +64,7 @@ func TestOpFieldRoundTrip(t *testing.T) {
 	}
 
 	got := bytes.Clone(pred)
-	ast, err := applyOpField(got, maps, plan)
+	ast, err := applyOpField(got, maps, plan, nil)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestOpFieldRoundTrip(t *testing.T) {
 func TestOpFieldDeclines(t *testing.T) {
 	pred := opCase(opLo, opLo, 0x48)
 	maps := []mapping{{Dst: 0, DstSize: uint64(len(pred))}}
-	if plan, _ := encodeOpField(pred, bytes.Clone(pred), maps); len(plan) != 0 {
+	if plan, _ := encodeOpField(pred, bytes.Clone(pred), maps, nil); len(plan) != 0 {
 		t.Fatalf("an exact prediction shipped %d plan bytes", len(plan))
 	}
 	// One byte of one disp8: the index and the value cost more than the one
@@ -99,7 +99,7 @@ func TestOpFieldDeclines(t *testing.T) {
 	small := []byte{0x48, 0x8b, 0x45, 0x08, 0x90}
 	target := bytes.Clone(small)
 	target[3] = 0x10
-	if plan, st := encodeOpField(small, target, []mapping{{Dst: 0, DstSize: uint64(len(small))}}); len(plan) != 0 {
+	if plan, st := encodeOpField(small, target, []mapping{{Dst: 0, DstSize: uint64(len(small))}}, nil); len(plan) != 0 {
 		t.Fatalf("a one-byte correction shipped %d plan bytes (%v)", len(plan), st.Entries)
 	}
 }
@@ -132,12 +132,12 @@ func TestOpFieldRandomRoundTrip(t *testing.T) {
 		}
 		maps = append(maps, mapping{Dst: uint64(start), DstSize: uint64(len(pred) - start)})
 	}
-	plan, st := encodeOpField(pred, want, maps)
+	plan, st := encodeOpField(pred, want, maps, nil)
 	if len(plan) == 0 {
 		t.Fatal("no plan for thousands of correctable fields")
 	}
 	got := bytes.Clone(pred)
-	ast, err := applyOpField(got, maps, plan)
+	ast, err := applyOpField(got, maps, plan, nil)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestOpFieldRejectsBadPlan(t *testing.T) {
 	plan := []byte{1 << opImm}
 	plan = appendStream(plan, appendU(nil, 99))
 	plan = appendStream(plan, appendS(nil, 1))
-	if _, err := applyOpField(bytes.Clone(pred), maps, plan); err == nil {
+	if _, err := applyOpField(bytes.Clone(pred), maps, plan, nil); err == nil {
 		t.Fatal("a plan naming field 99 of a two-field domain was accepted")
 	}
 }
