@@ -154,14 +154,14 @@ func (copyModule) Materialise(refs [][]byte, plan []byte, length int64) ([]byte,
 // where the module cuts the target and that is smaller (split.go); declared
 // regions use the shifted delta, whose stream replaces the prediction by
 // the target outright.
-func residual(m Module, refs [][]byte, plan, pred, target []byte) ([]byte, byte, error) {
+func residual(m Module, refs [][]byte, plan, pred, target []byte, price int) ([]byte, byte, error) {
 	if !m.Exact() {
 		return delta.DiffLZ(pred, target), 0, nil
 	}
 	if len(pred) != len(target) {
 		return nil, 0, fmt.Errorf("presage: module %s predicted %d bytes for a %d-byte region", m.Name(), len(pred), len(target))
 	}
-	whole, wholeCost, err := delta.EncodeCorrectionAdaptiveSized(pred, target)
+	whole, wholeCost, err := delta.EncodeCorrectionPricedSized(pred, target, price)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -175,6 +175,13 @@ func residual(m Module, refs [][]byte, plan, pred, target []byte) ([]byte, byte,
 	}
 	cuts := c.Cuts(target)
 	if len(cuts) == 0 {
+		return whole, flags, nil
+	}
+	// The piecewise coding tries every piece several ways. Even if it drove
+	// the correction to nothing it could not save more than the whole one
+	// costs, so where that bound does not reach what the caller pays for
+	// the seconds it is modelled to take, it is not run.
+	if wholeCost < delta.WorthOf(price, len(whole), delta.SplitCorrectionRate) {
 		return whole, flags, nil
 	}
 	var disp *delta.DispContext

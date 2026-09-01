@@ -698,6 +698,18 @@ matrix — one that the prototype showed is real work per Go minor — for a
 codec that is small enough to be reviewed and tested exhaustively; a binary
 built by an older Go still patches correctly, just less well.
 
+*Less well* has since been measured, and it is worse than this paragraph
+implies: the same prometheus pair is 74,636 B in 4.2 s when both sides are
+rebuilt with go1.27 and 2,137,152 B in 27.9 s as upstream ships it, built
+with go1.26.5 — 28.6× the bytes for 6.6× the time — and no upstream release
+binary in the local corpus is built with the pinned release at all
+(`general/research/toolchain-skew.md`). That document proposes keying the
+handling on a `gobin.Layout` descriptor validated against the image's own
+invariants, one reader and one writer per release rather than a pair matrix,
+with the self-prediction check as the per-release acceptance test and as a
+runtime probe for a release with no descriptor. Nothing of it is built; D14
+stands until it is.
+
 ### 2.7 Determinism and safety
 
 - The prediction uses only the old file plus bytes from the patch; no

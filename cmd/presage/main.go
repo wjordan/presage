@@ -166,6 +166,7 @@ func diff(args []string) error {
 	out := fs.String("o", "", "write the patch here (required)")
 	verbose := fs.Bool("v", false, "report where the patch bytes went")
 	only := fs.String("modules", "", "restrict the encoder to these modules, by name (e.g. lz,eq)")
+	price := fs.Int("price", 0, "what a second of encoding is worth in patch bytes (0: the default; -1: nothing, spend any time for the smallest patch)")
 	symPaths := fs.String("symbols", "", "function symbols of the old and new images, comma-separated (ELF with .symtab, or Breakpad text); encoder-only")
 	fs.Parse(flagsFirst(fs, args))
 	if fs.NArg() != 2 || *out == "" {
@@ -199,7 +200,9 @@ func diff(args []string) error {
 	}
 	start := time.Now()
 	var st presage.Stats
-	patch, err := presage.Encode([][]byte{old}, target, presage.Options{Registry: reg, Modules: allowed, Stats: &st})
+	patch, err := presage.Encode([][]byte{old}, target, presage.Options{
+		Registry: reg, Modules: allowed, Stats: &st, Price: *price,
+	})
 	if err != nil {
 		return err
 	}

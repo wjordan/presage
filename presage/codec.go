@@ -24,6 +24,17 @@ type Options struct {
 	// region whose module is not among them is coded with the core lz
 	// module instead (lowering, SPEC §5.4). Nil means no restriction.
 	Modules []byte
+	// Price is what one second of encoding is worth in patch bytes. The
+	// encoder skips an optional coding stage whose estimated gain does not
+	// reach Price times the seconds the stage is modelled to cost, so the
+	// work it does is proportional to what the work buys
+	// (research/toolchain-skew.md). Zero selects the default; negative
+	// prices a second at nothing and runs every stage, which is the
+	// smallest patch this codec can make at whatever it costs.
+	//
+	// The unit is the caller's own: a patch fetched N times over a link of
+	// W bytes per second makes a second of encoding worth W/N patch bytes.
+	Price int
 	// Stats, if non-nil, receives a breakdown of the patch.
 	Stats *Stats
 }
@@ -64,6 +75,28 @@ func (o Options) registry() *Registry {
 		return o.Registry
 	}
 	return NewRegistry()
+}
+
+// defaultPrice prices a second of encoding at 8 KiB of patch, which skips
+// the stages measurement found worthless and keeps the ones it found worth
+// having. On the corpus the marginal exchange rate of a stage is either
+// nothing -- the extra correction shapes earn 0 B on Chrome, 5,745 B on a
+// cross-toolchain Go pair, −298 B on another -- or six figures: 254 KB/s
+// for those same shapes on an unmodelled-release pair, 127 KB/s for the
+// split correction on Chrome. The default sits in that 400× gap
+// (research/toolchain-skew.md §7); a caller who knows what its own second
+// is worth should say so.
+const defaultPrice = 8 << 10
+
+// price is the caller's price for a second, in patch bytes.
+func (o Options) price() int {
+	switch {
+	case o.Price < 0:
+		return 0
+	case o.Price == 0:
+		return defaultPrice
+	}
+	return o.Price
 }
 
 func (o Options) allowed(id byte) bool {
@@ -131,7 +164,7 @@ func Encode(refs [][]byte, target []byte, o Options) ([]byte, error) {
 	if f, ok := chosen.(Finaliser); ok {
 		predRes = f.MaskResidual(plan, pred, target)
 	}
-	res, rflags, err := residual(chosen, refs, plan, predRes, target)
+	res, rflags, err := residual(chosen, refs, plan, predRes, target, o.price())
 	if err != nil {
 		return nil, err
 	}

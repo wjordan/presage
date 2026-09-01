@@ -111,10 +111,19 @@ smaller of the adaptive shapes or the columnar form, flagged
 regions use the `lz` stream, and for `lz` regions the residual *is* the
 plan.
 
-Selection (SPEC §6.4) in this milestone is tier 1 only: the Go module claims
-the whole file when both binaries parse, else `lz` does. Lowering (§5.4) is
-an option — `Options.Modules` names the module ids the deployed decoder has;
-a region whose module is absent is coded as `lz`.
+Selection (SPEC §6.4) in this milestone is tier 1 only: the first module
+that takes the file claims it, else `lz` does. What is priced is not the
+module but the encoder's own optional stages: `Options.Price` is what one
+second of encoding is worth in patch bytes, and a stage whose estimated gain
+does not reach that price times the seconds it is modelled to cost is not
+run (`delta.WorthOf`). Two stages are priced — the extra correction shapes,
+against a sampled estimate of what they save, and the split residual,
+against the bound that it cannot save more than the whole correction costs.
+Work is modelled from byte counts at calibrated rates, never from a clock,
+so a patch does not depend on how loaded the machine was. The measured
+frontier the default price sits in is in `research/toolchain-skew.md`.
+Lowering (§5.4) is an option — `Options.Modules` names the module ids the
+deployed decoder has; a region whose module is absent is coded as `lz`.
 
 ## 5. Encode and Apply
 

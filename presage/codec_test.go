@@ -372,3 +372,73 @@ func TestSplitResidualUnknownCodec(t *testing.T) {
 		t.Fatalf("unknown codec gave %v", err)
 	}
 }
+
+// priceModule is exact and mispredicts a fixed share of the region, so the
+// encoder's pricing of its own stages can be exercised without an image.
+type priceModule struct {
+	lzModule
+	wrong int
+}
+
+func (priceModule) ID() byte     { return 10 }
+func (priceModule) Name() string { return "priced" }
+func (priceModule) Exact() bool  { return true }
+func (m priceModule) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
+	plan := binary.AppendUvarint(nil, uint64(m.wrong))
+	pred, err := priceModule{}.Materialise(refs, plan, int64(len(target)))
+	return plan, pred, err
+}
+func (priceModule) Materialise(refs [][]byte, plan []byte, n int64) ([]byte, error) {
+	wrong, k := binary.Uvarint(plan)
+	if k != len(plan) {
+		return nil, errors.New("bad priced plan")
+	}
+	out := append([]byte(nil), refs[0][:n]...)
+	for i := range min(int(wrong), len(out)) {
+		out[i] ^= 0xff
+	}
+	return out, nil
+}
+
+// A priced encode is never larger than the unpriced one by more than what
+// the price says a second is worth, and both round-trip. The prices here
+// bracket the corpus: nothing per second, the default, and a price so high
+// no optional stage can earn it.
+func TestPriceRoundTrips(t *testing.T) {
+	target := make([]byte, 4<<20)
+	rand.New(rand.NewSource(1)).Read(target)
+	old := append([]byte(nil), target...)
+	for i := 0; i < len(old)/3; i++ {
+		old[i] ^= 0xff
+	}
+	sizes := map[int]int{}
+	for _, price := range []int{-1, 0, 1 << 30} {
+		reg := NewRegistry()
+		reg.Add(priceModule{wrong: len(target) / 3})
+		var st Stats
+		patch := roundTrip(t, [][]byte{old}, target, Options{
+			Registry: reg, Stats: &st, Price: price,
+			Modules: []byte{ModuleLZ, 10}, // not copy: it predicts this pair exactly
+		})
+		if st.Regions[0].Module != "priced" {
+			t.Fatalf("price %d: module %s, want priced", price, st.Regions[0].Module)
+		}
+		sizes[price] = len(patch)
+	}
+	if sizes[1<<30] < sizes[-1] {
+		t.Fatalf("the dearest price produced the smallest patch: %v", sizes)
+	}
+	t.Logf("patch by price: free %d, default %d, dear %d", sizes[-1], sizes[0], sizes[1<<30])
+}
+
+// WorthOf is what the encoder trades bytes for seconds by; it must not
+// overflow on the sizes a patch can reach, and must be zero when a second
+// is worth nothing.
+func TestWorthOf(t *testing.T) {
+	if got := delta.WorthOf(0, 1<<34, delta.SplitCorrectionRate); got != 0 {
+		t.Fatalf("a free second is worth %d bytes, want 0", got)
+	}
+	if got := delta.WorthOf(1<<30, 1<<34, delta.SplitCorrectionRate); got <= 0 {
+		t.Fatalf("WorthOf overflowed: %d", got)
+	}
+}

@@ -1,6 +1,7 @@
 package delta
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"sync"
@@ -175,7 +176,7 @@ func (sh corrShape) write(pred, want []byte, flagged bool) []byte {
 // The winner's compressed size is returned with it: the caller that prices a
 // correction against another encoding needs exactly this number, and
 // recomputing it is a second compression of the largest stream in the patch.
-func encodeCorrectionSized(pred, want []byte, adaptive bool) ([]byte, int, error) {
+func encodeCorrectionSized(pred, want []byte, adaptive bool, price int) ([]byte, int, error) {
 	if len(pred) != len(want) {
 		return nil, 0, fmt.Errorf("delta: prediction is %d bytes, target is %d", len(pred), len(want))
 	}
@@ -183,12 +184,28 @@ func encodeCorrectionSized(pred, want []byte, adaptive bool) ([]byte, int, error
 	if !adaptive {
 		return a, 0, nil
 	}
+	// The other two shapes are two more writes of the largest stream in the
+	// patch and two more prices of it. Where a sample says they save less
+	// than the caller pays for the seconds they cost, the shipped shape is
+	// the answer and they are not written (SPEC §6.4). A stream smaller than
+	// the sample is priced by writing it: the estimate would cost more than
+	// the work it prices, and its margin drowns in the shapes' fixed costs.
+	shippedSize := 0
+	if price > 0 && len(a) >= adaptiveSample {
+		shippedSize = czLen(a)
+		if adaptiveGain(pred, want, shippedSize) < WorthOf(price, len(a), CorrectionShapeRate) {
+			return a, shippedSize, nil
+		}
+	}
 	modal, modalSize := encodeModal(pred, want)
 	cands := [][]byte{a, nearmiss.write(pred, want, true), modal}
 	sizes := make([]int, len(cands))
-	sizes[2] = modalSize
+	sizes[0], sizes[2] = shippedSize, modalSize
 	var wg sync.WaitGroup
 	for i := range cands[:2] {
+		if sizes[i] != 0 {
+			continue
+		}
 		wg.Add(1)
 		go func() { defer wg.Done(); sizes[i] = czLen(cands[i]) }()
 	}
@@ -200,6 +217,96 @@ func encodeCorrectionSized(pred, want []byte, adaptive bool) ([]byte, int, error
 		}
 	}
 	return cands[best], sizes[best], nil
+}
+
+// The encoder's cost model. Work is modelled from the bytes an engine
+// touches at a rate calibrated on this corpus (bench/workmodel,
+// research/toolchain-skew.md §7), never from a clock: a patch that depended
+// on how loaded the machine was would not be reproducible.
+const (
+	// CorrectionShapeRate is what writing and pricing the two extra
+	// correction shapes costs, per byte of the stream already written.
+	CorrectionShapeRate = 1 << 20 // bytes of stream per modelled second
+	// SplitCorrectionRate is the same for coding the correction in pieces,
+	// each piece tried several ways (presage/split.go).
+	SplitCorrectionRate = 1 << 20
+)
+
+// WorthOf is the patch bytes a caller pricing a second at price would spend
+// on an engine running at rate over n bytes: the break-even gain for that
+// work. A stage whose gain does not reach it is not run.
+func WorthOf(price, n, rate int) int {
+	if price <= 0 {
+		return 0
+	}
+	return int(min(int64(price), 1<<24) * int64(n) / int64(rate))
+}
+
+// adaptiveSample and adaptiveWindow bound what the shape estimate reads: a
+// deterministic set of windows, so two encoders of the same inputs make the
+// same choice.
+const (
+	adaptiveSample = 2 << 20
+	adaptiveWindow = 64 << 10
+)
+
+// adaptiveGain estimates what the two extra shapes would save over the
+// shipped one, by coding a sample of the region every way and scaling the
+// margin by what the whole shipped stream costs.
+//
+// A sample cannot compare two different streams -- an lz fallback against a
+// module's correction, say -- because losing the long-range context costs
+// each of them a different amount, which measurement on the corpus made
+// plain. It can compare three codings of *one* stream, where the loss is
+// common to all three and the margin between them survives it.
+func adaptiveGain(pred, want []byte, shippedSize int) int {
+	sp, sw := correctionSample(pred, want)
+	if len(sp) == 0 {
+		return shippedSize // too small to sample: let the shapes run
+	}
+	base := czLen(shipped.write(sp, sw, true))
+	if base == 0 {
+		return 0
+	}
+	_, modalSize := encodeModal(sp, sw)
+	best := min(czLen(nearmiss.write(sp, sw, true)), modalSize)
+	if best >= base {
+		return 0
+	}
+	return int(int64(shippedSize) * int64(base-best) / int64(base))
+}
+
+// correctionSample is evenly spaced windows of the two buffers, drawn from
+// the windows in which they differ, concatenated. A sparse correction -- a
+// Go patch release mispredicts 0.06% of the file, in clusters -- puts almost
+// none of its wrong bytes into windows spaced over the whole file, and a
+// sample with no wrong bytes says every shape costs the same. The shapes
+// differ only where the buffers do, so those are the windows worth reading.
+func correctionSample(pred, want []byte) (sp, sw []byte) {
+	n := len(want)
+	if n <= adaptiveSample*2 {
+		return nil, nil
+	}
+	count := min(adaptiveSample, n/32) / adaptiveWindow
+	if count < 1 {
+		return nil, nil
+	}
+	var wrong []int
+	for a := 0; a+adaptiveWindow <= n; a += adaptiveWindow {
+		if !bytes.Equal(pred[a:a+adaptiveWindow], want[a:a+adaptiveWindow]) {
+			wrong = append(wrong, a)
+		}
+	}
+	if len(wrong) <= count {
+		return nil, nil // the correction is small: let the shapes run
+	}
+	stride := len(wrong) / count
+	for i := range count {
+		a := wrong[i*stride]
+		sp = append(sp, pred[a:a+adaptiveWindow]...)
+		sw = append(sw, want[a:a+adaptiveWindow]...)
+	}
+	return sp, sw
 }
 
 // UsesModalCorrection reports whether a stream from EncodeCorrectionAdaptive
@@ -240,7 +347,7 @@ func EncodeCorrection(pred, want []byte) ([]byte, error) {
 // encodeCorrection is encodeCorrectionSized for the callers that do not need
 // the winner's compressed size.
 func encodeCorrection(pred, want []byte, adaptive bool) ([]byte, error) {
-	b, _, err := encodeCorrectionSized(pred, want, adaptive)
+	b, _, err := encodeCorrectionSized(pred, want, adaptive, 0)
 	return b, err
 }
 
@@ -256,7 +363,16 @@ func EncodeCorrectionAdaptive(pred, want []byte) ([]byte, error) {
 // A caller pricing this correction against another encoding of the same
 // bytes wants exactly that number, and it has already been computed here.
 func EncodeCorrectionAdaptiveSized(pred, want []byte) ([]byte, int, error) {
-	return encodeCorrectionSized(pred, want, true)
+	return encodeCorrectionSized(pred, want, true, 0)
+}
+
+// EncodeCorrectionPricedSized is EncodeCorrectionAdaptiveSized with a price
+// on the encoder's own seconds: price is what one second of encoding is
+// worth in patch bytes, and a shape that is not estimated to earn its
+// modelled seconds at that price is not written. Zero prices a second at
+// nothing and writes them all.
+func EncodeCorrectionPricedSized(pred, want []byte, price int) ([]byte, int, error) {
+	return encodeCorrectionSized(pred, want, true, price)
 }
 
 // CorrectionShapes writes the correction in both shapes a transform-2
