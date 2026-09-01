@@ -1,10 +1,12 @@
 # The README table: what each number is
 
 Provenance for the headline comparison in `README.md`. presage column
-measured 2026-08-31 at container v5 (derived function map, displacement
-columns, compact CM coder over correction and plan streams, parallel decode);
-baseline columns measured 2026-08-29. All on this machine unless a source
-doc is named. All sizes in bytes.
+measured at container v6: the C++ rows on 2026-09-01 (RELR relocation slots,
+exact FDE `cie_ptr`, `.eh_frame_hdr` rebuilt after the residual), the Go rows
+on 2026-08-31 (derived function map, displacement columns, compact CM coder
+over correction and plan streams, parallel decode) and re-confirmed
+unchanged at v6; baseline columns measured 2026-08-29. All on this machine
+unless a source doc is named. All sizes in bytes.
 
 ## The pairs
 
@@ -62,8 +64,8 @@ around 40% on the smaller pairs. Earlier drafts of the README quoted
 |---|---:|---:|---:|---:|---:|
 | one-line change, 30 MB | 1,100 | 173,060 | 150,475 | 1,390,889 | 538,493 |
 | prometheus 3.13.1 → 3.13.2 | 74,636 | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
-| Chrome 151.0.7922.169 → .173 | 2,376,189 | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
-| libxul 154.0 → 154.0.1 | 2,866,328 | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
+| Chrome 151.0.7922.169 → .173 | 2,346,975 | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
+| libxul 154.0 → 154.0.1 | 2,337,304 | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
 
 Two checks that the rows are scoped consistently: `bsdiff` on the one-line
 pair reproduces `go-module-results.md`'s 150,475 exactly, and the ordering
