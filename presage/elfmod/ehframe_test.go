@@ -240,3 +240,65 @@ func packedPlan(t *testing.T, cp planStreams) []byte {
 	b, _ := packPlan(cp.marshal())
 	return b
 }
+
+// An FDE's cie_ptr is a distance, not an address: it changes whenever the
+// entry and its CIE move apart, which is every FDE downstream of an
+// insertion. Two CIEs, and a gap opened in front of each group of FDEs they
+// govern, so no FDE keeps the distance it was copied with.
+func TestEhFrameCiePointers(t *testing.T) {
+	const addr, oldOff, newOff = uint64(0x40000), uint64(0x1000), uint64(0x1000)
+	sec := buildCIE()
+	off1 := uint64(len(sec))
+	sec = append(sec, buildFDE(addr, off1, 0, 0x8000, 0x10)...)
+	off2 := uint64(len(sec))
+	sec = append(sec, buildCIE()...) // a second CIE, governing what follows
+	off3 := uint64(len(sec))
+	sec = append(sec, buildFDE(addr, off3, off2, 0x9000, 0x10)...)
+	off4 := uint64(len(sec))
+	sec = append(sec, buildFDE(addr, off4, off2, 0xa000, 0x10)...)
+	sec = append(sec, 0, 0, 0, 0)
+
+	// The new layout inserts 4 bytes before the first FDE and 8 more before
+	// the second CIE's FDEs. The section keeps its address, so nothing but
+	// the distances moves.
+	shifts := []struct{ src, n, shift uint64 }{
+		{0, off1, 0},                        // the first CIE
+		{off1, off2 - off1, 4},              // its FDE
+		{off2, off3 - off2, 4},              // the second CIE
+		{off3, uint64(len(sec)) - off3, 12}, // its two FDEs
+	}
+	old := make([]byte, 0x4000)
+	copy(old[oldOff:], sec)
+	out := make([]byte, 0x4000)
+	var eqs []equivalence
+	for _, s := range shifts {
+		eqs = append(eqs, equivalence{Src: oldOff + s.src, Dst: newOff + s.src + s.shift, N: s.n})
+		copy(out[newOff+s.src+s.shift:], old[oldOff+s.src:oldOff+s.src+s.n])
+	}
+	newSize := uint64(len(sec)) + 12
+
+	ep := equivalencePlan{OldLen: uint64(len(old)), NewLen: uint64(len(out)), Eqs: eqs}
+	p := ehFramePlan{OldOff: oldOff, OldSize: uint64(len(sec)), NewOff: newOff, NewSize: newSize,
+		OldAddr: addr, NewAddr: addr}
+	oldSecs := sectionMap{{Old: addr, New: oldOff, Size: uint64(len(sec))}}
+	identity := func(a uint64) x86.Target { return x86.Target{Addr: a, Known: true} }
+	noExtent := func(uint64) (uint64, uint64, bool) { return 0, 0, false }
+
+	st := applyEhFrame(out, old, ep, p, oldSecs, identity, noExtent)
+	if st.FDEs != 3 || st.Retargeted != 3 || st.CiePtrs != 3 {
+		t.Fatalf("stats %+v, want 3 FDEs all retargeted with their cie pointers fixed", st)
+	}
+	// Each FDE's cie_ptr must be the new distance back to its CIE, and each
+	// must differ from the distance the copy carried over.
+	for _, want := range []struct{ entry, cie uint64 }{
+		{off1 + 4, 0}, {off3 + 12, off2 + 4}, {off4 + 12, off2 + 4},
+	} {
+		got := binary.LittleEndian.Uint32(out[newOff+want.entry+4:])
+		if uint64(got) != want.entry+4-want.cie {
+			t.Errorf("FDE at %#x: cie_ptr = %d, want %d", want.entry, got, want.entry+4-want.cie)
+		}
+		if uint64(got) == uint64(binary.LittleEndian.Uint32(sec[want.entry+4:])) {
+			t.Errorf("FDE at %#x: cie_ptr unchanged at %d, the test cannot see the fix", want.entry, got)
+		}
+	}
+}

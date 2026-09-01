@@ -79,12 +79,14 @@ type ehFrameStats struct {
 	Retargeted int
 	Unknown    int
 	Resized    int
+	CiePtrs    int
 }
 
 // ehFDE is one frame description entry located in a walked .eh_frame image.
 type ehFDE struct {
 	locOff uint64 // offset of the initial_location field within the section
 	entry  uint64 // offset of the entry itself within the section
+	cieOff uint64 // offset of the CIE that governs the entry
 }
 
 // walkEhFrame lists the FDEs in a .eh_frame image. It is deliberately
@@ -108,7 +110,7 @@ func walkEhFrame(b []byte) (fdes []ehFDE, cieEnc map[uint64]byte) {
 		} else {
 			cie := p + 4 - uint64(id)
 			if enc, ok := cieEnc[cie]; ok && enc == ehPtrEncPCRelSData4 && p+16 <= uint64(len(b)) {
-				fdes = append(fdes, ehFDE{locOff: p + 8, entry: p})
+				fdes = append(fdes, ehFDE{locOff: p + 8, entry: p, cieOff: cie})
 			}
 		}
 		p += total
@@ -188,11 +190,38 @@ func retargetEhFrame(out, old []byte, ep equivalencePlan, p ehFramePlan, oldSecs
 	oldSec := old[p.OldOff : p.OldOff+p.OldSize]
 	fdes, _ := walkEhFrame(oldSec)
 	st.FDEs = len(fdes)
+	// One CIE governs thousands of FDEs, so project each one once.
+	type projection struct {
+		off uint64
+		ok  bool
+	}
+	cies := make(map[uint64]projection)
+	cieAt := func(off uint64) (uint64, bool) {
+		if v, seen := cies[off]; seen {
+			return v.off, v.ok
+		}
+		newOff, ok := mapper.project(p.OldOff + off)
+		cies[off] = projection{newOff, ok}
+		return newOff, ok
+	}
 	for _, f := range fdes {
 		newLoc, ok := mapper.project(p.OldOff + f.locOff)
-		if !ok || newLoc < p.NewOff || newLoc+4 > p.NewOff+p.NewSize {
+		newEntry, okEntry := mapper.project(p.OldOff + f.entry)
+		if !ok || !okEntry || newLoc < p.NewOff || newLoc+4 > p.NewOff+p.NewSize {
 			st.Unknown++
 			continue
+		}
+		// cie_ptr, at entry+4, is the only field of an FDE that states a
+		// position rather than an address: the distance back from itself to
+		// the CIE that governs the entry. Every FDE that moved relative to
+		// its CIE -- which is every FDE downstream of an insertion or a
+		// resize -- carries the old distance in the byte prediction and is
+		// wrong. The right value follows from where the entry and its CIE
+		// landed, and the projection already says both, so it costs nothing.
+		if newCie, ok := cieAt(f.cieOff); ok && newEntry >= p.NewOff && newEntry+8 <= p.NewOff+p.NewSize &&
+			newCie >= p.NewOff && newCie < newEntry+4 {
+			binary.LittleEndian.PutUint32(out[newEntry+4:], uint32(newEntry+4-newCie))
+			st.CiePtrs++
 		}
 		oldFieldAddr, ok := oldSecs.addrOf(p.OldOff + f.locOff)
 		if !ok {

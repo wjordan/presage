@@ -42,7 +42,7 @@ var pairs = []pair{
 		newSyms: home(".cache", "presage-chrome-zucchini", "symbols-151.0.7922.173", "debug-info", "chrome.debug"),
 		// parity is the measured container-v6 patch with the compact CM model
 		// and balanced terminal compression, a ratchet against regression.
-		parity: 2366669, product: 2634264,
+		parity: 2346975, product: 2634264,
 	},
 	{
 		name:    "libxul-154.0-154.0.1",

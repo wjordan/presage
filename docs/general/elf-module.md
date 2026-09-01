@@ -8,14 +8,16 @@ non-Go ELF x86-64 image end to end. Design authority: `SPEC.md` §4–6, §10
 item 3; template: `presage/gomod` (`presage-core.md` §4, §7).*
 
 Container v6 uses the compact CM model, balanced terminal compression, the
-RELR slot layer and an exactly rebuilt `.eh_frame_hdr`. Current end-to-end
+RELR slot layer, exact FDE CIE pointers and an exactly rebuilt
+`.eh_frame_hdr`. Current end-to-end
 sizes and resource measurements are in `baselines.md`; the status sections
 below retain the measurements that motivated each layer.
 
-## Status (2026-09-01): the two derivable non-`.text` sections
+## Status (2026-09-01): three derivable fields outside `.text`
 
-Two layers, both decoder-derivable, both `presage.Version` 6 (the plan gains
-a ninth stream and the `eh_frame` stream a flag).
+Three fixes, all decoder-derivable, none costing more than a flag.
+`presage.Version` is 6: the plan gains a ninth stream and the `eh_frame`
+stream a flag.
 
 1. **RELR relocation slots** (`relr.go`, stage 5b). An image whose linker
    packs its relative relocations into `.relr.dyn` has no `.rela.dyn` entry
@@ -42,19 +44,29 @@ a ninth stream and the `eh_frame` stream a flag).
    the target's header from the target's own `.eh_frame` reproduces it byte
    for byte, so a linker the rule does not hold for falls back to shipping
    the section. `regenerateEhFrameHdr` and its `ehNewFDE` plumbing are gone.
+3. **FDE CIE pointers** (`ehframe.go`, stage 7). `retargetEhFrame` wrote an
+   FDE's `initial_location` and `address_range` but never its `cie_ptr` at
+   entry+4, the one field of an FDE that states a *position* rather than an
+   address: the distance back from itself to the CIE that governs it. Every
+   FDE downstream of an insertion or a resize has moved relative to its CIE,
+   so the byte prediction carried the old distance — libxul 513,723 of the
+   section's 535,051 wrong bytes, across 272,545 FDEs. Both ends of the
+   distance are projections the retarget already computes, so the fix reads
+   the CIE offset out of the walk, projects each distinct CIE once, and
+   writes the difference. Zero plan bytes. `.eh_frame` mispredictions:
+   libxul 535,051 → 23,627, Chrome 70,961 → 29,973.
 
-| pair | before | + RELR slots | + exact `.eh_frame_hdr` |
-|---|---:|---:|---:|
-| libxul 154.0 → 154.0.1 | 2,866,328 | 2,609,318 (−257,010) | **2,598,190** (−11,128) |
-| Chrome 151 .169 → .173 | 2,376,189 | 2,376,189 (no `.relr.dyn`) | **2,366,669** (−9,520) |
+| pair | before | + RELR slots | + exact `.eh_frame_hdr` | + `cie_ptr` |
+|---|---:|---:|---:|---:|
+| libxul 154.0 → 154.0.1 | 2,866,328 | 2,609,318 (−257,010) | 2,598,190 (−11,128) | **2,337,304** (−260,886) |
+| Chrome 151 .169 → .173 | 2,376,189 | 2,376,189 (no `.relr.dyn`) | 2,366,669 (−9,520) | **2,346,975** (−19,694) |
 
-Applied and `cmp`-verified through the CLI. Encode is flat within the noise
-of a shared machine (libxul 36.3 → 30.8 s, Chrome 32.1 → 35.1 s) and peak
-encoder RSS does not move (libxul 1,800,944 → 1,801,900 KiB, Chrome
-2,811,884 → 2,811,380 KiB): `MaskResidual` clones the whole prediction, but
-the encoder's peak is the matcher's two masked images, long freed by then.
-Apply is unchanged (median of three: libxul 2.28 → 2.12 s, Chrome 3.12 →
-3.16 s; peak RSS 399 → 407 MiB and 678 → 675 MiB).
+Applied and `cmp`-verified through the CLI at every step. Encode and apply
+are unchanged within the noise of a shared machine, and peak RSS does not
+move (encode: libxul 1,800,944 → 1,801,900 KiB, Chrome 2,811,884 →
+2,811,380 KiB; apply: 399 → 407 MiB and 678 → 675 MiB). `MaskResidual`
+clones the whole prediction, but the encoder's peak is the matcher's two
+masked images, long freed by then.
 
 The encoder's error counts -- `PredictErr` and the `mispredicted by section`
 note -- are taken against the masked prediction the residual is actually
@@ -227,7 +239,7 @@ the old image and what from the plan.
 | 5 | `.rela.dyn`: predict slot-gap column from the old table through the **pointer oracle**, apply gap correction (exact), predict addends by slot join, apply addend correction, predict tail, apply; `assembleRela` | `reloc.go:488, 299, 380, 391, 464` | old table, plan corrections | `.rela.dyn` |
 | 5b | `.relr.dyn`: expand the **old** packed table, project each slot's file offset through the runs, write the pointer oracle's answer for the old value; the new packed table is left to the byte prediction |  new (`relr.go:77`) | old table, old section map | `.data.rel.ro` slots |
 | 6 | DWARF field layer (unstripped ELF only): `dwarf.Apply` with the pointer oracle as `ptr` and `funcSizeDeltas(structure)` | `image.go:103–113`, `dwarf.go:75`, `presage/dwarf` | old debug secs, runs clipped per section | debug sections |
-| 7 | `.eh_frame`: walk the **old** section's FDEs, project each `initial_location` field through the runs, retarget via the pointer oracle, fix `address_range` where old sizes agree |  `ehframe.go:155, 212` | old `.eh_frame`, section maps | `.eh_frame` |
+| 7 | `.eh_frame`: walk the **old** section's FDEs, project each `initial_location` field through the runs, retarget via the pointer oracle, fix `address_range` where old sizes agree, and rewrite each `cie_ptr` as the distance between the projected entry and its projected CIE |  `ehframe.go:155, 212` | old `.eh_frame`, section maps | `.eh_frame` |
 | 8 | `.rodata` switch tables: enumerate candidate spans in the old section by signature (`roDataSpans`), apply only the variants whose `Keep` bit is set, retarget entries through the pointer oracle | `rodata.go:167, 199, 232` | old `.rodata`, `Keep` bits | `.rodata` |
 | 9 | retarget `.text`: walk references in every mapped body of the laid prediction, resolve each field's old target through the **image oracle** (projection first inside `.text`), rewrite the displacement | `equivalence.go:616` | — | `.text` fields |
 | 10 | per-function choice: structural prediction of old `.text` relocated through `addressLookup.target`, copy chosen bodies over the retargeted ones | `image.go:158–175`, `plan.go:669` | old `.text`, choice bits | chosen bodies |
@@ -561,8 +573,8 @@ gate is green the harness's whole-image rungs may be re-pointed at
 Fast unit tests (<1 s each, `t.Parallel`), from the harness's own where they
 exist: structure plan round-trip and truncation rejection
 (`plan_test.go:15, 44`), equivalence plan round-trip, reloc column replay on
-a synthetic table (`reloc_test.go`), `.eh_frame` walk + header rebuild + the `Finaliser`
-round trip (`ehframe_test.go`), RELR pack/parse round trip and slot replay
+a synthetic table (`reloc_test.go`), `.eh_frame` walk + header rebuild + `cie_ptr` replay +
+the `Finaliser` round trip (`ehframe_test.go`), RELR pack/parse round trip and slot replay
 (`relr_test.go`), rodata span detection and `Keep` selection
 (`rodata_test.go`), field-fix encode/apply round-trip (`fieldfix_test.go`),
 Breakpad and ELF symbol readers on small fixtures, and a synthetic whole

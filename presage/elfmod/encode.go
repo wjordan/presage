@@ -276,8 +276,8 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 		if fp, _ := unmarshalEhFramePlan(cp.EhFrame); fp.HdrExact {
 			hdr = "hdr rebuilt after the residual"
 		}
-		st.Notes = append(st.Notes, fmt.Sprintf("eh_frame: %d FDEs, %d retargeted, %d unknown, %d resized; %s",
-			e.FDEs, e.Retargeted, e.Unknown, e.Resized, hdr))
+		st.Notes = append(st.Notes, fmt.Sprintf("eh_frame: %d FDEs, %d retargeted, %d unknown, %d resized, %d cie pointers; %s",
+			e.FDEs, e.Retargeted, e.Unknown, e.Resized, e.CiePtrs, hdr))
 	}
 	if len(cp.Relr) != 0 {
 		r := ps.Relr
