@@ -309,6 +309,14 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 			return nil, st, err
 		}
 	}
+	// The eh_frame and .rodata layers read the old image and the oracle and
+	// write declared ranges of the output. Sections of one image do not
+	// overlap, so the two run concurrently -- checked rather than assumed,
+	// because the plan is untrusted, and run one after the other where the
+	// check fails. Their plans are parsed first so a corrupt one draws the
+	// same error in the same order it always did.
+	var ehFrame, roData func()
+	var ranges []byteRange
 	if len(cp.EhFrame) != 0 {
 		fp, err := unmarshalEhFramePlan(cp.EhFrame)
 		if err != nil {
@@ -320,22 +328,24 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 		if rp == nil {
 			return nil, st, errors.New("eh_frame plan needs the section geometry the relocation plan carries")
 		}
-		// Keyed by old address: an FDE names the function it describes
-		// by where that function used to be.
-		type extent struct{ old, new uint64 }
-		extents := make(map[uint64]extent)
-		for _, structure := range structures {
-			for _, m := range structure.Maps {
-				extents[structure.OldAddr+m.Src] = extent{m.SrcSize, m.DstSize}
+		ranges = append(ranges, byteRange{fp.NewOff, fp.NewSize}, byteRange{fp.HdrOff, fp.HdrSize})
+		ehFrame = func() {
+			defer trace.Stage("applyEhFrame")()
+			// Keyed by old address: an FDE names the function it describes
+			// by where that function used to be.
+			type extent struct{ old, new uint64 }
+			extents := make(map[uint64]extent)
+			for _, structure := range structures {
+				for _, m := range structure.Maps {
+					extents[structure.OldAddr+m.Src] = extent{m.SrcSize, m.DstSize}
+				}
 			}
+			extentOf := func(addr uint64) (uint64, uint64, bool) {
+				e, ok := extents[addr]
+				return e.old, e.new, ok
+			}
+			st.EhFrame = applyEhFrame(out, old, ep, fp, rp.OldSecs, parts.pointer(rp), extentOf)
 		}
-		extentOf := func(addr uint64) (uint64, uint64, bool) {
-			e, ok := extents[addr]
-			return e.old, e.new, ok
-		}
-		doneEh := trace.Stage("applyEhFrame")
-		st.EhFrame = applyEhFrame(out, old, ep, fp, rp.OldSecs, parts.pointer(rp), extentOf)
-		doneEh()
 	}
 	if len(cp.RoData) != 0 {
 		rd, err := unmarshalRoDataPlan(cp.RoData)
@@ -348,10 +358,13 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 		if rp == nil {
 			return nil, st, errors.New("rodata plan needs the section geometry the relocation plan carries")
 		}
-		doneRo := trace.Stage("applyRoData")
-		applyRoData(out, old, rd, parts.sm, parts.pointer(rp), parts.lk.unitAt)
-		doneRo()
+		ranges = append(ranges, byteRange{rd.NewOff, rd.NewSize})
+		roData = func() {
+			defer trace.Stage("applyRoData")()
+			applyRoData(out, old, rd, parts.sm, parts.pointer(rp), parts.lk.unitAt)
+		}
 	}
+	runLayers(disjointRanges(ranges), ehFrame, roData)
 	doneOr := trace.Stage("oracleImage")
 	oracle := parts.image(rp)
 	doneOr()
@@ -452,6 +465,44 @@ func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]b
 	return out, st, nil
 }
 
+// byteRange is one layer's declared write range in the output.
+type byteRange struct{ off, size uint64 }
+
+// disjointRanges reports whether no two of the ranges overlap. There are a
+// handful of them, so the pairwise test is the whole of it.
+func disjointRanges(rs []byteRange) bool {
+	for i, a := range rs {
+		for _, b := range rs[:i] {
+			if a.size != 0 && b.size != 0 && a.off < b.off+b.size && b.off < a.off+a.size {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// runLayers runs the non-nil layers, concurrently when their write ranges are
+// disjoint and in order when they are not.
+func runLayers(concurrent bool, layers ...func()) {
+	if !concurrent {
+		for _, f := range layers {
+			if f != nil {
+				f()
+			}
+		}
+		return
+	}
+	var wg sync.WaitGroup
+	for _, f := range layers {
+		if f == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(f func()) { defer wg.Done(); f() }(f)
+	}
+	wg.Wait()
+}
+
 type selectedStats struct {
 	Relocation x86.Stats
 	Functions  int
@@ -527,29 +578,73 @@ func applyStructuralChoices(text, oldText []byte, p predictionPlan, choices []by
 
 // layImage is the prediction's base: zero everywhere, 0xcc inside .text
 // (the padding byte between functions), then every run copied whole-image.
+//
+// The runs land in disjoint destinations and read a reference nothing writes,
+// so they are copied concurrently: most of what this costs is the page faults
+// of touching 186 MB of fresh output and as much of the reference, and faults
+// taken on several cores at once are that many times cheaper.
 func layImage(old []byte, ep equivalencePlan, releaseReferencePages func()) []byte {
 	out := make([]byte, int(ep.NewLen))
 	for _, w := range ep.Windows {
 		fill(out[w.New.Off:w.New.Off+w.New.Size], 0xcc)
 	}
 	if releaseReferencePages == nil {
-		for _, eq := range ep.Eqs {
-			copy(out[eq.Dst:eq.Dst+eq.N], old[eq.Src:eq.Src+eq.N])
-		}
+		copyRuns(out, old, ep.Eqs, 0, len(ep.Eqs))
 		return out
 	}
+	// With a reference the caller can evict, the runs are copied in rounds:
+	// the pages one round faulted in are dropped before the next one starts,
+	// which is what keeps the apply's resident set near the output's size
+	// rather than the output plus the whole reference.
 	const releaseStep = 16 << 20
-	sinceRelease := uint64(0)
-	for _, eq := range ep.Eqs {
-		copy(out[eq.Dst:eq.Dst+eq.N], old[eq.Src:eq.Src+eq.N])
-		sinceRelease += eq.N
-		if sinceRelease >= releaseStep {
-			releaseReferencePages()
-			sinceRelease = 0
+	lo, at := 0, uint64(0)
+	for i, eq := range ep.Eqs {
+		at += eq.N
+		if at < releaseStep {
+			continue
 		}
+		copyRuns(out, old, ep.Eqs, lo, i+1)
+		releaseReferencePages()
+		lo, at = i+1, 0
 	}
+	copyRuns(out, old, ep.Eqs, lo, len(ep.Eqs))
 	releaseReferencePages()
 	return out
+}
+
+// copyRuns copies eqs[lo:hi] across the worker pool, splitting the range so
+// each worker moves about the same number of bytes rather than the same
+// number of runs.
+func copyRuns(out, old []byte, eqs []equivalence, lo, hi int) {
+	if hi <= lo {
+		return
+	}
+	var total uint64
+	for _, eq := range eqs[lo:hi] {
+		total += eq.N
+	}
+	nw := min(workers(), hi-lo)
+	bounds := make([]int, 0, nw+1)
+	bounds = append(bounds, lo)
+	var at uint64
+	for i := lo; i < hi && len(bounds) < nw; i++ {
+		at += eqs[i].N
+		if at >= total/uint64(nw) {
+			bounds, at = append(bounds, i+1), 0
+		}
+	}
+	bounds = append(bounds, hi)
+	var wg sync.WaitGroup
+	for k := 0; k+1 < len(bounds); k++ {
+		wg.Add(1)
+		go func(a, b int) {
+			defer wg.Done()
+			for _, eq := range eqs[a:b] {
+				copy(out[eq.Dst:eq.Dst+eq.N], old[eq.Src:eq.Src+eq.N])
+			}
+		}(bounds[k], bounds[k+1])
+	}
+	wg.Wait()
 }
 
 // Cuts implements presage.Cutter: the correction is coded in pieces at the
