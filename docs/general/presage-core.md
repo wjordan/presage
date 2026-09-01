@@ -103,6 +103,17 @@ symbols are an encoder-only input (`Module.Symbols`, `presage/symbols`);
 exact. Registered after `go`, so a Go binary `go` declines falls to it. Ids
 above 15 are for admitted modules (SPEC §4.1), unused yet.
 
+A module may also implement `presage.Finaliser` for bytes the decoder can
+recompute from the finished output: `MaskResidual` gives the encoder a
+prediction in which those bytes are already the target's, so the residual
+never carries them, and `Finalise` recomputes them once the residual is
+applied — before the container's target hash, which is what makes a wrong
+recomputation an error rather than a wrong output. `go` uses it for the
+linker's FIPS integrity sum (`presage/gomod/fips.go`) and `elf` for
+`.eh_frame_hdr`, the index over `.eh_frame` (`presage/elfmod/ehframe.go`).
+The hashed prediction is the unmasked one, so both sides still agree on
+exactly what `Materialise` produced.
+
 Residual: exact regions use the positional correction (`SPEC.md` §6.1: the
 adaptive shapes and the modal correction), or, where the module implements
 `presage.Cutter`, the split residual — one piece per cut, each in the
