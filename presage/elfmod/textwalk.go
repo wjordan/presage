@@ -44,10 +44,11 @@ func newTextWalk(text []byte, maps []mapping, sites, counts bool) *textWalk {
 		}
 		return w
 	}
-	// Four shards per worker: mapped bodies differ in size by orders of
-	// magnitude, and one shard per worker leaves the machine waiting on
-	// whichever drew the big ones.
-	shards := shardsOf(len(maps), 4*workers(), func(lo, hi int) [][]fieldSite {
+	// The shards carry roughly equal destination bytes rather than equal map
+	// counts: mapped bodies differ in size by orders of magnitude, and an
+	// even split by count leaves the machine waiting on whichever shard drew
+	// the big ones.
+	shards := shardsAt(mapShards(maps, 4*workers()), func(lo, hi int) [][]fieldSite {
 		var parts [][]fieldSite
 		var part []fieldSite
 		var buf [2]opField
@@ -98,30 +99,53 @@ func newTextWalk(text []byte, maps []mapping, sites, counts bool) *textWalk {
 		at[i+1] = at[i] + n
 	}
 	w.sites = make([]fieldSite, at[len(shards)])
-	shardsOf(len(shards), len(shards), func(lo, hi int) struct{} {
-		for i := lo; i < hi; i++ {
+	var wg sync.WaitGroup
+	for i := range shards {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
 			out := w.sites[at[i]:]
 			for _, p := range shards[i] {
 				out = out[copy(out, p):]
 			}
-		}
-		return struct{}{}
-	})
+		}(i)
+	}
+	wg.Wait()
 	return w
 }
 
-// shardsOf splits [0,n) into nsh contiguous ranges and collects what f makes
-// of each, in range order.
-func shardsOf[T any](n, nsh int, f func(lo, hi int) T) []T {
-	nsh = min(max(nsh, 1), max(n, 1))
-	out := make([]T, nsh)
+// mapShards cuts [0,len(maps)) into at most nsh contiguous ranges of roughly
+// equal destination bytes, returning the nsh+1 boundaries.
+func mapShards(maps []mapping, nsh int) []int {
+	nsh = min(max(nsh, 1), len(maps))
+	var total uint64
+	for _, m := range maps {
+		total += m.DstSize
+	}
+	step := total/uint64(nsh) + 1
+	bounds := make([]int, 0, nsh+1)
+	bounds = append(bounds, 0)
+	var at uint64
+	for i, m := range maps {
+		at += m.DstSize
+		if at >= step && len(bounds) < nsh {
+			bounds, at = append(bounds, i+1), 0
+		}
+	}
+	return append(bounds, len(maps))
+}
+
+// shardsAt runs f over each of the ranges the boundaries name and collects
+// what it makes of them, in range order.
+func shardsAt[T any](bounds []int, f func(lo, hi int) T) []T {
+	out := make([]T, len(bounds)-1)
 	var wg sync.WaitGroup
-	for s := range nsh {
+	for k := range out {
 		wg.Add(1)
-		go func(s int) {
+		go func(k int) {
 			defer wg.Done()
-			out[s] = f(s*n/nsh, (s+1)*n/nsh)
-		}(s)
+			out[k] = f(bounds[k], bounds[k+1])
+		}(k)
 	}
 	wg.Wait()
 	return out
