@@ -12,7 +12,6 @@ import (
 
 	"github.com/wjordan/presage/delta/x86"
 	"github.com/wjordan/presage/internal/cz"
-	"github.com/wjordan/presage/internal/trace"
 )
 
 // The field fix (fieldfix.go) corrects the four-byte PC-relative
@@ -317,9 +316,7 @@ func applyOpField(text []byte, maps []mapping, b []byte, w *textWalk) (opStats, 
 	if r.err != nil || !r.done() {
 		return st, errors.New("invalid operand field plan")
 	}
-	doneB := trace.Stage("  opField/bodies")
 	bodies, total := opBodies(text, maps, w)
-	doneB()
 	st.Domain = total
 	var ents [nOpClass][]opRun
 	for c := range cols {
@@ -352,7 +349,6 @@ func applyOpField(text []byte, maps []mapping, b []byte, w *textWalk) (opStats, 
 	// the same ordering says whether a body holds an entry at all, from the
 	// next body's bases alone. Nearly none do, and the ones that do not are
 	// never walked.
-	defer trace.Stage("  opField/replay")()
 	applied := shardRange(len(bodies), func(lo, hi int) [nOpClass]int {
 		var n [nOpClass]int
 		if lo >= hi {

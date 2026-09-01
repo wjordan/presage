@@ -72,7 +72,7 @@ func deriveEnumeration(oldFile []byte, win section) []uint64 {
 // inside data islands is identical on both sides; a wrong target is only ever
 // a spurious enumeration entry, never a correctness hazard.
 func callTargets(code []byte, addr uint64) []uint64 {
-	const chunk = 8 << 20
+	const chunk = 1 << 20
 	n := (len(code) + chunk - 1) / chunk
 	parts := make([][]uint64, n)
 	end := addr + uint64(len(code))
