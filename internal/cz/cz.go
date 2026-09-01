@@ -1,13 +1,11 @@
 // Package cz is the compression used inside patches and blobs: a one-byte
-// codec tag, and an encoder that keeps the smallest of brotli-11, zstd and
+// codec tag, and an encoder that keeps the smallest of brotli-9, zstd and
 // raw.
 //
-// Pure-Go brotli-11 matches the reference encoder byte for byte and is
-// 5-13 % smaller than pure-Go zstd on every patch frame measured (klauspost's
-// best level is the equivalent of zstd -11; it has no btopt/btultra), but
-// zstd's framing wins by a few dozen bytes on the smallest patches, and
-// trying it costs ~30 ms per 8 MiB frame. Brotli quality 10 on large frames
-// was 4-5 % larger for 1.7-1.9x the speed and is no longer used.
+// Quality 9 is the measured balance for large native binaries: quality 10
+// and 11 enter Brotli's much more expensive optimal parser, while quality 8
+// saves essentially no more time and produces a larger stream. Zstd's
+// framing still wins on some small inputs and is cheap enough to try first.
 // See docs/go-module-design.md 2.5.
 package cz
 
@@ -57,7 +55,7 @@ func zstdDecoder() *zstd.Decoder {
 // CompressZstd compresses with zstd only.
 func CompressZstd(src []byte) []byte { return zstdEncoder().EncodeAll(src, nil) }
 
-// Compress returns the smallest of raw, zstd and brotli-11 for src, and the
+// Compress returns the smallest of raw, zstd and brotli-9 for src, and the
 // tag that names it. It never returns something larger than src itself.
 func Compress(src []byte) (codec byte, out []byte) {
 	codec, out = Raw, src
@@ -66,7 +64,7 @@ func Compress(src []byte) (codec byte, out []byte) {
 	}
 	var buf bytes.Buffer
 	buf.Grow(len(out))
-	w := brotli.NewWriterOptions(&buf, brotli.WriterOptions{Quality: 11, LGWin: 24})
+	w := brotli.NewWriterOptions(&buf, brotli.WriterOptions{Quality: 9, LGWin: 24})
 	if _, err := w.Write(src); err == nil && w.Close() == nil && buf.Len() < len(out) {
 		codec, out = Brotli, buf.Bytes()
 	}
@@ -74,15 +72,15 @@ func Compress(src []byte) (codec byte, out []byte) {
 }
 
 // An encoder choosing between two shapes of the same bytes needs a number,
-// not the bytes. Compress gives it the exact number and charges brotli-11 for
-// it, and most of what brotli-11 does on this path is thrown away: the losing
+// not the bytes. Compress gives it the exact number and charges brotli-9 for
+// it, and most of what brotli-9 does on this path is thrown away: the losing
 // shape is never written. SizeProxy answers the same question with a fast
 // compressor, so the trial costs a thirtieth and only the bytes that ship are
 // compressed for real.
 //
-// A proxy's job is to *rank* two candidates the way quality 11 would, so the
-// obvious choice is brotli at a low quality -- the same algorithm with a
-// smaller search. Measured, it is not: on Chrome the two proxies pick exactly
+// A proxy's job is to *rank* two candidates the way the shipping compressor
+// would, so the obvious choice is brotli at a low quality -- the same
+// algorithm with a smaller search. Measured, it is not: on Chrome the two proxies pick exactly
 // the same shapes and cost the same wall time, and on the small streams the
 // correction tests use, quality 5 misprices a nine-byte margin that zstd gets
 // right. zstd is what a trial already computes on its way to brotli, so it is
@@ -90,7 +88,7 @@ func Compress(src []byte) (codec byte, out []byte) {
 const (
 	proxyZstd = iota
 	proxyBrotli5
-	proxyExact // brotli-11: what a trial cost before, for measurement
+	proxyExact // the shipping compressors, for measurement
 )
 
 // sizeProxyMode is settable by PRESAGE_SIZE_PROXY ("brotli5", "zstd",

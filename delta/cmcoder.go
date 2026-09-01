@@ -393,9 +393,13 @@ type cmCoder struct {
 	mm     *matchModel
 	mx     *mixer
 	hashes []uint32
-	npred  int // index of the first Pred-conditioned bank, or -1
-	ncls   int // index of the first Cls-conditioned bank, or -1
-	vs     varintState
+	// bankHash maps each physical bank to its logical context in hashes. The
+	// compact wire model can omit redundant history-only contexts without
+	// complicating the hot bit loop.
+	bankHash []uint8
+	npred    int // index of the first Pred-conditioned bank, or -1
+	ncls     int // index of the first Cls-conditioned bank, or -1
+	vs       varintState
 }
 
 // bankBits sizes the tables to the stream, so a 4 KiB stream does not
@@ -418,6 +422,13 @@ func matchBits(n int) uint {
 }
 
 func newCMCoder(n int, side *CMSide) *cmCoder {
+	return newCMCoderBankShift(n, side, 0)
+}
+
+// newCMCoderBankShift keeps the model and its wire semantics intact while
+// reducing the hashed banks by powers of two. The order-0 bank is already
+// small and direct-addressed, so shrinking it would only add collisions.
+func newCMCoderBankShift(n int, side *CMSide, bankShift uint) *cmCoder {
 	c := &cmCoder{side: side, npred: -1, ncls: -1}
 	nb := 4
 	if side != nil && side.Varint {
@@ -430,17 +441,32 @@ func newCMCoder(n int, side *CMSide) *cmCoder {
 		c.ncls = nb
 		nb += 2
 	}
+	c.hashes = make([]uint32, nb)
+	for i := range nb {
+		c.bankHash = append(c.bankHash, uint8(i))
+	}
+	// Once a prediction is available, the order-2 and order-4 generic byte
+	// contexts overlap heavily with the two prediction-conditioned contexts.
+	// Omitting them removes a quarter of the table probes and model updates.
+	if bankShift != 0 && c.npred >= 0 {
+		c.bankHash = []uint8{0, 1, uint8(c.npred), uint8(c.npred + 1)}
+		if c.ncls >= 0 {
+			c.bankHash = append(c.bankHash, uint8(c.ncls), uint8(c.ncls+1))
+		}
+	}
 	bits := bankBits(n)
-	for i := 0; i < nb; i++ {
+	for _, hi := range c.bankHash {
+		i := int(hi)
 		b := bits
 		if i == 0 {
 			b = 12 // order-0 within the selector: a direct table, no hashing loss
+		} else if b > 12+bankShift {
+			b -= bankShift
 		}
 		c.banks = append(c.banks, newBank(b))
 	}
-	c.hashes = make([]uint32, nb)
 	c.mm = newMatchModel(matchBits(n))
-	c.mx = newMixer(nb+1, CMSelMax*8)
+	c.mx = newMixer(len(c.banks)+1, CMSelMax*8)
 	return c
 }
 
@@ -497,7 +523,7 @@ func (c *cmCoder) code(src []byte, enc *arEncoder, dec *arDecoder, dst []byte) {
 	for i := range data {
 		sel := int(set(i, data))
 		for j, b := range c.banks {
-			b.base = c.hashes[j]
+			b.base = c.hashes[c.bankHash[j]]
 		}
 		c0 := uint32(1)
 		for k := uint(0); k < 8; k++ {
@@ -548,6 +574,30 @@ func CMDecode(coded []byte, n int, side *CMSide) ([]byte, error) {
 		return nil, err
 	}
 	c := newCMCoder(n, side)
+	dst := make([]byte, n)
+	c.code(nil, nil, newArDecoder(coded), dst)
+	return dst, nil
+}
+
+// CMEncodeCompact uses a smaller, prediction-focused model than CMEncode. It
+// has its own wire codec because the decoder's model is part of the
+// arithmetic-coded bitstream.
+func CMEncodeCompact(src []byte, side *CMSide) ([]byte, error) {
+	if err := side.check(len(src)); err != nil {
+		return nil, err
+	}
+	c := newCMCoderBankShift(len(src), side, 2)
+	enc := newArEncoder(len(src)/2 + 64)
+	c.code(src, enc, nil, nil)
+	return enc.flush(), nil
+}
+
+// CMDecodeCompact reverses CMEncodeCompact.
+func CMDecodeCompact(coded []byte, n int, side *CMSide) ([]byte, error) {
+	if err := side.check(n); err != nil {
+		return nil, err
+	}
+	c := newCMCoderBankShift(n, side, 2)
 	dst := make([]byte, n)
 	c.code(nil, nil, newArDecoder(coded), dst)
 	return dst, nil

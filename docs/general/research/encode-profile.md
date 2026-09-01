@@ -1,14 +1,30 @@
 # presage encoder profile — Chrome 151.169 → 151.173
 
-Measurement only. All instrumentation in this worktree is scratch (`cmd/presage/main.go`
+Historical measurement at the pre-v5 encoder. The profiling interfaces it
+motivated are now permanent CLI flags (`-cpuprofile`, `-allocprofile`, and
+`-traceprofile`). Container v5 also revisited the preset across every terminal
+compression site, not only the final frame: Brotli 9 plus the compact CM model
+cuts the Firefox encode from 55.37 to about 30 seconds, for a 7.5% patch-size
+increase.
+
+A follow-up v5 heap profile separated cumulative allocation (19.6 GB) from the
+peak live set. During whole-image matching, the two input images and their two
+canonical copies occupy about 708 MiB; the dense source-seed positions, bucket
+ends and hash scratch occupy another 981 MiB. This explains the approximately
+1.7 GiB floor. A 1.5 GiB soft heap limit gives 1,801,300 KiB process RSS with
+no time or output change, versus 3,521,840 KiB unconstrained. At 1 GiB the
+collector cannot reclaim the live matcher and merely slows the encode. The CLI
+therefore derives a default limit from the larger image with a 1.5 GiB floor;
+an explicit `GOMEMLIMIT` overrides it. The original evidence follows.
 
 > Profiled at commit 05518bf (pre derived-map/CM — the isolation worktree
 > snapshotted the session-start HEAD). The trial-compression and matching
 > machinery measured here is unchanged by those ports (both measured flat
 > on encode), so the ranking stands; the derived-map sweep and CM coder
 > simply do not appear.
-profiling hooks, `internal/cz/cz.go` call-site counters, one `fmt.Fprintf` in
-`presage/split.go`). Nothing here is meant to land.
+
+The call-site counters in `internal/cz/cz.go` and the diagnostic print in
+`presage/split.go` were scratch and did not land.
 
 Machine: 24 cores (`nproc`). Go binary built from this worktree at `05518bf` + working-tree
 changes. Raw artifacts under `prof/`: `diff.cpu`, `patch.cpu`, `diff.top-cum.txt`,
@@ -213,7 +229,7 @@ Evidence: 6.06 GB peak RSS for a 291 MB target (21×); `mallocgc` 7.38 s cum,
 **Estimated win: a few percent from buffer reuse, or from a higher `GOGC` at the cost of even
 more RSS. Low priority, but the 6 GB itself may be a product constraint worth a separate look.**
 
-### ✗ Size-affecting lever — explicitly the wrong one: lowering the *final* preset
+### Superseded probe: lowering only the *final* preset
 Dropping `frameBody`'s brotli-11 to q10, or shipping zstd only, is the obvious-looking knob and
 it is a trap: **`frameBody` is only 10.42 CPU-s (6 %)**, so the ceiling is ~10 s wall, and every
 byte of it is paid for in patch size. The package comment in `internal/cz/cz.go` already records

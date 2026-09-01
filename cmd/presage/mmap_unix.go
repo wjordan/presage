@@ -8,10 +8,10 @@ import (
 )
 
 // readWhole returns the file's bytes, mapped read-only where the platform
-// allows it. Apply reads the reference image once per byte and never writes to
-// it, so a mapping spares the 291 MB copy os.ReadFile makes and the page cache
-// serves it in place; PROT_READ means a stray write is a crash, not a silent
-// corruption of someone's input file. The unmap function is nil for the copy.
+// allows it. Apply never writes the reference, so a mapping spares the 291 MB
+// copy os.ReadFile makes and the page cache serves it in place; PROT_READ means
+// a stray write is a crash, not silent input corruption. The unmap function is
+// nil for the copy.
 func readWhole(name string) ([]byte, func(), error) {
 	f, err := os.Open(name)
 	if err != nil {

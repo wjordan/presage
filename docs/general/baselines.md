@@ -1,8 +1,8 @@
 # The README table: what each number is
 
 Provenance for the headline comparison in `README.md`. presage column
-measured 2026-08-31 at container v4 (derived function map, displacement
-columns, CM coder over correction and plan streams, parallel decode);
+measured 2026-08-31 at container v5 (derived function map, displacement
+columns, compact CM coder over correction and plan streams, parallel decode);
 baseline columns measured 2026-08-29. All on this machine unless a source
 doc is named. All sizes in bytes.
 
@@ -33,12 +33,10 @@ presage diff -symbols ~/.cache/presage-pairs/libxul-154.0.funcs,~/.cache/presage
     libxul-154.0.so libxul-154.0.1.so -o libxul.psg
 ```
 
-Chrome encodes in 53 s at ~5 GB RSS and applies in 3.6 s at 3.1 GB; libxul
-56 s and 3.5 s (Zucchini applies its Chrome patch in 3.84 s on the same
-machine). Encoder trial pricing uses a zstd proxy above a 128 MiB target
-and the real compressor below it (`PRESAGE_SIZE_PROXY` overrides); the
-prometheus row is exact-priced by that default. The harness's own best on
-these pairs, with the same matcher and two `xz -9e` streams, is
+Encoder trial pricing uses a zstd proxy above a 128 MiB target and the real
+compressor below it (`PRESAGE_SIZE_PROXY` overrides); the prometheus row is
+exact-priced by that default. The harness's own best on these pairs, with the
+same matcher and two `xz -9e` streams, is
 2,617,700 / 3,632,264; the Zucchini-stream runs the earlier drafts of this
 table quoted were 2,634,264 / 4,063,404 (`elf-module.md` §0,
 `research/matcher-chrome.md`).
@@ -62,23 +60,50 @@ around 40% on the smaller pairs. Earlier drafts of the README quoted
 
 | pair | presage | Zucchini | bsdiff | xdelta3 | zstd `--patch-from` |
 |---|---:|---:|---:|---:|---:|
-| one-line change, 30 MB | 1,129 | 173,060 | 150,475 | 1,390,889 | 538,493 |
-| prometheus 3.13.1 → 3.13.2 | 69,933 | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
-| Chrome 151.0.7922.169 → .173 | 2,256,358 | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
-| libxul 154.0 → 154.0.1 | 2,665,810 | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
+| one-line change, 30 MB | 1,100 | 173,060 | 150,475 | 1,390,889 | 538,493 |
+| prometheus 3.13.1 → 3.13.2 | 74,636 | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
+| Chrome 151.0.7922.169 → .173 | 2,376,189 | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
+| libxul 154.0 → 154.0.1 | 2,866,328 | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
 
 Two checks that the rows are scoped consistently: `bsdiff` on the one-line
 pair reproduces `go-module-results.md`'s 150,475 exactly, and the ordering
 bsdiff < xdelta3 < zstd `--patch-from` holds on all four rows.
+
+## Resource comparison
+
+Measured on 2026-08-31 on the same 24-core Linux 6.17 x86-64 host. Values are
+medians of three serial warm-cache runs; elapsed time and maximum RSS come
+from `/usr/bin/time`. Outputs went to tmpfs to minimise storage variance, and
+every apply was compared byte-for-byte with the target.
+
+| pair | tool | encode s | encode RSS KiB | apply s | apply RSS KiB |
+|---|---|---:|---:|---:|---:|
+| prometheus 3.13.1 → 3.13.2 | presage | 4.26 | 970,480 | 0.75 | 401,164 |
+| prometheus 3.13.1 → 3.13.2 | Zucchini + XZ | 21.34 | 1,100,484 | 0.45 | 203,012 |
+| prometheus 3.13.1 → 3.13.2 | bsdiff | 36.79 | 825,148 | 0.49 | 191,996 |
+| prometheus 3.13.1 → 3.13.2 | xdelta3 | 8.49 | 705,716 | 0.38 | 115,244 |
+| prometheus 3.13.1 → 3.13.2 | zstd `--patch-from` | 21.13 | 431,124 | 0.13 | 187,668 |
+| libxul 154.0 → 154.0.1 | presage | 30.44 | 1,801,300 | 1.57 | 395,400 |
+| libxul 154.0 → 154.0.1 | Zucchini + XZ | 70.00 | 2,256,308 | 0.97 | 394,180 |
+| libxul 154.0 → 154.0.1 | bsdiff | 79.46 | 1,633,536 | 1.18 | 374,780 |
+| libxul 154.0 → 154.0.1 | xdelta3 | 21.01 | 1,320,848 | 0.86 | 205,668 |
+| libxul 154.0 → 154.0.1 | zstd `--patch-from` | 34.18 | 782,400 | 0.28 | 366,744 |
+
+Tool versions were presage at this document's revision, Zucchini 2.0, bsdiff
+4.3, xdelta3 3.2.0, zstd 1.5.7 and XZ Utils 5.8.1. Commands match the size
+table above. Zucchini's figures include `xz -9e -T0`: time is the sum of the
+two serial stages and RSS is the larger peak. xdelta3 apply uses the same
+source-window size as encode. The C++ presage encoder alone reads the symbol
+files; no apply command does.
 
 ## What the table does not say
 
 For `libxul` the bsdiff column is a locally-run tool, not what Mozilla ships.
 The shipped patch is an mbsdiff at 10,779,184, whose blocks the MAR container
 compresses with XZ rather than bzip2, so it beats local bsdiff; presage is
-4× smaller again. See `research/firefox-partial-mar.md`.
+3.8× smaller again. See `research/firefox-partial-mar.md`.
 
-On the one-line row the shipped patch is 1,129 B, of which 134 B is the
-container header and 100 B is random (the two build-ID notes; a `-buildid=`
-build is 970 B, and the FIPS sum the decoder now recomputes);
+On the one-line row the shipped patch is 1,100 B, of which 134 B is the
+container header and 100 B is random (the two build-ID notes); the FIPS sum
+is recomputed by the decoder.
 `research/one-liner-floor.md` has the full ledger.

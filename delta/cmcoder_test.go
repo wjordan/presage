@@ -57,6 +57,21 @@ func TestCMRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCMCompactRoundTrip(t *testing.T) {
+	src, side := cmSample(20000)
+	coded, err := CMEncodeCompact(src, side)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := CMDecodeCompact(coded, len(src), side)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, src) {
+		t.Fatal("round trip differs")
+	}
+}
+
 // The prediction context is the reason this coder exists: with it the same
 // bytes must cost measurably less than without.
 func TestCMPredictionContextPays(t *testing.T) {

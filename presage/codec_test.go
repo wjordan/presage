@@ -334,7 +334,7 @@ func TestSplitResidualCM(t *testing.T) {
 		t.Fatal(err)
 	}
 	codecs := pieceCodecs(t, stream)
-	if !bytes.Contains(codecs, []byte{codecCM}) {
+	if !bytes.Contains(codecs, []byte{codecCMCompact}) {
 		t.Fatalf("codecs %v: the CM coder was not chosen", codecs)
 	}
 	out := append([]byte(nil), pred...)
@@ -345,6 +345,22 @@ func TestSplitResidualCM(t *testing.T) {
 		t.Fatal("the CM-coded residual did not reproduce the target")
 	}
 	t.Logf("%d-byte region, %d-byte residual, kinds %v, codecs %v", n, size, pieceKinds(t, stream), codecs)
+}
+
+func TestCMWorth(t *testing.T) {
+	for _, tc := range []struct {
+		coded, incumbent int
+		want             bool
+	}{
+		{7951, 10000, true},
+		{7952, 10000, false},
+		{89999, 100000, true},
+		{90000, 100000, false},
+	} {
+		if got := cmWorth(make([]byte, tc.coded), tc.incumbent); got != tc.want {
+			t.Errorf("cmWorth(%d, %d) = %v, want %v", tc.coded, tc.incumbent, got, tc.want)
+		}
+	}
 }
 
 // An id no codec claims is refused by name, not misread.

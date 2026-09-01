@@ -67,7 +67,7 @@ byte-for-byte on Chrome, libxul and Prometheus.
 | libxul 154.0 → .1 | 945 MB | 800 MB | **620 MB** | 3.52 s | **3.42 s** |
 | Prometheus 3.13.1 → .2 | 600 MB | 600 MB | **400 MB** | 0.80 s | **0.79 s** |
 
-The CLI column includes its new automatic soft limit: 2.2× target size, with
+At that pass the CLI column included an automatic soft limit of 2.2× target size, with
 a 256 MiB minimum. An explicit `GOMEMLIMIT` takes precedence. The library does
 not change a process-global runtime setting; without a limit, the code changes
 alone reduce Chrome another 27.8% from the first pass.
@@ -98,6 +98,81 @@ The one-shot allocation benchmark moved from 2,574,672,864 to 2,480,408,488
 B/op, 94.3 MB less allocation. Cached patches still apply byte-for-byte on
 Chrome, libxul and Prometheus. libxul remains near 620 MiB and Prometheus near
 400 MiB because another phase already sets their high-water marks.
+
+## 1.3 Fourth pass: bound clean reference residency by phase
+
+The remaining large jump was outside the Go heap. The Linux CLI maps the old
+file read-only, and a Chrome prediction eventually faults all 291 MB of it
+resident. Later phases reread very different subsets, but the kernel kept all
+of the earlier clean pages mapped while the destination and prediction tables
+grew.
+
+The ELF decoder now accepts an optional residency callback from the mapping
+owner. The Linux CLI implements it with `MADV_DONTNEED`; byte-slice library
+callers and non-Linux builds leave it nil. Whole-image layout evicts the clean
+reference before it starts and after each 16 MiB of equivalence copies.
+Structural replay works in 64K-map batches and evicts between them. A later
+phase faults back only the file ranges it actually reads. The mapping is never
+unmapped or modified, so patch validation and output are unchanged.
+
+Decoder-only enumeration and target caches are also removed once their
+finished structural plans own everything still needed. A collection before
+destination allocation makes those pages reusable rather than carrying them
+into the next phase. Entries are removed only for the current reference; this
+does not clear an unrelated concurrent decoder's cache keys.
+
+| pair | prior max RSS | phase-bounded max RSS | change | prior wall | new wall |
+|---|---:|---:|---:|---:|---:|
+| Chrome 151.169 → .173 | ~916,000 KiB | **722,064 KiB** median | **−21.2%** | ~3.0 s | **2.88 s** |
+| libxul 154.0 → .1 | ~620,000 KiB | **535,768 KiB** median | **−13.6%** | ~3.4 s | **3.39 s** |
+| Prometheus 3.13.1 → .2 | ~400,000 KiB | **~400,000 KiB** | none | ~0.79 s | **~0.79 s** |
+
+Chrome is the median of seven fresh processes and libxul of five, all with a
+warm page cache; every output compared byte-for-byte with the cached target.
+Chrome runs ranged from 694,112 to 727,256 KiB. The result is deliberately a
+CLI optimisation: applying from an ordinary heap buffer must not use
+`MADV_DONTNEED`, which can discard anonymous data. Refaulting is cheap with a
+warm cache and measured neutral here, but storage latency is the principal
+risk on a cold or heavily pressured system.
+
+## 1.4 Fifth pass: change the speed/size model
+
+The Firefox profile exposed a different high-water mark. Context-mixing
+tables accounted for 665 MiB of cumulative apply allocation and 160 MiB still
+resident at the final allocation snapshot. On encode, Brotli's quality-10/11
+optimal parser dominated CPU and its working set, while minimum-sized LZ
+indices over many tiny correction regions accumulated 44 GiB of allocation.
+
+Container v5 adds a compact CM codec rather than silently changing the old
+arithmetic model. Its hashed banks are quarter-sized; prediction-conditioned
+streams omit two generic history banks that duplicated the prediction and
+field contexts. Plan columns use the same compact codec, while codecs written
+by the old model remain decodable. The encoder uses CM only when it saves at
+least 2 KiB and 10% on a stream. Brotli quality 9 avoids the optimal parser;
+quality 8 measured the same time with a slightly larger patch. Short LZ
+regions use an exact bounded scan instead of allocating the minimum hash
+table. The apply CLI heap target moves to 1.5× target size with a 256 MiB
+floor. The encoder now also bounds heap growth at the measured whole-image
+matcher knee, while leaving an explicit `GOMEMLIMIT` in control.
+
+| pair | prior patch | v5 patch | prior encode | v5 encode | prior apply | v5 apply |
+|---|---:|---:|---:|---:|---:|---:|
+| Chrome 151.169 → .173 | 2,256,358 | 2,376,189 | — | **31.56 s / 2,811,180 KiB** | 2.88 s / 722,064 KiB | **2.52 s / 674,632 KiB** |
+| libxul 154.0 → .1 | 2,665,810 | 2,866,328 | 55.37 s / 4,423,164 KiB | **30.44 s / 1,801,300 KiB** | 3.48 s / 525,904 KiB | **1.57 s / 395,400 KiB** |
+| Prometheus 3.13.1 → .2 | 69,933 | 74,636 | 5.16 s / 1,049,492 KiB | **4.26 s / 970,480 KiB** | 0.81 s / 400,968 KiB | **0.75 s / 401,164 KiB** |
+
+Times and RSS are three-run medians. Every apply was hash-verified internally;
+Firefox and Prometheus were
+also compared byte-for-byte with their targets. Firefox's patch grows 7.5%,
+but remains 3.3× smaller than the next-smallest comparison. Its apply RSS is
+now within 1.2 MiB of Zucchini + XZ, while encode is faster than zstd's patch
+mode. The bounded small-LZ path alone saved about 117 MiB of Firefox encode
+RSS but no wall time. Bounding retained heap at the matcher's live-set knee
+then nearly halved encode RSS without changing the patch or wall time.
+
+The CLI exposes `-cpuprofile`, `-allocprofile`, and `-traceprofile` on both
+commands. They can be combined and are retained as normal performance-analysis
+interfaces rather than one-off environment hooks.
 
 ## 2. Where the baseline went
 
@@ -140,10 +215,11 @@ The code change and a Go runtime memory limit compose well:
 | Prometheus 3.13.1 → .2, code only | 600 MB | 0.79 s | 6.4× |
 | Prometheus, `GOMEMLIMIT=256MiB` | **400 MB** | 0.80 s | **4.3×** |
 
-After the second-pass changes, the ELF knee is near `2.2 * target size`.
+After the second-pass changes, the ELF knee was near `2.2 * target size`.
 Chrome at 500 MiB did not reduce RSS below the 600 MiB result and slowed from
 3.03 to 3.62 seconds; 400 MiB took 4.22 seconds. The CLI applies the measured
-formula automatically unless the environment supplies `GOMEMLIMIT`. This is
+formula automatically unless the environment supplies `GOMEMLIMIT`. The v5
+model moves the measured default to 1.5× (§1.4). This is
 admission control, not a hard promise: Go defines the limit as soft, and it
 excludes the reference's `mmap`. The official GC guide specifically motivates
 it with transient heap spikes and warns about thrashing below the live set:
@@ -170,21 +246,21 @@ and changed RSS from about 600 to 542 MB (−10%), but changed median apply from
 5% RSS for the same slowdown. Do not make it the default. It remains a
 reasonable explicit low-memory mode if a 10–13% CPU trade is acceptable.
 
-### Halve the context-model tables
+### Halve the residual context-model tables alone
 
 Reducing every nontrivial CM bank by one address bit halves that model's
 counter memory. A fresh Chrome encode produced a 2,259,357-byte patch, only
 2,999 bytes (+0.133%) above the production patch, and apply became faster from
 better cache locality. Peak RSS was unchanged at both the default and 750 MiB
-limit: those pages were not the phase setting the high-water mark. This may be
-a good speed/patch-size change, but it is not a decoder-memory lever.
+limit: those pages were not the phase setting the high-water mark. It became
+material only as a distinct wire codec used for plan and residual streams
+together, with redundant contexts removed and a lower heap target (§1.4).
 
 ### Force the GC below the live-set knee
 
-The new knee is 600 MiB managed memory. Below 500 MiB total RSS stays near 932
-MB while wall time rises sharply. More GC cannot remove live metadata, the
-mapped reference, or the destination. Treat that as the current practical
-floor, not as a tuning failure.
+The then-current knee was 600 MiB managed memory. Below 500 MiB total RSS
+stayed near 932 MB while wall time rose sharply. More GC could not remove live
+metadata, the mapped reference, or the destination at that revision.
 
 ### Reduce concurrency or repeat walks
 
@@ -211,7 +287,7 @@ was removed, the next reached the same ceiling. Delaying prefetch also gave up
 useful CPU overlap, so these changes were not retained solely as decoder-peak
 optimisations.
 
-At the field-fix/correction boundary, GC traces now show about 607 MiB of
+At that revision's field-fix/correction boundary, GC traces showed about 607 MiB of
 managed memory live. Lowering `GOMEMLIMIT` below that knee leaves RSS unchanged
 and increases wall time. A further material reduction therefore needs to
 remove an output- or reference-sized resident object, or change when global
@@ -248,18 +324,20 @@ materialisation, not pretending the global dependencies do not exist.
    views and exact CM-side sizing take the code-only Chrome peak from 3.09 GB
    to 1.25 GB with no format change or patch cost, while improving wall time.
 
-2. **Keep apply-memory admission at the process boundary.** The CLI now sets
-   `max(256 MiB, 2.2 × target)` unless `GOMEMLIMIT` is explicit, bringing Chrome
-   to 934 MB. Library/service callers should set their own process policy.
-   Longer term, put a conservative module working-set declaration in the patch
-   header and reject work that cannot fit before allocating it.
+2. **Keep apply-memory admission and phase-aware page eviction at the process
+   boundary.** The Linux CLI combines `max(256 MiB, 1.5 × target)` managed-memory
+   admission with eviction of clean reference pages at reconstruction phase
+   boundaries, bringing Chrome to about 675,000 KiB. Library/service callers
+   should set their own process policy. Longer term, put a conservative module
+   working-set declaration in the patch header and reject work that cannot fit
+   before allocating it.
 
-3. **Make decode memoisation apply-scoped.** The identity caches retain about
-   108 MiB after a Chrome apply (target domain, derived enumeration, parsed
-   maps and relocation data). That does not set the one-shot CLI peak, but it
-   is the wrong lifetime for a daemon and retains references to explicitly
-   unmapped CLI input. A decoder session should own and release these entries
-   after the residual has consumed its field context.
+3. **Finish making decode memoisation apply-scoped.** Reconstruction now drops
+   the current reference's target, enumeration, and relocation cache entries
+   as soon as their phases finish. Parsed maps still live through displacement
+   context construction, and package-global identity caches remain the wrong
+   lifetime for a long-running decoder. A decoder session should own every
+   entry and release it after the residual has consumed its field context.
 
 4. **Add a destination-backed materialiser.** An optional `MaterialiseInto`
    path can build directly into a writable output mapping or transactional
@@ -284,8 +362,8 @@ materialisation, not pretending the global dependencies do not exist.
    simultaneously live `pctab`, `gofunc`, concatenations and the final pcln
    copy.
 
-The practical milestone is met: the code changes plus the CLI runtime budget
-put both large ELF cases near 3.3× target RSS. Destination-backed
-materialisation and scoped metadata are the route from there toward the
-`old + new + metadata` bound; more GC tuning and smaller entropy tables are
-not.
+The practical milestone is met: the code changes, CLI runtime budget, and
+Linux reference-page eviction put Chrome near 2.4× and libxul near 2.2× target
+RSS. Destination-backed materialisation and fully scoped metadata are the
+route from there toward the `old + new + metadata` bound; more GC tuning and
+smaller entropy tables in isolation are not.

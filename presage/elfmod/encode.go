@@ -139,7 +139,7 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 	// the structural body, one window at a time.
 	var choices []byte
 	if st.Mappings != 0 {
-		laid := layImage(old, ep)
+		laid := layImage(old, ep, nil)
 		parts := newOracleParts(ep, structures)
 		oracle := parts.image(nil)
 		for i, w := range windows {
@@ -220,7 +220,7 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 			OldAddr: oldRo.Addr, NewAddr: newRo.Addr,
 			TextLo: oi.Text.Addr, TextHi: oi.Text.Addr + oi.Text.Size,
 		}
-		p, _, err := predictImage(old, cp)
+		p, _, err := predictImage(old, cp, nil)
 		if err != nil {
 			return nil, nil, fmt.Errorf("elf: rodata selection: %w", err)
 		}
@@ -232,7 +232,7 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 
 	// 8. The field fix over each finished code window.
 	{
-		p, _, err := predictImage(old, cp)
+		p, _, err := predictImage(old, cp, nil)
 		if err != nil {
 			return nil, nil, fmt.Errorf("elf: field fix: %w", err)
 		}
@@ -249,7 +249,7 @@ func (m Module) Analyse(refs [][]byte, target []byte) ([]byte, []byte, error) {
 
 	// 9. What the decoder will build.
 	plan, planNote := packPlan(cp.marshal())
-	out, ps, err := predictImage(old, cp)
+	out, ps, err := predictImage(old, cp, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("elf: %w", err)
 	}

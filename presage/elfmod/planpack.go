@@ -24,8 +24,8 @@ import (
 //
 // packPlan carves the columns worth carving out of the marshalled plan, codes
 // each on its own under the plan contexts (delta/cmplan.go), and leaves the
-// rest where it was. A column is carved only where the coder beats brotli-11
-// on that column by planCMMinGain -- decode is about a megabyte a second, so a
+// rest where it was. A column is carved only where the coder beats regular
+// terminal compression on that column by planCMMinGain -- decode is about a megabyte a second, so a
 // column that saves two hundred bytes for a third of a second is not a trade a
 // patch applier would take.
 //
@@ -49,11 +49,13 @@ const (
 	ctxPair    byte = 2 // and coded against its index column
 )
 
-// planCodecCM names the context-mixing coder in a plan span's table. cz's tags
-// are 0..2 and every cz codec is context-free; this one is not, so it is
-// dispatched here and cz never sees it. Shared with split.go's numbering so
-// one id means one coder across the format.
-const planCodecCM byte = 3
+// Plan CM codec IDs share split.go's numbering so one ID means one model
+// across the format. The original remains readable; new plans use the
+// smaller model.
+const (
+	planCodecCM        byte = 3
+	planCodecCMCompact byte = 4
+)
 
 // planCMMin is the smallest column offered to the coder; below a few
 // kilobytes its adaptive models have not paid for themselves.
@@ -103,6 +105,7 @@ func planCMWanted(c planColumn) bool {
 type planColumn struct {
 	off, n int
 	ctx    byte
+	codec  byte
 	pair   int // index of the paired index column in the list, or -1
 	name   string
 }
@@ -116,7 +119,7 @@ func packPlan(plan []byte) ([]byte, string) {
 	// which depends on what else was carved -- never has to code anything
 	// again.
 	type coded struct {
-		zc       int    // what brotli-11 makes of the column, the incumbent
+		zc       int    // what ordinary terminal compression makes of the column
 		plain    []byte // the generic or plain-varint arm
 		plainCtx byte
 		paired   []byte // the cross-column arm, when the column has an index
@@ -140,13 +143,13 @@ func packPlan(plan []byte) ([]byte, string) {
 			if r.plainCtx == ctxVarint {
 				side = &delta.CMSide{Varint: true}
 			}
-			if b, err := delta.CMEncode(col, side); err == nil {
+			if b, err := delta.CMEncodeCompact(col, side); err == nil {
 				r.plain = b
 			}
 			if c.pair >= 0 && c.ctx == ctxPair {
 				p := cols[c.pair]
 				pair := delta.CMParseVarints(plan[p.off : p.off+p.n])
-				if b, err := delta.CMEncode(col, &delta.CMSide{Varint: true, Pair: pair}); err == nil {
+				if b, err := delta.CMEncodeCompact(col, &delta.CMSide{Varint: true, Pair: pair}); err == nil {
 					r.paired = b
 				}
 			}
@@ -181,12 +184,12 @@ func packPlan(plan []byte) ([]byte, string) {
 			continue
 		}
 		at[i] = len(spans)
-		spans = append(spans, planColumn{off: c.off, n: c.n, ctx: ctx, pair: pair})
+		spans = append(spans, planColumn{off: c.off, n: c.n, ctx: ctx, codec: planCodecCMCompact, pair: pair})
 		zs = append(zs, z)
 		note.add(c.name, c.n, r.zc, len(z), ctx)
 	}
 	if len(spans) == 0 {
-		return append([]byte{planPackNone}, plan...), "plan columns: none beat brotli by " + fmt.Sprint(planCMMinGain)
+		return append([]byte{planPackNone}, plan...), "plan columns: none beat terminal compression by " + fmt.Sprint(planCMMinGain)
 	}
 
 	b := []byte{planPackSpans}
@@ -196,7 +199,7 @@ func packPlan(plan []byte) ([]byte, string) {
 		b = appendU(b, uint64(s.off))
 		b = appendU(b, uint64(s.n))
 		b = appendU(b, uint64(len(zs[i])))
-		b = append(b, planCodecCM, s.ctx)
+		b = append(b, s.codec, s.ctx)
 		if s.ctx == ctxPair {
 			b = appendU(b, uint64(s.pair))
 		}
@@ -311,7 +314,7 @@ func decodePlanSpans(b []byte) ([]byte, error) {
 		} else if ctx != ctxGeneric && ctx != ctxVarint {
 			return nil, fmt.Errorf("unsupported plan column context %d", ctx)
 		}
-		if codec != planCodecCM {
+		if codec != planCodecCM && codec != planCodecCMCompact {
 			return nil, fmt.Errorf("unsupported plan column codec %d", codec)
 		}
 		if r.err != nil || off > planLen || size == 0 || size > planLen-off {
@@ -323,7 +326,7 @@ func decodePlanSpans(b []byte) ([]byte, error) {
 			}
 		}
 		covered += size
-		spans = append(spans, planColumn{off: int(off), n: int(size), ctx: ctx, pair: pair})
+		spans = append(spans, planColumn{off: int(off), n: int(size), ctx: ctx, codec: codec, pair: pair})
 		zlen = append(zlen, z)
 	}
 	residue := r.stream()
@@ -367,7 +370,13 @@ func decodePlanSpans(b []byte) ([]byte, error) {
 				}
 				side = &delta.CMSide{Varint: true, Pair: delta.CMParseVarints(cols[s.pair])}
 			}
-			col, err := delta.CMDecode(zs[i], s.n, side)
+			var col []byte
+			var err error
+			if s.codec == planCodecCMCompact {
+				col, err = delta.CMDecodeCompact(zs[i], s.n, side)
+			} else {
+				col, err = delta.CMDecode(zs[i], s.n, side)
+			}
 			if err != nil {
 				errs[i] = err
 				return

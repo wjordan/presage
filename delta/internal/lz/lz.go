@@ -29,6 +29,7 @@ const MinMatch = 6
 const (
 	hashMul      = 0x9E3779B97F4A7C15
 	defaultProbe = 5
+	smallLimit   = 512
 )
 
 // nearProbes are the entry offsets from the hint tried one by one.
@@ -42,6 +43,7 @@ type Index struct {
 	pos    []uint32
 	shift  uint
 	probe  int
+	small  bool
 }
 
 func hashBitsFor(n int) uint {
@@ -57,11 +59,22 @@ func (ix *Index) hash(b []byte) uint32 {
 // table, and takes two linear passes -- no sort, because positions are
 // placed in ascending order by construction.
 func NewIndex(src []byte) *Index {
+	return newIndex(src, true)
+}
+
+func newIndex(src []byte, compactSmall bool) *Index {
 	hb := hashBitsFor(len(src))
 	ix := &Index{src: src, shift: 64 - hb, probe: defaultProbe}
 	n := len(src) - 7
 	if n <= 0 {
-		ix.bucket = make([]uint32, (1<<hb)+1)
+		return ix
+	}
+	// A short correction region used to pay for the index's minimum 1K-bucket
+	// table even though a lookup can have at most a few hundred candidates.
+	// Scan those positions into a stack buffer instead: it is the same sorted
+	// hash bucket and therefore makes exactly the same match choices.
+	if compactSmall && len(src) <= smallLimit {
+		ix.small = true
 		return ix
 	}
 	counts := make([]uint32, (1<<hb)+1)
@@ -105,7 +118,7 @@ func matchLen(a, b []byte) int {
 // nearest hint, which is where the caller believes the source has been
 // tracking. A negative hint means no preference.
 func (ix *Index) Find(dst []byte, p, hint int) (pos, length int) {
-	if p+8 > len(dst) || len(ix.pos) == 0 {
+	if p+8 > len(dst) || (!ix.small && len(ix.pos) == 0) {
 		return 0, 0
 	}
 	if hint >= 0 && hint < len(ix.src) {
@@ -114,7 +127,19 @@ func (ix *Index) Find(dst []byte, p, hint int) (pos, length int) {
 		}
 	}
 	b := ix.hash(dst[p:])
-	ents := ix.pos[ix.bucket[b]:ix.bucket[b+1]]
+	var small [smallLimit]uint32
+	var ents []uint32
+	if ix.small {
+		n := len(ix.src) - 7
+		for i := 0; i < n; i++ {
+			if ix.hash(ix.src[i:]) == b {
+				small[len(ents)] = uint32(i)
+				ents = small[:len(ents)+1]
+			}
+		}
+	} else {
+		ents = ix.pos[ix.bucket[b]:ix.bucket[b+1]]
+	}
 	if len(ents) == 0 {
 		if length < MinMatch {
 			return 0, 0

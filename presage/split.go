@@ -145,16 +145,28 @@ type zstream struct {
 	b     []byte
 }
 
-// codecCM names the prediction-conditioned context-mixing coder
+// codecCM names the original prediction-conditioned context-mixing coder
 // (delta/cmcoder.go) in a piece's stream table. It is not a cz tag: every cz
 // codec is context-free and this one is not, so split.go dispatches it here
 // and cz never sees it. An id neither side knows is refused by name in
 // applySplitResidual.
-const codecCM byte = 3
+const (
+	codecCM        byte = 3
+	codecCMCompact byte = 4
+)
 
 // cmMinStream is the smallest stream the CM coder is offered; delta gates the
 // field-context walk on the same threshold.
 const cmMinStream = delta.CMMinStream
+
+// cmMinGain keeps the slower terminal coder for streams where it makes a
+// material contribution. Codec choice is encoder policy carried in the
+// stream table, so changing this threshold does not affect compatibility.
+const cmMinGain = 2 << 10
+
+func cmWorth(coded []byte, incumbent int) bool {
+	return len(coded)+max(cmMinGain, incumbent/10) < incumbent
+}
 
 // colSides maps the per-bucket side information onto the columnar stream
 // table, where the buckets start after the gaps and lens columns.
@@ -186,9 +198,11 @@ func trialAll(streams [][]byte, sides []*delta.CMSide) pieceTrial {
 			if i < len(sides) {
 				side = sides[i]
 			}
-			if c, err := delta.CMEncode(s, side); err == nil {
-				t.cm[i] = c
-				n = min(n, len(c))
+			if c, err := delta.CMEncodeCompact(s, side); err == nil {
+				if cmWorth(c, n) {
+					t.cm[i] = c
+					n = len(c)
+				}
 			}
 		}
 		t.total += n
@@ -203,8 +217,8 @@ func compressAll(streams [][]byte, cm [][]byte) []zstream {
 	out := make([]zstream, len(streams))
 	for i, s := range streams {
 		out[i].codec, out[i].b = cz.Compress(s)
-		if i < len(cm) && cm[i] != nil && len(cm[i]) < len(out[i].b) {
-			out[i] = zstream{codecCM, cm[i]}
+		if i < len(cm) && cm[i] != nil && cmWorth(cm[i], len(out[i].b)) {
+			out[i] = zstream{codecCMCompact, cm[i]}
 		}
 	}
 	return out
@@ -399,7 +413,7 @@ func applySplitResidual(out, stream []byte, disp func() *delta.DispContext, pf *
 		if err := getRange(0, lead); err != nil {
 			return err
 		}
-		if lead == 2 && slices.Contains(p.codec[2:], codecCM) {
+		if lead == 2 && slices.ContainsFunc(p.codec[2:], isCMCodec) {
 			buckets, err := delta.CMColumnarSides(span, streams[0], streams[1],
 				pieceDisp())
 			if err != nil {
@@ -435,5 +449,10 @@ func decodeStream(codec byte, z []byte, n int, side *delta.CMSide) ([]byte, erro
 	if codec == codecCM {
 		return delta.CMDecode(z, n, side)
 	}
+	if codec == codecCMCompact {
+		return delta.CMDecodeCompact(z, n, side)
+	}
 	return cz.Decompress(codec, z, n)
 }
+
+func isCMCodec(codec byte) bool { return codec == codecCM || codec == codecCMCompact }

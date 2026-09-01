@@ -5,6 +5,8 @@ import (
 	"math/rand/v2"
 	"strings"
 	"testing"
+
+	"github.com/wjordan/presage/delta"
 )
 
 // bigPlan is a marshalled plan with three columns large enough to be offered
@@ -50,6 +52,30 @@ func TestPlanPackRoundTrip(t *testing.T) {
 	// The whole point: the columns are smaller than the blob they left.
 	if len(packed) >= len(plan) {
 		t.Errorf("packed plan is %d bytes, plan is %d", len(packed), len(plan))
+	}
+}
+
+func TestPlanPackReadsOriginalCMCodec(t *testing.T) {
+	plan := bytes.Repeat([]byte{1, 3, 1, 4}, 2048)
+	z, err := delta.CMEncode(plan, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := []byte{planPackSpans}
+	b = appendU(b, uint64(len(plan)))
+	b = appendU(b, 1) // one span covering the whole plan
+	b = appendU(b, 0)
+	b = appendU(b, uint64(len(plan)))
+	b = appendU(b, uint64(len(z)))
+	b = append(b, planCodecCM, ctxGeneric)
+	b = appendStream(b, nil)
+	b = append(b, z...)
+	got, err := decodePlanSpans(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, plan) {
+		t.Fatal("original CM codec did not reproduce the plan")
 	}
 }
 

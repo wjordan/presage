@@ -15,6 +15,8 @@ import (
 	"io"
 	"os"
 	"runtime/debug"
+	"runtime/pprof"
+	rtrace "runtime/trace"
 	"strings"
 	"time"
 
@@ -45,6 +47,88 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+type profileFlags struct {
+	cpu, alloc, trace string
+}
+
+func addProfileFlags(fs *flag.FlagSet) *profileFlags {
+	p := &profileFlags{}
+	fs.StringVar(&p.cpu, "cpuprofile", "", "write a CPU profile here")
+	fs.StringVar(&p.alloc, "allocprofile", "", "write a cumulative allocation profile here")
+	fs.StringVar(&p.trace, "traceprofile", "", "write a runtime execution trace here")
+	return p
+}
+
+// startProfiles opens every requested destination before starting work, so a
+// bad diagnostic path fails the command early rather than after a long encode.
+// The returned closure stops sampling and tracing before it snapshots
+// allocations.
+func startProfiles(p *profileFlags) (func(), error) {
+	type destination struct {
+		name, path string
+		file       *os.File
+	}
+	dsts := []*destination{{"cpuprofile", p.cpu, nil}, {"allocprofile", p.alloc, nil}, {"traceprofile", p.trace, nil}}
+	seen := make(map[string]string)
+	for _, d := range dsts {
+		if d.path == "" {
+			continue
+		}
+		if other := seen[d.path]; other != "" {
+			return nil, fmt.Errorf("-%s and -%s need different files", other, d.name)
+		}
+		seen[d.path] = d.name
+	}
+	closeAll := func() {
+		for _, d := range dsts {
+			if d.file != nil {
+				d.file.Close()
+			}
+		}
+	}
+	for _, d := range dsts {
+		if d.path == "" {
+			continue
+		}
+		var err error
+		d.file, err = os.Create(d.path)
+		if err != nil {
+			closeAll()
+			return nil, err
+		}
+	}
+	cpu, alloc, trace := dsts[0].file, dsts[1].file, dsts[2].file
+	if trace != nil {
+		if err := rtrace.Start(trace); err != nil {
+			closeAll()
+			return nil, err
+		}
+	}
+	if cpu != nil {
+		if err := pprof.StartCPUProfile(cpu); err != nil {
+			if trace != nil {
+				rtrace.Stop()
+			}
+			closeAll()
+			return nil, err
+		}
+	}
+	return func() {
+		if cpu != nil {
+			pprof.StopCPUProfile()
+		}
+		if trace != nil {
+			rtrace.Stop()
+		}
+		if alloc != nil {
+			if err := pprof.Lookup("allocs").WriteTo(alloc, 0); err != nil {
+				fmt.Fprintln(os.Stderr, "presage: write allocation profile:", err)
+			}
+		}
+		closeAll()
+	}, nil
 }
 
 // flagsFirst lets flags follow the positional arguments, as in
@@ -78,6 +162,7 @@ func usage() {
 
 func diff(args []string) error {
 	fs := flag.NewFlagSet("diff", flag.ExitOnError)
+	prof := addProfileFlags(fs)
 	out := fs.String("o", "", "write the patch here (required)")
 	verbose := fs.Bool("v", false, "report where the patch bytes went")
 	only := fs.String("modules", "", "restrict the encoder to these modules, by name (e.g. lz,eq)")
@@ -86,6 +171,11 @@ func diff(args []string) error {
 	if fs.NArg() != 2 || *out == "" {
 		usage()
 	}
+	stopProfiles, err := startProfiles(prof)
+	if err != nil {
+		return err
+	}
+	defer stopProfiles()
 	syms, err := openSymbols(*symPaths)
 	if err != nil {
 		return err
@@ -103,6 +193,9 @@ func diff(args []string) error {
 	target, err := os.ReadFile(fs.Arg(1))
 	if err != nil {
 		return err
+	}
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(defaultEncodeMemoryLimit(int64(len(old)), int64(len(target))))
 	}
 	start := time.Now()
 	var st presage.Stats
@@ -127,6 +220,24 @@ func diff(args []string) error {
 		}
 	}
 	return nil
+}
+
+func defaultEncodeMemoryLimit(referenceSize, targetSize int64) int64 {
+	const minLimit = 1536 << 20
+	// The ELF whole-image matcher holds the inputs, two canonical matching
+	// copies, and a four-byte-per-source-offset seed index plus bucket table.
+	// Eight times the larger image, with this floor, is the measured GC knee
+	// on the C++ corpus; forcing it lower adds collection work without lowering
+	// RSS because this working set is simultaneously live.
+	size := max(referenceSize, targetSize)
+	if size > int64(^uint64(0)>>1)/8 {
+		return int64(^uint64(0) >> 1)
+	}
+	limit := size * 8
+	if limit < minLimit {
+		return minLimit
+	}
+	return limit
 }
 
 // openSymbols parses -symbols: empty for none, else exactly two paths,
@@ -174,11 +285,17 @@ func moduleIDs(reg *presage.Registry, names string) ([]byte, error) {
 
 func apply(args []string) error {
 	fs := flag.NewFlagSet("patch", flag.ExitOnError)
+	prof := addProfileFlags(fs)
 	out := fs.String("o", "", "write the result here (required)")
 	fs.Parse(flagsFirst(fs, args))
 	if fs.NArg() != 2 || *out == "" {
 		usage()
 	}
+	stopProfiles, err := startProfiles(prof)
+	if err != nil {
+		return err
+	}
+	defer stopProfiles()
 	old, unmap, err := readWhole(fs.Arg(0))
 	if err != nil {
 		return err
@@ -208,7 +325,11 @@ func apply(args []string) error {
 		return err
 	}
 	w := &countWriter{w: f}
-	if err := presage.Apply([][]byte{old}, patch, modules.Registry(), w); err != nil {
+	var releaseReferencePages func()
+	if unmap != nil && canDiscardWhole() {
+		releaseReferencePages = func() { discardWhole(old) }
+	}
+	if err := presage.Apply([][]byte{old}, patch, modules.RegistryForApply(releaseReferencePages), w); err != nil {
 		f.Close()
 		return err
 	}
@@ -221,7 +342,7 @@ func apply(args []string) error {
 
 func defaultApplyMemoryLimit(targetSize int64) int64 {
 	const minLimit = 256 << 20
-	limit := targetSize * 11 / 5
+	limit := targetSize * 3 / 2
 	if limit < minLimit {
 		return minLimit
 	}

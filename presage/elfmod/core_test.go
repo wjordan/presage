@@ -143,7 +143,12 @@ func TestRetargetAndChoice(t *testing.T) {
 	structure := predictionPlan{OldAddr: oldAddr, NewAddr: newAddr, TargetLen: uint64(len(newText)),
 		Maps: []mapping{{Src: 0, SrcSize: 16, Dst: 0, DstSize: 16, Copy: true}, {Src: 32, SrcSize: 6, Dst: 64, DstSize: 6, Copy: true}}}
 	structures := []predictionPlan{structure}
-	out := layImage(oldText, ep)
+	releases := 0
+	release := func() { releases++ }
+	out := layImage(oldText, ep, release)
+	if releases == 0 {
+		t.Fatal("layout did not release reference pages")
+	}
 	if bytes.Equal(out, newText) {
 		t.Fatal("test needs a moved call")
 	}
@@ -167,12 +172,30 @@ func TestRetargetAndChoice(t *testing.T) {
 	}
 	want := bytes.Clone(wrongEq)
 	copy(want[:16], structural[:16])
-	selected, err := applyStructuralChoices(wrongEq, oldText, structure, choices, newAddressLookup(structure).target)
+	before := releases
+	selected, err := applyStructuralChoices(wrongEq, oldText, structure, choices, newAddressLookup(structure).target, release)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if releases == before {
+		t.Fatal("structural replay did not release reference pages")
+	}
 	if selected.Functions != n || selected.Bytes != nb || !bytes.Equal(wrongEq, want) {
 		t.Fatalf("direct structural choices differ: stats %+v\n%x\n%x", selected, wrongEq, want)
+	}
+}
+
+func TestContainsBuffer(t *testing.T) {
+	t.Parallel()
+	b := make([]byte, 64)
+	if !containsBuffer(b, idOf(b[7:31])) {
+		t.Fatal("subslice not recognized")
+	}
+	if containsBuffer(b, idOf(make([]byte, 8))) {
+		t.Fatal("unrelated buffer recognized as a subslice")
+	}
+	if containsBuffer(b, bufID{}) {
+		t.Fatal("empty identity recognized as a subslice")
 	}
 }
 

@@ -9,7 +9,7 @@ design; `research/` holds what it rests on. Started 2026-08-27.
 |---|---|
 | [`SPEC.md`](SPEC.md) | the design: core / modules / distribution, plan language, residual coding, selection, verification, wasm profile, ranked domains, milestones, decisions |
 | [`presage-core.md`](presage-core.md) | **implementation spec for milestone 1**, the `presage` package as built: container, coarse modules, residual, what is deferred |
-| [`elf-module.md`](elf-module.md) | **implementation spec for the ELF module** (`presage/elfmod`), as built: decoder data flow, wire format, symbols, matcher, gate; status: Chrome 2,581,091, libxul 3,010,960 through the CLI |
+| [`elf-module.md`](elf-module.md) | **implementation spec for the ELF module** (`presage/elfmod`), as built: decoder data flow, wire format, symbols, matcher, gate; current measurements are in [`baselines.md`](baselines.md) |
 | [`go-module-results.md`](go-module-results.md) | measured: the Go module on presage against the Go codec, Zucchini and bsdiff; DWARF builds end to end |
 | [`research/binsync-lessons.md`](research/binsync-lessons.md) | the ten measured insights from the Go codec the general design must keep, and what it got wrong |
 | [`research/percival-thesis.md`](research/percival-thesis.md) | Percival 2006: the three-orders taxonomy, FFT block alignment, difference-string modes, universal (syndrome) deltas |
@@ -20,7 +20,7 @@ design; `research/` holds what it rests on. Started 2026-08-27.
 | [`research/chrome-elf-zucchini.md`](research/chrome-elf-zucchini.md) | measured Chrome 151 ELF release pair: a RELA-aware Zucchini prototype cuts the compressed patch 10.62% and round-trips exactly |
 | [`research/chrome-elf-handoff.md`](research/chrome-elf-handoff.md) | **start here for the Chrome ELF work**: state of the spike at 49.11%, what is settled and must not be re-run, the last lead now measured (§14's displacement column, −20,248 = 0.76%, unimplemented), how to run the harness fast |
 | [`research/chrome-elf-predictor-spike.md`](research/chrome-elf-predictor-spike.md) | decoder-faithful Chrome experiment: standalone symbol predictor at 7.59 MB, then charged equivalence/structure selection at 4.60 MB XZ for `.text`; fairness limits and oracle bounds on a 10× result |
-| [`research/decode-memory.md`](research/decode-memory.md) | current decoder allocation/RSS profile; fused x86 walks cut Chrome RSS 44%, measured `GOMEMLIMIT` knees below 4× target, rejected probes, and the path to destination-backed materialisation |
+| [`research/decode-memory.md`](research/decode-memory.md) | decoder allocation/RSS profile and successive reductions; current Firefox apply is 1.57 s / 395,400 KiB, with rejected probes and the path to destination-backed materialisation |
 | [`research/domain-containers-packages.md`](research/domain-containers-packages.md) | OCI layers, deltarpm/OSTree/Balena/Mender, the recompression trick (puffin, archive-patcher, preflate), rebuild noise, economics |
 | [`research/domain-ai-weights.md`](research/domain-ai-weights.md) | lossless weight compression floors, fine-tune/checkpoint deltas, Xet/safetensors/GGUF, a local bf16 measurement |
 | [`research/priors-and-regeneration.md`](research/priors-and-regeneration.md) | thinking note + measurements: a prior is worth its *aligned* overlap (byte-exact reuse is 30× smaller than reloc-modulo); hello-world halves gofmt; **delink**: 66 % of function text across 30 unrelated Go projects is shared modulo relocation (1.8 % byte-exact), 3.4× pool dedup |

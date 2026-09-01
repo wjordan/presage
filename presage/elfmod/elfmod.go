@@ -3,6 +3,7 @@ package elfmod
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
 	"sync"
 
@@ -26,6 +27,11 @@ type Module struct {
 	Params eqmatch.Params
 	// Stats, if non-nil, receives the encode's statistics on Analyse.
 	Stats *Stats
+	// ReleaseReferencePages is an apply-only residency hint. Materialise calls
+	// it between phases that reread reference 0, allowing the owner of a
+	// read-only file mapping to evict clean pages and fault back only the ranges
+	// the next phase touches. Ordinary byte slices must leave it nil.
+	ReleaseReferencePages func()
 }
 
 // Stats is what Analyse learnt about the pair.
@@ -78,12 +84,12 @@ func corrupt(err error) error { return fmt.Errorf("%w: elf: %v", presage.ErrCorr
 
 // Materialise expands the plan against reference 0 into exactly length
 // bytes (elf-module.md §1, §6).
-func (Module) Materialise(refs [][]byte, plan []byte, length int64) ([]byte, error) {
+func (m Module) Materialise(refs [][]byte, plan []byte, length int64) ([]byte, error) {
 	cp, err := parsePlanStreams(plan)
 	if err != nil {
 		return nil, corrupt(err)
 	}
-	out, _, err := predictImage(refs[0], cp)
+	out, _, err := predictImage(refs[0], cp, m.ReleaseReferencePages)
 	if err != nil {
 		return nil, corrupt(err)
 	}
@@ -215,12 +221,16 @@ type predStats struct {
 
 // predictImage is the decoder: every stage reads the old image and the
 // plan only, in the order elf-module.md §1 fixes.
-func predictImage(old []byte, cp planStreams) ([]byte, predStats, error) {
+func predictImage(old []byte, cp planStreams, releaseReferencePages func()) ([]byte, predStats, error) {
 	var st predStats
 	// One structural plan per code window, in window order.
 	ep, structures, err := cachedPlanMaps(old, cp)
 	if err != nil {
 		return nil, st, err
+	}
+	if releaseReferencePages != nil {
+		releaseStructuralCaches(old)
+		runtime.GC()
 	}
 	if ep.NewLen > uint64(int(^uint(0)>>1)) {
 		return nil, st, errors.New("old image does not match the equivalence plan")
@@ -233,7 +243,10 @@ func predictImage(old []byte, cp planStreams) ([]byte, predStats, error) {
 	if ep.Eqs, err = decodeEquivalences(ep, newSrcPredictor(structures, ep.Windows)); err != nil {
 		return nil, st, err
 	}
-	out := layImage(old, ep)
+	if releaseReferencePages != nil {
+		releaseReferencePages()
+	}
+	out := layImage(old, ep, releaseReferencePages)
 
 	var rp *relocPlan
 	if len(cp.Reloc) != 0 {
@@ -250,6 +263,9 @@ func predictImage(old []byte, cp planStreams) ([]byte, predStats, error) {
 	if rp != nil && rp.NewSize != 0 {
 		if _, err := applyReloc(out, old, *rp, parts.pointer(rp)); err != nil {
 			return nil, st, err
+		}
+		if releaseReferencePages != nil {
+			releaseRelaCache(old)
 		}
 	}
 	if len(cp.Dwarf) != 0 {
@@ -317,7 +333,7 @@ func predictImage(old []byte, cp planStreams) ([]byte, predStats, error) {
 			if len(b.b) != (len(structures[i].Maps)+7)/8 {
 				return nil, st, errors.New("choice stream has the wrong size")
 			}
-			selected, err := applyStructuralChoices(bytesOf(out, w.New), bytesOf(old, w.Old), structures[i], b.b, parts.lk.target)
+			selected, err := applyStructuralChoices(bytesOf(out, w.New), bytesOf(old, w.Old), structures[i], b.b, parts.lk.target, releaseReferencePages)
 			if err != nil {
 				return nil, st, err
 			}
@@ -327,6 +343,9 @@ func predictImage(old []byte, cp planStreams) ([]byte, predStats, error) {
 		if !cr.done() {
 			return nil, st, errors.New("choice stream does not match the code windows")
 		}
+	}
+	if releaseReferencePages != nil {
+		releaseReferencePages()
 	}
 	// The field fix is last: it names fields by position in a walk of the
 	// finished prediction.
@@ -361,7 +380,7 @@ type selectedStats struct {
 // directly into text. Building a whole window-sized structural image first is
 // unnecessary: mappings have disjoint destinations, and an unselected byte is
 // never observed.
-func applyStructuralChoices(text, oldText []byte, p predictionPlan, choices []byte, lookupFn func(uint64) x86.Target) (selectedStats, error) {
+func applyStructuralChoices(text, oldText []byte, p predictionPlan, choices []byte, lookupFn func(uint64) x86.Target, releaseReferencePages func()) (selectedStats, error) {
 	var out selectedStats
 	if len(choices) != (len(p.Maps)+7)/8 {
 		return out, errors.New("choice stream has the wrong size")
@@ -380,26 +399,38 @@ func applyStructuralChoices(text, oldText []byte, p predictionPlan, choices []by
 		}
 		errMu.Unlock()
 	}
-	out.Relocation = parallelStats(len(p.Maps), workers(), func(st *x86.Stats, i int) {
-		if choices[i/8]&(1<<(i%8)) == 0 {
-			return
+	batch := len(p.Maps)
+	if releaseReferencePages != nil {
+		batch = 64 << 10
+	}
+	for lo := 0; lo < len(p.Maps); lo += batch {
+		hi := min(lo+batch, len(p.Maps))
+		stats := parallelStats(hi-lo, workers(), func(st *x86.Stats, k int) {
+			i := lo + k
+			if choices[i/8]&(1<<(i%8)) == 0 {
+				return
+			}
+			m := p.Maps[i]
+			if m.Dst > uint64(len(text)) || m.DstSize > uint64(len(text))-m.Dst {
+				fail(fmt.Errorf("map %d destination exceeds target text", i))
+				return
+			}
+			dst := text[m.Dst : m.Dst+m.DstSize]
+			if !m.Copy {
+				fill(dst, 0xcc)
+				return
+			}
+			if m.Src > uint64(len(oldText)) || m.SrcSize > uint64(len(oldText))-m.Src {
+				fail(fmt.Errorf("map %d source exceeds old text", i))
+				return
+			}
+			x86.Relocate(oldText[m.Src:m.Src+m.SrcSize], dst, p.OldAddr+m.Src, p.NewAddr+m.Dst, lookupFn, st, nil)
+		})
+		out.Relocation.Add(stats)
+		if releaseReferencePages != nil {
+			releaseReferencePages()
 		}
-		m := p.Maps[i]
-		if m.Dst > uint64(len(text)) || m.DstSize > uint64(len(text))-m.Dst {
-			fail(fmt.Errorf("map %d destination exceeds target text", i))
-			return
-		}
-		dst := text[m.Dst : m.Dst+m.DstSize]
-		if !m.Copy {
-			fill(dst, 0xcc)
-			return
-		}
-		if m.Src > uint64(len(oldText)) || m.SrcSize > uint64(len(oldText))-m.Src {
-			fail(fmt.Errorf("map %d source exceeds old text", i))
-			return
-		}
-		x86.Relocate(oldText[m.Src:m.Src+m.SrcSize], dst, p.OldAddr+m.Src, p.NewAddr+m.Dst, lookupFn, st, nil)
-	})
+	}
 	if bad != nil {
 		return selectedStats{}, bad
 	}
@@ -414,14 +445,28 @@ func applyStructuralChoices(text, oldText []byte, p predictionPlan, choices []by
 
 // layImage is the prediction's base: zero everywhere, 0xcc inside .text
 // (the padding byte between functions), then every run copied whole-image.
-func layImage(old []byte, ep equivalencePlan) []byte {
+func layImage(old []byte, ep equivalencePlan, releaseReferencePages func()) []byte {
 	out := make([]byte, int(ep.NewLen))
 	for _, w := range ep.Windows {
 		fill(out[w.New.Off:w.New.Off+w.New.Size], 0xcc)
 	}
+	if releaseReferencePages == nil {
+		for _, eq := range ep.Eqs {
+			copy(out[eq.Dst:eq.Dst+eq.N], old[eq.Src:eq.Src+eq.N])
+		}
+		return out
+	}
+	const releaseStep = 16 << 20
+	sinceRelease := uint64(0)
 	for _, eq := range ep.Eqs {
 		copy(out[eq.Dst:eq.Dst+eq.N], old[eq.Src:eq.Src+eq.N])
+		sinceRelease += eq.N
+		if sinceRelease >= releaseStep {
+			releaseReferencePages()
+			sinceRelease = 0
+		}
 	}
+	releaseReferencePages()
 	return out
 }
 

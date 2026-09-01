@@ -17,6 +17,16 @@ func Registry(syms ...symbols.Reader) *presage.Registry {
 	return RegistryStats(nil, syms...)
 }
 
+// RegistryForApply returns a decoder registry whose ELF module reports phase
+// boundaries at which clean pages of reference 0 may be evicted. The callback
+// is a residency hint for callers that own a read-only file mapping.
+func RegistryForApply(releaseReferencePages func()) *presage.Registry {
+	r := presage.NewRegistry()
+	r.Add(gomod.Module{})
+	r.Add(elfmod.Module{ReleaseReferencePages: releaseReferencePages})
+	return r
+}
+
 // RegistryStats is Registry with the ELF module reporting into elfStats,
 // so an encoder can print how the function map was built.
 func RegistryStats(elfStats *elfmod.Stats, syms ...symbols.Reader) *presage.Registry {

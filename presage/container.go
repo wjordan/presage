@@ -32,7 +32,11 @@ const Magic = "PSG1"
 // unknown basis, packing, codec or context is refused by name — but the format
 // is pre-release and the up-front refusal is cheaper than discovering it
 // mid-plan.
-const Version = 4
+//
+// 5: correction and plan streams may name the compact context-mixing model.
+// It has a distinct codec ID because model table sizes and context selection
+// are part of an arithmetic-coded stream's wire semantics.
+const Version = 5
 
 // Header flags.
 const (

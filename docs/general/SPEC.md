@@ -503,8 +503,8 @@ padded/truncated rather than exact (binsync stage 1a/1b). The module's
 
 All regions' residuals go to **framework-fixed sub-streams** — control varints
 and one payload stream **per residual mode** — each compressed as one stream
-per 8 MiB frame with the smaller of zstd and brotli (binsync D16; quality 11
-≤ 4 MiB, 10 above). Routing by mode rather than by region length is worth
+per 8 MiB frame with the smaller of zstd and brotli at quality 9.
+Routing by mode rather than by region length is worth
 0.7 points on its own, and sharing one payload stream across modes gives back
 3.5 of the 14.4 (`research/bsdiff6-spike.md` §2.4): a 4-byte significance
 column and an 8-byte one are different alphabets and must not be interleaved.

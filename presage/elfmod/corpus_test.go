@@ -40,12 +40,9 @@ var pairs = []pair{
 		new:     home(".cache", "presage-chrome-zucchini", "chrome-151.0.7922.173"),
 		oldSyms: home(".cache", "presage-chrome-zucchini", "symbols-151.0.7922.169", "debug-info", "chrome.debug"),
 		newSyms: home(".cache", "presage-chrome-zucchini", "symbols-151.0.7922.173", "debug-info", "chrome.debug"),
-		// parity is the measured patch at container v4 (derived map +
-		// displacement columns + CM coder, the indexed remap basis and the
-		// plan's columns coded at the default gain>=2000 tier), a ratchet
-		// against regression. A lower plan-CM tier shrinks it further at the
-		// cost of apply time: PRESAGE_PLAN_CM=1000 measures 2,248,931.
-		parity: 2256358, product: 2634264,
+		// parity is the measured container-v5 patch with the compact CM model
+		// and balanced terminal compression, a ratchet against regression.
+		parity: 2376189, product: 2634264,
 	},
 	{
 		name:    "libxul-154.0-154.0.1",

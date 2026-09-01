@@ -33,23 +33,34 @@ Every row is `presage diff`, then `presage patch`, then a byte-exact compare.
 
 | pair | presage | Zucchini | bsdiff | xdelta3 | zstd `--patch-from` |
 |---|---:|---:|---:|---:|---:|
-| one-line change, 30 MB Go binary | **1,129** | 173,060 | 150,475 | 1,390,889 | 538,493 |
-| prometheus 3.13.1 → 3.13.2, Go, 94 MB | **69,933** | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
-| Chrome 151.0.7922.169 → .173, C++, 291 MB | **2,256,358** | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
-| Firefox libxul 154.0 → 154.0.1, C++, 186 MB | **2,665,810** | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
+| one-line change, 30 MB Go binary | **1,100** | 173,060 | 150,475 | 1,390,889 | 538,493 |
+| prometheus 3.13.1 → 3.13.2, Go, 94 MB | **74,636** | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
+| Chrome 151.0.7922.169 → .173, C++, 291 MB | **2,376,189** | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
+| Firefox libxul 154.0 → 154.0.1, C++, 186 MB | **2,866,328** | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
 
 The one-line change is the extreme case and the clearest picture of what
-prediction buys: 133× smaller than bsdiff, because almost the whole patch is
+prediction buys: 137× smaller than bsdiff, because almost the whole patch is
 displacement that presage recomputes rather than sends. The ratio falls as the
-pair grows further apart, to 38× on a Go patch release, 8× on the Chrome
-pair and 4.6× on libxul. That is expected: prediction removes displacement,
-and genuinely new code still has to be sent. Applying the Chrome patch takes
-3.6 s on a 24-core desktop — faster than Zucchini applies its own 2.3×
-larger patch on the same machine.
+pair grows further apart, to 36× on a Go patch release, 7.8× on the Chrome
+pair and 4.3× on libxul. That is expected: prediction removes displacement,
+and genuinely new code still has to be sent.
 
 On libxul the more honest denominator is what Mozilla actually ships, an
 mbsdiff patch of 10,779,184 whose blocks the MAR container compresses with XZ;
-presage is 4× smaller than that.
+presage is 3.8× smaller than that.
+
+Resource cost on the Go and C++ point releases (wall time / peak RSS):
+
+| pair | phase | presage | Zucchini | bsdiff | xdelta3 | zstd `--patch-from` |
+|---|---|---:|---:|---:|---:|---:|
+| prometheus, 94 MB | encode | **4.3 s** / 948 MiB | 21.3 s / 1.05 GiB | 36.8 s / 806 MiB | 8.5 s / 689 MiB | 21.1 s / **421 MiB** |
+| prometheus, 94 MB | apply | 0.75 s / 392 MiB | 0.45 s / 198 MiB | 0.49 s / 187 MiB | 0.38 s / **113 MiB** | **0.13 s** / 183 MiB |
+| Firefox libxul, 186 MB | encode | 30.4 s / 1.72 GiB | 70.0 s / 2.15 GiB | 79.5 s / 1.56 GiB | **21.0 s** / 1.26 GiB | 34.2 s / **764 MiB** |
+| Firefox libxul, 186 MB | apply | 1.57 s / 386 MiB | 0.97 s / 385 MiB | 1.2 s / 366 MiB | 0.86 s / **201 MiB** | **0.28 s** / 358 MiB |
+
+These are medians of three warm-cache runs on the same 24-core Linux host;
+Zucchini includes its external XZ pass. See
+[`baselines.md`](docs/general/baselines.md) for methodology and exact values.
 
 ## How it works
 
@@ -82,13 +93,6 @@ Milestone 1 of `docs/general/SPEC.md` is built: the container, the residual
 coder, the five modules above, and end-to-end verification. The rest of the
 SPEC (the portable wasm module profile, cross-file priors, further domains)
 is design.
-
-Decoder memory remains the open weakness, but two profiling passes cut the
-measured Chrome CLI peak from 3.1 GB to 934 MB (3.2× the target) while making
-apply 14% faster. The CLI now derives a soft Go heap limit from the target;
-`GOMEMLIMIT` overrides it. [`decode-memory.md`](docs/general/research/decode-memory.md)
-profiles the working set, the retained changes, and the path toward
-destination-backed materialisation.
 
 ## Use
 

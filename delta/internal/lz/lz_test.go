@@ -79,6 +79,31 @@ func TestApplyRejectsCorruptStreams(t *testing.T) {
 	}
 }
 
+func TestSmallIndexMatchesTable(t *testing.T) {
+	r := rand.New(rand.NewSource(2))
+	for n := 8; n <= smallLimit; n += 17 {
+		src := make([]byte, n)
+		if _, err := r.Read(src); err != nil {
+			t.Fatal(err)
+		}
+		// Repetition exercises buckets with candidates on both sides of the
+		// position hint, not only the usual singleton random-data bucket.
+		for i := 32; i < len(src); i += 31 {
+			copy(src[i:], src[max(0, i-23):i])
+		}
+		dst := bytes.Clone(src)
+		for i := 3; i < len(dst); i += 19 {
+			dst[i]++
+		}
+		compact, table := NewIndex(src), newIndex(src, false)
+		cc, cl := compact.Emit(dst, nil, nil)
+		tc, tl := table.Emit(dst, nil, nil)
+		if !bytes.Equal(cc, tc) || !bytes.Equal(cl, tl) {
+			t.Fatalf("%d-byte compact index changed the stream", n)
+		}
+	}
+}
+
 func BenchmarkEmit(b *testing.B) {
 	r := rand.New(rand.NewSource(1))
 	src := make([]byte, 4<<20)

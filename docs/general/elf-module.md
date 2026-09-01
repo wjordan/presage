@@ -7,6 +7,10 @@ module behind the `Module` seam of `presage/module.go`, so that
 non-Go ELF x86-64 image end to end. Design authority: `SPEC.md` §4–6, §10
 item 3; template: `presage/gomod` (`presage-core.md` §4, §7).*
 
+Container v5 uses the compact CM model and balanced terminal compression.
+Current end-to-end sizes and resource measurements are in `baselines.md`;
+the status sections below retain the measurements that motivated each layer.
+
 ## Status (2026-08-31c): the plan side
 
 Two changes to the plan, `presage.Version` 4 (research/pgo-churn.md §8.2).
@@ -145,7 +149,7 @@ Three facts the table hides, all load-bearing for this spec:
    per-section split)` (`bench/elfpredict/main.go:145`, `correction.go:150`)
    and its plan is a separate `xz -9e` stream. The product ships one body —
    plan, prediction hash, residual — in `internal/cz` frames (raw / zstd /
-   brotli-11, 16 MiB window, 8 MiB `FrameSize`), with
+   brotli-9, 16 MiB window, 8 MiB `FrameSize`), with
    `delta.EncodeCorrectionAdaptive` (plain, near, **modal**) as the residual.
    On the Chrome-native run the harness's split picked the lz shape on every
    cut and joint xz was +1.2 % over split; modal is worth −9.3 % on libxul.
