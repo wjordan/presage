@@ -13,7 +13,7 @@ release binaries, both sides go1.26.5, rather than the go1.27 rebuild the
 other prometheus row uses — has all five columns measured 2026-09-01 at
 at the revision of 2026-09-01, tool versions as listed under the resource
 table. All sizes in bytes. The Chrome pair, which the resource table does
-not cover, applies in 3.29 s (median of three), under the 3.84 s
+not cover, applies in 2.72 s (median of three), under the 3.84 s
 Zucchini bar.
 
 ## The pairs
@@ -74,8 +74,8 @@ around 40% on the smaller pairs. Earlier drafts of the README quoted
 | one-line change, 30 MB | 1,100 | 173,060 | 150,475 | 1,390,889 | 538,493 |
 | prometheus 3.13.1 → 3.13.2 | 74,636 | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
 | prometheus 3.13.1 → 3.13.2 as shipped | 161,508 | 3,012,208 | 2,714,204 | 11,238,692 | 8,279,163 |
-| Chrome 151.0.7922.169 → .173 | 2,257,676 | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
-| libxul 154.0 → 154.0.1 | 2,092,567 | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
+| Chrome 151.0.7922.169 → .173 | 2,263,302 | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
+| libxul 154.0 → 154.0.1 | 2,096,866 | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
 
 Two checks that the rows are scoped consistently: `bsdiff` on the one-line
 pair reproduces `go-module-results.md`'s 150,475 exactly, and presage <
@@ -101,12 +101,12 @@ byte-for-byte with the target.
 
 | pair | tool | encode s | encode RSS KiB | apply s | apply RSS KiB |
 |---|---|---:|---:|---:|---:|
-| prometheus 3.13.1 → 3.13.2 | presage | 4.61 | 975,244 | 0.89 | 401,796 |
+| prometheus 3.13.1 → 3.13.2 | presage | 4.61 | 975,244 | 0.79 | 401,664 |
 | prometheus 3.13.1 → 3.13.2 | Zucchini + XZ | 21.34 | 1,100,484 | 0.45 | 203,012 |
 | prometheus 3.13.1 → 3.13.2 | bsdiff | 36.79 | 825,148 | 0.49 | 191,996 |
 | prometheus 3.13.1 → 3.13.2 | xdelta3 | 8.49 | 705,716 | 0.38 | 115,244 |
 | prometheus 3.13.1 → 3.13.2 | zstd `--patch-from` | 21.13 | 431,124 | 0.13 | 187,668 |
-| libxul 154.0 → 154.0.1 | presage | 24.03 | 1,801,428 | 1.91 | 384,828 |
+| libxul 154.0 → 154.0.1 | presage | 24.03 | 1,801,428 | 1.37 | 383,960 |
 | libxul 154.0 → 154.0.1 | Zucchini + XZ | 70.00 | 2,256,308 | 0.97 | 394,180 |
 | libxul 154.0 → 154.0.1 | bsdiff | 79.46 | 1,633,536 | 1.18 | 374,780 |
 | libxul 154.0 → 154.0.1 | xdelta3 | 21.01 | 1,320,848 | 0.86 | 205,668 |

@@ -9,10 +9,137 @@ item 3; template: `presage/gomod` (`presage-core.md` §4, §7).*
 
 The container at this revision uses the compact CM model over bit-history states, balanced terminal compression, the
 RELR slot layer, exact FDE CIE pointers, an exactly rebuilt
-`.eh_frame_hdr`, cursor-placed `.rodata` switch tables and the operand-field
-correction. Current end-to-end
+`.eh_frame_hdr`, cursor-placed `.rodata` switch tables, the operand-field
+correction and plan columns coded as independent segments. Current end-to-end
 sizes and resource measurements are in `baselines.md`; the status sections
 below retain the measurements that motivated each layer.
+
+## Status (2026-09-01f): the apply path's serial chain
+
+Apply was 1.9× Zucchini's wall on libxul while spending 10.4 s of CPU to do
+it: the cost was never arithmetic, it was a chain of stages that each waited
+for the one before. An env-gated timeline (`internal/trace`, off unless
+`PRESAGE_TIMING` is set, one boolean test when off) named the chain, and
+seven changes shortened it. Six are byte-identical; the two segmentation
+levers buy their time with plan bytes.
+
+| stage | before | after |
+|---|---:|---:|
+| readBody | 0.016 | 0.015 |
+| **Materialise** | **1.427** | **0.973** |
+| unpackPlan | 0.485 | 0.205 |
+| planMaps | 0.225 | 0.212 |
+| decodeEquivalences | 0.006 | 0.007 |
+| layImage | 0.105 | 0.084 |
+| oracleParts | 0.023 | 0.024 |
+| applyRelr | 0.027 | 0.027 |
+| applyEhFrame + applyRoData | 0.120 | 0.096 ∥ |
+| retarget | 0.061 | 0.061 |
+| choices | 0.018 | 0.018 |
+| textWalk | — | 0.082 |
+| fieldFix | 0.178 | 0.096 |
+| opField | 0.151 | 0.057 |
+| predictionHash | 0.006 | 0.005 |
+| **applyResidual** | **0.340** | **0.236** |
+| Finalise | 0.022 | 0.023 |
+| hashOf(out) | 0.040 | 0.040 |
+| write | 0.051 | 0.060 |
+| **total wall / CPU** | **1.903 / 10.40** | **1.354 / 10.28** |
+
+Seconds, one traced run each on the libxul pair. CPU is process-wide, so a
+concurrent stage's column counts everything that ran while it was open;
+that the total barely moves is the point — almost none of this is less
+work, it is the same work off the critical path.
+
+The levers, each measured as the median of five warm applies of a freshly
+encoded patch:
+
+| lever | libxul apply | patch |
+|---|---:|---:|
+| base | 1.85 s | 2,092,567 |
+| long plan columns coded as independent segments (128 KiB) | 1.67 s | +1,872 |
+| one instruction walk per window for both field layers | 1.63 s | byte-identical |
+| residual pieces applied concurrently | 1.58 s | byte-identical |
+| plan segments cut at 64 KiB | 1.48 s | +2,427 |
+| image and its disjoint layers laid concurrently | 1.44 s | byte-identical |
+| old text's call targets walked in 1 MiB chunks | 1.44 s | byte-identical |
+| window walk sharded by bytes, not by map count | 1.41 s | byte-identical |
+
+1. **The plan decode is its longest column, not its total.** Twelve plan
+   columns already decoded concurrently, so `unpackPlan` finished when the
+   281 KB one did — 0.30 s solo, with eleven others idle around it. A worker
+   sweep confirmed the ceiling is the chain, not bandwidth: 1 → 12 workers
+   moved aggregate throughput 1.11 → 3.91 MB/s. A column over `planSegMax`
+   is now coded as evenly sized segments cut forward to the next LEB128
+   value boundary, each an independent chain, and a paired span names its
+   index column's whole span range plus the record its own values start at,
+   so index columns segment too. The cost is one adaptive-model restart per
+   segment. 128 KiB paid 1,872 B for 0.18 s; 64 KiB paid a further 2,427 B
+   for 0.10 s. 32 KiB was measured and dropped: it costs a further 3,385 B,
+   putting the pair 0.367% over base and outside the size budget, and its
+   apply median (1.36 s) is inside the noise of 64 KiB's. Segment sizes
+   targeted per stream, giving the long-pole column
+   more cuts and the rest fewer, were also measured and lost (1.72 s):
+   `unpackPlan` splices the whole plan before any stream is read, so slack
+   in a late stream is not exploitable.
+2. **One instruction walk per window.** The field fix and the operand-field
+   layer each walked every mapped body with the same length decoder, for two
+   facts that fall out of one pass — the four-byte PC-relative sites, and how
+   many operand fields of each class each body holds. Neither depends on the
+   values in those fields, so a single walk taken before the field fix still
+   describes the window the operand layer sees after it. `x86.WalkAll` emits
+   both, and `TestWalkAllMatchesBothWalks` asserts it yields exactly the
+   references `WalkReferences` yields and exactly the `(start, Fields, ok)`
+   triples `WalkFields` yields, over random bytes and over real `.text`.
+   The site list is 5,050,281 entries on libxul and is dropped as soon as
+   the field fix has read it; holding it through the operand layer cost more
+   in GC than the walk saved.
+3. **Disjoint layers run together.** `.eh_frame` and `.rodata` write
+   different byte ranges of the image, and `layImage`'s equivalence runs are
+   disjoint by construction. Neither is assumed: `disjointRanges` tests the
+   plan's ranges pairwise before `runLayers` starts anything, so a plan that
+   overlaps them falls back to running them in order.
+4. **Residual pieces run together.** A piece decodes and applies over its own
+   span of the output and reads nothing another piece writes; ten small
+   pieces were waiting behind the one that carries most of the correction.
+   Errors are collected by index and reported in piece order, so a corrupt
+   patch draws the same error every run.
+5. **Shard by bytes.** Mapped bodies differ in size by orders of magnitude,
+   and both the window walk and the equivalence copy were split by count, so
+   the machine waited on whichever shard drew the big ones. The old text's
+   call-target walk was chunked at 8 MiB, which on a 100 MB `.text` leaves
+   twelve chunks for twenty-four cores; 1 MiB fills them.
+
+End to end, with every apply `cmp`-verified against the target:
+
+| pair | patch before | patch after | apply before | apply after |
+|---|---:|---:|---:|---:|
+| prometheus 3.13.1 → 3.13.2 | 74,636 | 74,636 | 0.81 s | 0.79 s |
+| Chrome 151 .169 → .173 | 2,257,676 | 2,263,302 (+0.249%) | 3.22 s | 2.72 s |
+| libxul 154.0 → 154.0.1 | 2,092,567 | 2,096,866 (+0.205%) | 1.86 s | 1.37 s |
+
+Apply times are medians of three warm runs, the two builds measured back to
+back on a shared host at load 10. Peak apply RSS is flat within noise:
+libxul 377,724 → 383,960 KiB (+1.7%), Chrome 685,732 → 675,836 KiB,
+prometheus 400,972 → 401,664 KiB. Encode is unchanged (libxul 23.9 →
+23.1 s). The Go module's plan has no column long enough to segment, which
+is why prometheus does not move at either end.
+
+Two candidates were rejected. Parallelising the container hash of the
+finished output (0.040 s, 3%) needs a BLAKE3 subtree merge the library does
+not export, and overlapping it with the write would break the contract that
+nothing reaches the writer until the output and the reference check have
+both passed. Shrinking the coder's bank tables to cut the decode's cache
+miss rate was dropped once the worker sweep showed the plan decode is
+latency-bound on one chain rather than bandwidth-bound.
+
+What still stands between 1.35 s and Zucchini's 0.97 s is the head of the
+pipeline: `unpackPlan` (0.205) and `planMaps` (0.212) are strictly ordered,
+because the plan is spliced whole before any stream is read and the section
+maps are what every later stage addresses through. Overlapping them means
+letting a stream be decoded and consumed before its neighbours arrive —
+a streaming plan layout, not a splice — which is a wire-format change, not
+a scheduling one.
 
 ## Status (2026-09-01e): two `.rodata` plan ideas, both measured and dropped
 

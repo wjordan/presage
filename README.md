@@ -36,8 +36,8 @@ Every row is `presage diff`, then `presage patch`, then a byte-exact compare.
 | one-line change, 30 MB Go binary | **1,100** | 173,060 | 150,475 | 1,390,889 | 538,493 |
 | prometheus 3.13.1 → 3.13.2, Go, rebuilt with go1.27, 94 MB | **74,636** | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
 | prometheus 3.13.1 → 3.13.2 as upstream ships it (go1.26.5), 97 MB | **161,508** | 3,012,208 | 2,714,204 | 11,238,692 | 8,279,163 |
-| Chrome 151.0.7922.169 → .173, C++, 291 MB | **2,257,676** | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
-| Firefox libxul 154.0 → 154.0.1, C++, 186 MB | **2,092,567** | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
+| Chrome 151.0.7922.169 → .173, C++, 291 MB | **2,263,302** | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
+| Firefox libxul 154.0 → 154.0.1, C++, 186 MB | **2,096,866** | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
 
 The one-line change is the extreme case and the clearest picture of what
 prediction buys: 137× smaller than bsdiff, because almost the whole patch is
@@ -62,9 +62,9 @@ Resource cost on the Go and C++ point releases (wall time / peak RSS):
 | pair | phase | presage | Zucchini | bsdiff | xdelta3 | zstd `--patch-from` |
 |---|---|---:|---:|---:|---:|---:|
 | prometheus, 94 MB | encode | **4.6 s** / 952 MiB | 21.3 s / 1.05 GiB | 36.8 s / 806 MiB | 8.5 s / 689 MiB | 21.1 s / **421 MiB** |
-| prometheus, 94 MB | apply | 0.89 s / 392 MiB | 0.45 s / 198 MiB | 0.49 s / 187 MiB | 0.38 s / **113 MiB** | **0.13 s** / 183 MiB |
+| prometheus, 94 MB | apply | 0.79 s / 392 MiB | 0.45 s / 198 MiB | 0.49 s / 187 MiB | 0.38 s / **113 MiB** | **0.13 s** / 183 MiB |
 | Firefox libxul, 186 MB | encode | 24.0 s / 1.72 GiB | 70.0 s / 2.15 GiB | 79.5 s / 1.56 GiB | **21.0 s** / 1.26 GiB | 34.2 s / **764 MiB** |
-| Firefox libxul, 186 MB | apply | 1.91 s / 376 MiB | 0.97 s / 385 MiB | 1.2 s / 366 MiB | 0.86 s / **201 MiB** | **0.28 s** / 358 MiB |
+| Firefox libxul, 186 MB | apply | 1.37 s / 375 MiB | 0.97 s / 385 MiB | 1.2 s / 366 MiB | 0.86 s / **201 MiB** | **0.28 s** / 358 MiB |
 
 These are medians of three warm-cache runs on the same 24-core Linux host;
 Zucchini includes its external XZ pass. See

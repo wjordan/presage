@@ -42,9 +42,9 @@ var pairs = []pair{
 		newSyms: home(".cache", "presage-chrome-zucchini", "symbols-151.0.7922.173", "debug-info", "chrome.debug"),
 		// parity is the measured patch at this revision with the compact CM model
 		// over bit-history states, balanced terminal compression,
-		// cursor-placed .rodata tables and the operand-field correction, a
-		// ratchet against regression.
-		parity: 2257676, product: 2634264,
+		// cursor-placed .rodata tables, the operand-field correction and
+		// segmented plan columns, a ratchet against regression.
+		parity: 2263302, product: 2634264,
 	},
 	{
 		name:    "libxul-154.0-154.0.1",
