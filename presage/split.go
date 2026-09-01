@@ -351,109 +351,133 @@ func applySplitResidual(out, stream []byte, disp func() *delta.DispContext, pf *
 	if pf != nil && len(pf.pieces) != len(ps) {
 		pf = nil // a table it read differently is a table it cannot speak for
 	}
+	// A piece decodes and applies over its own span of out and reads nothing
+	// another piece writes, so the pieces run concurrently: on libxul one of
+	// them carries most of the correction and the rest were waiting behind
+	// each other for it. Errors are collected by index and reported in piece
+	// order, so a corrupt patch draws the same error every run.
+	offs := make([]uint64, len(ps))
 	var at uint64
-	for pi, p := range ps {
-		blobs := p.blobs
-		pieceAt := at
-		span := out[pieceAt : pieceAt+p.length]
-		pieceDisp := sync.OnceValue(func() *delta.DispContext {
-			return disp().Restrict(int(pieceAt), int(pieceAt)+int(p.length))
-		})
-		streams := make([][]byte, len(p.raw))
-		var sides []*delta.CMSide
-		get := func(j int) error {
-			var side *delta.CMSide
-			if j < len(sides) {
-				side = sides[j]
-			}
-			if side == nil {
-				if s := pf.take(pi, j); s != nil && len(s) == int(p.raw[j]) {
-					streams[j] = s
-					return nil
-				}
-			}
-			s, err := decodeStream(p.codec[j], blobs[j], int(p.raw[j]), side)
-			if err != nil {
-				return fmt.Errorf("%w: piece: %v", ErrCorrupt, err)
-			}
-			streams[j] = s
-			return nil
-		}
-		// The streams of one round are independent of each other: each is a
-		// self-contained coded blob whose only context is its own side, fixed
-		// before the round starts. Decoding them concurrently costs nothing
-		// and no byte of the result moves. The CM coder runs about a megabyte
-		// a second, so the round's wall is its slowest stream, not their sum.
-		getRange := func(lo, hi int) error {
-			if hi-lo <= 1 {
-				if hi-lo == 1 {
-					return get(lo)
-				}
-				return nil
-			}
-			errs := make([]error, hi-lo)
-			var wg sync.WaitGroup
-			for j := lo; j < hi; j++ {
-				wg.Add(1)
-				go func(j int) { defer wg.Done(); errs[j-lo] = get(j) }(j)
-			}
-			wg.Wait()
-			// Reported in stream order, so the error a corrupt patch draws
-			// does not depend on the scheduler.
-			for _, err := range errs {
-				if err != nil {
-					return err
-				}
-			}
-			return nil
-		}
-		// A byte bucket coded by the CM coder is conditioned on the
-		// prediction under each of its bytes, and on the instruction that
-		// prediction byte sits in — the gaps and lens columns before it fix
-		// the former and the piece's field context the latter. So those two
-		// columns are decoded first and the conditioning derived from them
-		// and from span, which still holds the prediction.
-		lead := p.leadStreams()
-		doneLead := trace.Stagef("residual/piece%d/lead", pi)
-		err := getRange(0, lead)
-		doneLead()
-		if err != nil {
-			return err
-		}
-		if lead == 2 && slices.ContainsFunc(p.codec[2:], isCMCodec) {
-			doneSides := trace.Stagef("residual/piece%d/sides", pi)
-			buckets, err := delta.CMColumnarSides(span, streams[0], streams[1],
-				pieceDisp())
-			doneSides()
-			if err != nil {
-				return fmt.Errorf("%w: piece: %v", ErrCorrupt, err)
-			}
-			sides = colSides(buckets)
-		}
-		doneRest := trace.Stagef("residual/piece%d/rest", pi)
-		err = getRange(lead, len(streams))
-		doneRest()
-		if err != nil {
-			return err
-		}
-		doneApply := trace.Stagef("residual/piece%d/apply", pi)
-		switch {
-		case p.kind == pieceLZ && len(streams) == 1:
-			err = delta.ApplyFlaggedCorrection(span, streams[0])
-		case p.kind == pieceColumnar:
-			err = delta.ApplyColumnar(span, streams)
-		case p.kind == pieceColumnarDisp:
-			err = delta.ApplyColumnarDisp(span, streams, pieceDisp())
-		default:
-			err = fmt.Errorf("%w: piece kind %d with %d streams", ErrCorrupt, p.kind, len(streams))
-		}
-		doneApply()
-		if err != nil {
-			return err
-		}
+	for i, p := range ps {
+		offs[i] = at
 		at += p.length
 	}
+	errs := make([]error, len(ps))
+	var pwg sync.WaitGroup
+	for pi, p := range ps {
+		pwg.Add(1)
+		go func(pi int, p piece) {
+			defer pwg.Done()
+			errs[pi] = applyPiece(out, offs[pi], pi, p, disp, pf)
+		}(pi, p)
+	}
+	pwg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// applyPiece decodes one piece's streams and applies them over its span of
+// out, which holds the prediction until it does.
+func applyPiece(out []byte, pieceAt uint64, pi int, p piece, disp func() *delta.DispContext, pf *splitPrefetch) error {
+	blobs := p.blobs
+	span := out[pieceAt : pieceAt+p.length]
+	pieceDisp := sync.OnceValue(func() *delta.DispContext {
+		return disp().Restrict(int(pieceAt), int(pieceAt)+int(p.length))
+	})
+	streams := make([][]byte, len(p.raw))
+	var sides []*delta.CMSide
+	get := func(j int) error {
+		var side *delta.CMSide
+		if j < len(sides) {
+			side = sides[j]
+		}
+		if side == nil {
+			if s := pf.take(pi, j); s != nil && len(s) == int(p.raw[j]) {
+				streams[j] = s
+				return nil
+			}
+		}
+		s, err := decodeStream(p.codec[j], blobs[j], int(p.raw[j]), side)
+		if err != nil {
+			return fmt.Errorf("%w: piece: %v", ErrCorrupt, err)
+		}
+		streams[j] = s
+		return nil
+	}
+	// The streams of one round are independent of each other: each is a
+	// self-contained coded blob whose only context is its own side, fixed
+	// before the round starts. Decoding them concurrently costs nothing
+	// and no byte of the result moves. The CM coder runs about a megabyte
+	// a second, so the round's wall is its slowest stream, not their sum.
+	getRange := func(lo, hi int) error {
+		if hi-lo <= 1 {
+			if hi-lo == 1 {
+				return get(lo)
+			}
+			return nil
+		}
+		errs := make([]error, hi-lo)
+		var wg sync.WaitGroup
+		for j := lo; j < hi; j++ {
+			wg.Add(1)
+			go func(j int) { defer wg.Done(); errs[j-lo] = get(j) }(j)
+		}
+		wg.Wait()
+		// Reported in stream order, so the error a corrupt patch draws
+		// does not depend on the scheduler.
+		for _, err := range errs {
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	// A byte bucket coded by the CM coder is conditioned on the
+	// prediction under each of its bytes, and on the instruction that
+	// prediction byte sits in — the gaps and lens columns before it fix
+	// the former and the piece's field context the latter. So those two
+	// columns are decoded first and the conditioning derived from them
+	// and from span, which still holds the prediction.
+	lead := p.leadStreams()
+	doneLead := trace.Stagef("residual/piece%d/lead", pi)
+	err := getRange(0, lead)
+	doneLead()
+	if err != nil {
+		return err
+	}
+	if lead == 2 && slices.ContainsFunc(p.codec[2:], isCMCodec) {
+		doneSides := trace.Stagef("residual/piece%d/sides", pi)
+		buckets, err := delta.CMColumnarSides(span, streams[0], streams[1],
+			pieceDisp())
+		doneSides()
+		if err != nil {
+			return fmt.Errorf("%w: piece: %v", ErrCorrupt, err)
+		}
+		sides = colSides(buckets)
+	}
+	doneRest := trace.Stagef("residual/piece%d/rest", pi)
+	err = getRange(lead, len(streams))
+	doneRest()
+	if err != nil {
+		return err
+	}
+	doneApply := trace.Stagef("residual/piece%d/apply", pi)
+	switch {
+	case p.kind == pieceLZ && len(streams) == 1:
+		err = delta.ApplyFlaggedCorrection(span, streams[0])
+	case p.kind == pieceColumnar:
+		err = delta.ApplyColumnar(span, streams)
+	case p.kind == pieceColumnarDisp:
+		err = delta.ApplyColumnarDisp(span, streams, pieceDisp())
+	default:
+		err = fmt.Errorf("%w: piece kind %d with %d streams", ErrCorrupt, p.kind, len(streams))
+	}
+	doneApply()
+	return err
 }
 
 // decodeStream reverses one entry of a piece's stream table. An id neither
