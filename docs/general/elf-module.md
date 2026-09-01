@@ -13,6 +13,80 @@ RELR slot layer, exact FDE CIE pointers, an exactly rebuilt
 sizes and resource measurements are in `baselines.md`; the status sections
 below retain the measurements that motivated each layer.
 
+## Status (2026-09-01e): two `.rodata` plan ideas, both measured and dropped
+
+Two follow-ups to the cursor placement below were built and priced against
+the corpus. Neither is in the tree; this section is the measurement, so the
+next reader does not pay for them again.
+
+**1. Re-basing a segmented span per segment.** A base-relative span is
+re-based against one base word, the span's own. The hypothesis was that a
+span segmented into per-function tables holds several bases -- one per table
+-- so a single base reads every table after the first against the wrong
+origin. The premise does not hold where it would have paid: of libxul's 11
+segmented spans, 8 are self-relative and hold 99.97% of the segmented words
+(the 43,128- and 70,165-entry spans among them), and a self-relative entry
+never reads a base at all. The three base-relative ones are 16, 16 and 11
+words. Chrome is the other way round -- 211 of 248 segmented spans are
+base-relative -- but they are small.
+
+Implemented as zero plan bytes (`segmentSpan` walks with the base moving to
+each new table, `retargetTable` and `chooseCursors` read every table against
+its own first word):
+
+| pair | patch | `.rodata` wrong | `rodata` plan | segmented | corrections |
+|---|---:|---:|---:|---:|---:|
+| libxul, before | 2,148,134 | 193,964 | 153,675 | 11 | 9,544 |
+| libxul, after | 2,148,134 (0) | 193,964 | 153,675 | 11 | 9,544 |
+| Chrome, before | 2,305,394 | 218,045 | 29,671 | 248 | 2,592 |
+| Chrome, after | 2,304,725 (−669) | 216,103 | 29,500 | 282 | 2,388 |
+
+libxul does not move by a byte, which is below the 5 KB the change had to
+earn, and Chrome's 669 is not a correct model paying off -- it is the
+encoder finding a different local optimum. A round-trip test over a
+base-relative fixture of four per-function tables shows why the model cannot
+be right: **the segmentation and the base are circular.** A boundary is
+found by watching the owning function change, which needs a base to read the
+entries with; the base is the boundary. Reading the first entry of the next
+table against the *previous* table's base still lands in that table's
+function -- functions are far larger than the offset between the two bases
+-- so the boundary is detected one or more entries late and every table
+after it is re-based off its true start. Recovering the true start needs
+either a search that mis-splits the genuine single-base spans (the common
+case) or a shipped base per segment, and Chrome's whole ceiling here is
+~700 bytes before paying a single varint. Dropped.
+
+An ablation separated out the one clean part of the change -- not requiring
+a span's base word to be placeable when the span is self-relative and never
+reads it. Chrome is byte-identical with and without it, so the guard never
+fires; it is not worth the line either.
+
+**2. Sparse `Keep`.** The `Keep` bitmap is one bit per (span, variant) over
+every candidate span, and almost all of it is zero: libxul sets 201 bits in
+144,063 bytes, Chrome 3,562 in 26,746. It looks like 144 KB of waste. It is
+not, because the plan is compressed, and a bitmap that is 99.98% zero is
+what a terminal compressor is best at. Every sparse form was priced against
+`cz` (min of raw/zstd/brotli, the same compressor the plan column gets):
+
+| form | libxul raw | libxul cz | Chrome raw | Chrome cz |
+|---|---:|---:|---:|---:|
+| dense bitmap (shipped) | 144,063 | **190** | 26,746 | **1,384** |
+| gap varints over set bits | 231 | 174 | 3,685 | 1,491 |
+| gap varints over spans + variant bytes, two columns | 415 | 135 + 58 | 7,160 | 912 + 521 |
+| the same two concatenated | 415 | 174 | 7,160 | 1,421 |
+| one varint per kept span, gap and variant packed | 231 | 173 | 3,684 | 1,360 |
+| gap varints over non-zero bytes, with the byte | 415 | 183 | 7,160 | 1,514 |
+
+The whole column costs 190 shipped bytes on libxul and 1,384 on Chrome, so
+no re-encoding of it can save 1 KB on libxul at all, and on Chrome the best
+sparse form measured is 24 bytes better than the bitmap. There is no
+decode-side case either: `bitSet` is an index into a slice, and 144 KB
+against a 1.5 MB plan and a 1.8 GB encode is nothing. The only real cost the
+dense form carries is encoder-side, where `packPlan` offers every column over
+4 KB to the CM coder and spends about a tenth of a second coding 144 KB of
+zeros it will never carve. Dropped; the format is unchanged and
+`presage.Version` stays 6.
+
 ## Status (2026-09-01c): `.rodata` tables placed by cursor
 
 (Measured on the branch before the CM engine below; the two land together.)
@@ -349,7 +423,7 @@ changes listed.
 | `choices` | bitmap, one bit per mapping in destination order (`equivalence.go:856`) | | | none |
 | `reloc` | `OldOff OldSize NewOff NewSize RelCount TailCount Anchor`, old and new section maps (`(addrΔ offΔ size)*`), streams `gap addend tail` (each a `delta.EncodeCorrection` stream), optional flags word (`reloc.go:184`) | geometry, three column corrections | predicted columns | `PairByRow`/`NoAddends`/`DerivedGeometry` flags are not written (experiment rungs); `HeadCount` kept behind its flag (Go-linker PIE tables) |
 | `ehframe` | nine uvarints of geometry then the `HdrExact` byte (`ehframe.go:49`) | geometry, one flag | FDE list, `.eh_frame_hdr` contents | the flag is new: it says `Finalise` rebuilds the header after the residual |
-| `rodata` | eight uvarints of geometry then three streams, `Keep Seg Cursor` (`rodata.go:53`) | geometry, one bit per (span, variant); the segmented spans as ascending index deltas; one signed varint per table of those spans | candidate spans, their segmentation | `Seg`/`Cursor` are new |
+| `rodata` | eight uvarints of geometry then three streams, `Keep Seg Cursor` (`rodata.go:53`) | geometry, one bit per (span, variant); the segmented spans as ascending index deltas; one signed varint per table of those spans | candidate spans, their segmentation | `Seg`/`Cursor` are new. `Keep` stays a dense bitmap: it is 99.98% zero and compresses to 190 B on libxul and 1,384 on Chrome, which every sparse form measured ties or loses to (2026-09-01e) |
 | `fields` | streams `RemapIndex RemapShift FieldIndex FieldDelta` (`fieldfix.go:89`) | | site list, remap domain | none |
 | `relr` | two uvarints: the old `.relr.dyn`'s offset and size (`relr.go:30`) | geometry | the slot list, where each slot lands, what it points at | new |
 | `dwarf` | `presage/dwarf` `Plan.Marshal()`; the runs are *not* carried (`Plan.MarshalRuns`) — the decoder clips the whole-image equivalences per section (`dwarf.go:48`) exactly as the harness does | | | none |
