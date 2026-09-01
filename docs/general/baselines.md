@@ -1,19 +1,19 @@
 # The README table: what each number is
 
 Provenance for the headline comparison in `README.md`. presage column
-measured at container v7: the C++ rows on 2026-09-01 (RELR relocation slots,
+measured at this document's revision: the C++ rows on 2026-09-01 (RELR relocation slots,
 exact FDE `cie_ptr`, `.eh_frame_hdr` rebuilt after the residual, the CM
 coder over bit-history states with an SSE chain, `.rodata` switch tables
 placed by cursor, the operand-field correction), the Go rows
 on 2026-08-31 (derived function map, displacement columns, compact CM coder
 over correction and plan streams, parallel decode) and re-confirmed
-unchanged at v7; baseline columns measured 2026-08-29. All on this machine
+unchanged since; baseline columns measured 2026-08-29. All on this machine
 unless a source doc is named. The as-shipped prometheus row — upstream's own
 release binaries, both sides go1.26.5, rather than the go1.27 rebuild the
 other prometheus row uses — has all five columns measured 2026-09-01 at
-container v6 and unchanged at v7, tool versions as listed under the resource
+at the revision of 2026-09-01, tool versions as listed under the resource
 table. All sizes in bytes. The Chrome pair, which the resource table does
-not cover, applies in 3.29 s at v7 (median of three), under the 3.84 s
+not cover, applies in 3.29 s (median of three), under the 3.84 s
 Zucchini bar.
 
 ## The pairs
@@ -93,7 +93,7 @@ more than one Go release.
 ## Resource comparison
 
 Comparator rows measured on 2026-08-31, presage rows re-measured on
-2026-09-01 at this document's revision (container v7), on the same 24-core
+2026-09-01 at this document's revision, on the same 24-core
 Linux 6.17 x86-64 host. Values are medians of three serial warm-cache runs;
 elapsed time and maximum RSS come from `/usr/bin/time`. Outputs went to
 tmpfs to minimise storage variance, and every apply was compared

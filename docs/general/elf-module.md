@@ -7,7 +7,7 @@ module behind the `Module` seam of `presage/module.go`, so that
 non-Go ELF x86-64 image end to end. Design authority: `SPEC.md` §4–6, §10
 item 3; template: `presage/gomod` (`presage-core.md` §4, §7).*
 
-Container v7 uses the compact CM model over bit-history states, balanced terminal compression, the
+The container at this revision uses the compact CM model over bit-history states, balanced terminal compression, the
 RELR slot layer, exact FDE CIE pointers, an exactly rebuilt
 `.eh_frame_hdr`, cursor-placed `.rodata` switch tables and the operand-field
 correction. Current end-to-end
@@ -86,7 +86,7 @@ against a 1.5 MB plan and a 1.8 GB encode is nothing. The only real cost the
 dense form carries is encoder-side, where `packPlan` offers every column over
 4 KB to the CM coder and spends about a tenth of a second coding 144 KB of
 zeros it will never carve. Dropped; the format is unchanged and
-`presage.Version` stays 6.
+`presage.Version` is unchanged.
 
 ## Status (2026-09-01d): the operand-field correction
 
@@ -107,8 +107,9 @@ prediction and the map before any of this is applied, so it enumerates the
 same lists; field values do not change instruction lengths, so the lists are
 the same before and after the layer rewrites one. Two columns per class, an
 index and a value, carved into the plan packer like every other column.
-`presage.Version` is 7: a stream count is not self-announcing, so the tenth
-stream has to be refused up front by an older build.
+A stream count is not self-announcing, so a build from before this change
+reads the tenth stream as trailing data; the format is pre-release and
+`presage.Version` bumps only per release (container.go).
 
 Three things decide what it is worth.
 
@@ -234,13 +235,13 @@ engine behind them is stronger. Chrome 2,346,975 → **2,320,568**
 `cmp`-verified. Apply pays for it: Chrome 2.68 → 3.05 s, libxul
 1.36 → 1.71 s (median of 3 under load 14–16). Encode and peak RSS are flat
 at both ends; decoder table memory per large stream falls, since a slot is
-one byte rather than three. `presage.Version` stays 6 — a pre-release
-format, and an older build refuses these patches by name.
+one byte rather than three. `presage.Version` is unchanged: a
+pre-release format is rewritten in place.
 
 ## Status (2026-09-01): three derivable fields outside `.text`
 
 Three fixes, all decoder-derivable, none costing more than a flag.
-`presage.Version` is 6: the plan gains a ninth stream and the `eh_frame`
+The plan gains a ninth stream and the `eh_frame`
 stream a flag.
 
 1. **RELR relocation slots** (`relr.go`, stage 5b). An image whose linker
@@ -299,7 +300,7 @@ appearing as a section wholly mispredicted at no cost.
 
 ## Status (2026-08-31c): the plan side
 
-Two changes to the plan, `presage.Version` 4 (research/pgo-churn.md §8.2).
+Two changes to the plan (research/pgo-churn.md §8.2).
 
 1. **The remap basis** (`fieldfix.go`). A remapped field's new target is
    stated as an index into the addresses the prediction already points at
@@ -361,7 +362,6 @@ encode. Apply pays the coder's speed, roughly 1.5 MB/s of residual: measured
 against the same build with the coder switched off, Chrome goes 5.1 s →
 6.1 s and libxul 2.4 s → 4.4 s. Both no-coder builds reproduce the previous
 column's numbers to the byte, so nothing else in this change moved bytes.
-`presage.Version` is 3; an older build refuses every patch by name.
 
 Concatenating a piece's byte buckets into one coded stream, worth −2,960
 against xz in the harness, loses here (+10,862 on Chrome): five separate
@@ -382,9 +382,7 @@ Encode is unchanged within noise (Chrome 106.0 s → 107.7 s, libxul 168.4 s →
 171.5 s); apply pays the enumeration sweep and the residual re-walk (Chrome
 4.5 s → 6.4 s, libxul 2.4 s → 2.7 s). The corpus gate's third pair,
 librustc_driver (four code windows, Rust v0 symbols), moves 6,597,439 →
-6,564,155. Both changes alter the wire format, so
-`presage.Version` is 2 and every patch an older build wrote is refused by
-name.
+6,564,155. Both changes alter the wire format in place.
 
 ## Status (2026-08-30)
 

@@ -12,41 +12,13 @@ import (
 // Magic is the first four bytes of every patch.
 const Magic = "PSG1"
 
-// Version is the container version this build writes and the newest it reads.
-//
-// 2: the ELF module's derived function map (a new structural-plan mode) and
-// the displacement columns of the split residual (a new piece kind). Both
-// are self-announcing — an unknown mode or piece kind is rejected — but the
-// module is pre-release and the version bump refuses every patch an older
-// build wrote up front, by name, rather than at the point of use.
-//
-// 3: the prediction-conditioned context-mixing coder (delta/cmcoder.go) as a
-// codec a split residual's stream table may name (SPEC G6). The id is
-// refused by name where it is not known, but the format is pre-release and
-// the same up-front refusal is cheaper than discovering it mid-stream.
-//
-// 4: the ELF module's plan states a remapped field's target as an index into
-// the addresses the prediction already points at (a new basis byte), and ships
-// its largest columns coded on their own under the plan contexts rather than
-// as one blob in the body (a new plan packing). Both are self-announcing — an
-// unknown basis, packing, codec or context is refused by name — but the format
-// is pre-release and the up-front refusal is cheaper than discovering it
-// mid-plan.
-//
-// 5: correction and plan streams may name the compact context-mixing model.
-// It has a distinct codec ID because model table sizes and context selection
-// are part of an arithmetic-coded stream's wire semantics.
-//
-// 6: the ELF module's plan gains a ninth stream, the RELR relocation
-// geometry, and its eh_frame stream a flag saying the decoder rebuilds
-// .eh_frame_hdr after the residual (presage.Finaliser). A stream count is
-// not self-announcing -- an older build would read the ninth stream's
-// length as trailing plan data -- so the refusal has to be up front.
-//
-// 7: the ELF module's plan gains a tenth stream, the operand-field
-// correction over the scalar immediate and displacement fields the field
-// fix does not write. A stream count is not self-announcing, as above.
-const Version = 7
+// Version is the container version this build writes and the only one it
+// reads. It is bumped once per release, not per format change: until a
+// release ships nothing in the wild holds a patch, so pre-release changes to
+// the plan streams, codecs and packings rewrite the format in place under
+// the same number. A build refuses a patch from any other version up front,
+// by number, rather than at the point of use.
+const Version = 1
 
 // Header flags.
 const (
