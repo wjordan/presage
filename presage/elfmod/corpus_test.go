@@ -43,7 +43,7 @@ var pairs = []pair{
 		// parity is the measured container-v6 patch with the compact CM model
 		// over bit-history states, balanced terminal compression and
 		// cursor-placed .rodata tables, a ratchet against regression.
-		parity: 2320568, product: 2634264,
+		parity: 2305394, product: 2634264,
 	},
 	{
 		name:    "libxul-154.0-154.0.1",

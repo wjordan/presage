@@ -35,19 +35,19 @@ Every row is `presage diff`, then `presage patch`, then a byte-exact compare.
 |---|---:|---:|---:|---:|---:|
 | one-line change, 30 MB Go binary | **1,100** | 173,060 | 150,475 | 1,390,889 | 538,493 |
 | prometheus 3.13.1 → 3.13.2, Go, 94 MB | **74,636** | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
-| Chrome 151.0.7922.169 → .173, C++, 291 MB | **2,346,975** | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
-| Firefox libxul 154.0 → 154.0.1, C++, 186 MB | **2,337,304** | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
+| Chrome 151.0.7922.169 → .173, C++, 291 MB | **2,305,394** | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
+| Firefox libxul 154.0 → 154.0.1, C++, 186 MB | **2,148,134** | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
 
 The one-line change is the extreme case and the clearest picture of what
 prediction buys: 137× smaller than bsdiff, because almost the whole patch is
 displacement that presage recomputes rather than sends. The ratio falls as the
-pair grows further apart, to 36× on a Go patch release, 7.9× on the Chrome
-pair and 5.3× on libxul. That is expected: prediction removes displacement,
+pair grows further apart, to 36× on a Go patch release, 8.1× on the Chrome
+pair and 5.7× on libxul. That is expected: prediction removes displacement,
 and genuinely new code still has to be sent.
 
 On libxul the more honest denominator is what Mozilla actually ships, an
 mbsdiff patch of 10,779,184 whose blocks the MAR container compresses with XZ;
-presage is 4.6× smaller than that.
+presage is 5.0× smaller than that.
 
 Resource cost on the Go and C++ point releases (wall time / peak RSS):
 
