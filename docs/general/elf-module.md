@@ -7,12 +7,59 @@ module behind the `Module` seam of `presage/module.go`, so that
 non-Go ELF x86-64 image end to end. Design authority: `SPEC.md` §4–6, §10
 item 3; template: `presage/gomod` (`presage-core.md` §4, §7).*
 
-Container v6 uses the compact CM model over bit-history states, balanced
-terminal compression, the RELR slot layer, exact FDE CIE pointers and an
-exactly rebuilt `.eh_frame_hdr`. Current end-to-end
+Container v6 uses the compact CM model over bit-history states, balanced terminal compression, the
+RELR slot layer, exact FDE CIE pointers, an exactly rebuilt
+`.eh_frame_hdr` and cursor-placed `.rodata` switch tables. Current end-to-end
 sizes and resource measurements are in `baselines.md`; the status sections
 below retain the measurements that motivated each layer.
 
+## Status (2026-09-01c): `.rodata` tables placed by cursor
+
+(Measured on the branch before the CM engine below; the two land together.)
+
+`.rodata`'s residual was not the spans the encoder dropped -- it was the ones
+it kept. Of libxul's 201 kept spans, 335,856 bytes were still wrong, and two
+of them account for most of it: spans of 43,128 and 70,165 entries lying in a
+453,499-byte hole the byte matcher cannot match, because every entry is a
+target minus its own address and the whole region churns when `.text` moves.
+`retargetTable` placed each entry at `mapper.project(entry)`, which across a
+hole extrapolates a flat shift from the nearest run; the true shift walks
++16 … +528 across 512-word blocks, so 61 of 98,455 entries landed in the
+right slot. The span stayed "kept" only because wrong slots share high bytes.
+
+The region is a concatenation of per-function clang switch tables in link
+order, and that order survives. So the layer now **segments a kept span from
+the old image alone** -- consecutive entries whose targets lie in the same old
+function are one table (`segmentSpan`, `rodata.go:387`, over the new
+`codeLookup.unitAt`) -- and **places by cursor**: table *t* is predicted at
+the end of table *t−1*, plus one signed correction the plan carries
+(`placeTables`, `rodata.go:361`). The cursor is right wherever the table
+sequence is unchanged, which is nearly all of it, so a table inserted or
+deleted in the new image costs one varint and not one per table after it.
+Both the correction and the cursor are clamped to the new section, so no plan
+can make a write leave it. The encoder chooses each correction against the
+target (`chooseCursors`, `rodata.go:542`): the cursor itself, the byte
+matcher's opinion, four words either side, and -- for a long self-relative
+span -- an index of what each new-side word resolves to, which finds a table
+that moved further than the local scan reaches. One bit per span says which
+arm is used, and the encoder sets it only on measured gain, so a span the
+projection already places is untouched and the byte count that keeps a span
+now reflects the placement it will actually get.
+
+| pair | patch before | after | `.rodata` wrong bytes | spans kept | segmented | corrections |
+|---|---:|---:|---:|---:|---:|---:|
+| libxul 154.0 → 154.0.1 | 2,337,304 | **2,179,781** (−157,523) | 390,097 → 193,964 | 201 → 201 | 11 | 9,544 (9,559 B) |
+| Chrome 151 .169 → .173 | 2,346,975 | **2,331,752** (−15,223) | 248,444 → 218,045 | 3,553 → 3,562 | 248 | 2,592 |
+
+Chrome has the same mechanism much milder -- its largest span is 10,995 words
+and the projection already recovered most of it -- and nine spans that were
+worth nothing under the projection are now worth keeping. Applied and
+`cmp`-verified through the CLI. Encode is within noise on a loaded box
+(libxul 23.1 → 23.5 s, Chrome 31.5 → 29.1 s) and peak RSS does not move
+(1,801,132 → 1,801,068 KiB; 2,810,268 → 2,811,880 KiB); apply is 1.46 → 1.47 s
+and 2.85 → 2.81 s. The plan pays 9,581 bytes on libxul and 2,889 on Chrome:
+the corrections, plus the list of segmented span indexes, which is a list and
+not a bitmap because eleven spans out of 144,063 are.
 ## Status (2026-09-01b): the CM engine, second pass
 
 The coder's slots hold a zpaq-family bit history under a per-bank state map
@@ -254,7 +301,7 @@ the old image and what from the plan.
 | 5b | `.relr.dyn`: expand the **old** packed table, project each slot's file offset through the runs, write the pointer oracle's answer for the old value; the new packed table is left to the byte prediction |  new (`relr.go:77`) | old table, old section map | `.data.rel.ro` slots |
 | 6 | DWARF field layer (unstripped ELF only): `dwarf.Apply` with the pointer oracle as `ptr` and `funcSizeDeltas(structure)` | `image.go:103–113`, `dwarf.go:75`, `presage/dwarf` | old debug secs, runs clipped per section | debug sections |
 | 7 | `.eh_frame`: walk the **old** section's FDEs, project each `initial_location` field through the runs, retarget via the pointer oracle, fix `address_range` where old sizes agree, and rewrite each `cie_ptr` as the distance between the projected entry and its projected CIE |  `ehframe.go:155, 212` | old `.eh_frame`, section maps | `.eh_frame` |
-| 8 | `.rodata` switch tables: enumerate candidate spans in the old section by signature (`roDataSpans`), apply only the variants whose `Keep` bit is set, retarget entries through the pointer oracle | `rodata.go:167, 199, 232` | old `.rodata`, `Keep` bits | `.rodata` |
+| 8 | `.rodata` switch tables: enumerate candidate spans in the old section by signature (`roDataSpans`), apply only the variants whose `Keep` bit is set, retarget entries through the pointer oracle; a span the plan lists in `Seg` is segmented into its per-function tables from the old image and placed by running cursor plus one correction each, instead of by projection | `rodata.go:175, 208, 241, 361, 387` | old `.rodata`, `Keep` bits, `Seg`/`Cursor` | `.rodata` |
 | 9 | retarget `.text`: walk references in every mapped body of the laid prediction, resolve each field's old target through the **image oracle** (projection first inside `.text`), rewrite the displacement | `equivalence.go:616` | — | `.text` fields |
 | 10 | per-function choice: structural prediction of old `.text` relocated through `addressLookup.target`, copy chosen bodies over the retargeted ones | `image.go:158–175`, `plan.go:669` | old `.text`, choice bits | chosen bodies |
 | 11 | field fix, last: enumerate 4-byte displacement sites by walking the finished `.text`; apply address remaps (index into the sorted distinct-target domain + shift), then per-field deltas | `fieldfix.go:245, 42, 119` | plan columns | `.text` fields |
@@ -302,7 +349,7 @@ changes listed.
 | `choices` | bitmap, one bit per mapping in destination order (`equivalence.go:856`) | | | none |
 | `reloc` | `OldOff OldSize NewOff NewSize RelCount TailCount Anchor`, old and new section maps (`(addrΔ offΔ size)*`), streams `gap addend tail` (each a `delta.EncodeCorrection` stream), optional flags word (`reloc.go:184`) | geometry, three column corrections | predicted columns | `PairByRow`/`NoAddends`/`DerivedGeometry` flags are not written (experiment rungs); `HeadCount` kept behind its flag (Go-linker PIE tables) |
 | `ehframe` | nine uvarints of geometry then the `HdrExact` byte (`ehframe.go:49`) | geometry, one flag | FDE list, `.eh_frame_hdr` contents | the flag is new: it says `Finalise` rebuilds the header after the residual |
-| `rodata` | eight uvarints of geometry, `n Keep[n]` (`rodata.go:48`) | geometry, one bit per (span, variant) | candidate spans | none |
+| `rodata` | eight uvarints of geometry then three streams, `Keep Seg Cursor` (`rodata.go:53`) | geometry, one bit per (span, variant); the segmented spans as ascending index deltas; one signed varint per table of those spans | candidate spans, their segmentation | `Seg`/`Cursor` are new |
 | `fields` | streams `RemapIndex RemapShift FieldIndex FieldDelta` (`fieldfix.go:89`) | | site list, remap domain | none |
 | `relr` | two uvarints: the old `.relr.dyn`'s offset and size (`relr.go:30`) | geometry | the slot list, where each slot lands, what it points at | new |
 | `dwarf` | `presage/dwarf` `Plan.Marshal()`; the runs are *not* carried (`Plan.MarshalRuns`) — the decoder clips the whole-image equivalences per section (`dwarf.go:48`) exactly as the harness does | | | none |
@@ -405,7 +452,10 @@ Order (each step names its harness source):
    one `.eh_frame_hdr` (`main.go:596–608`).
 9. `.rodata`: predict once with everything above (stages 0–9 of §1 —
    the harness predicts the `modelled-eh-frame` rung, `main.go:628`), then
-   `selectRoDataTables` (`rodata.go:260`) → `Keep`.
+   `selectRoDataTables` (`rodata.go:419`) → `Keep`, `Seg`, `Cursor`. Each
+   span is scored under the projected placement in every variant, then the
+   long ones under the cursor placement as well; the arm with the larger
+   measured gain, net of what its corrections cost the plan, wins.
 10. Fields: predict again with the rodata plan (`main.go:653`), then
     `encodeFieldFix(gate=false)` on the `.text` window (`fieldfix.go:132`).
 11. Final: `Materialise` of the assembled plan → `pred`; return.
@@ -589,7 +639,8 @@ exist: structure plan round-trip and truncation rejection
 (`plan_test.go:15, 44`), equivalence plan round-trip, reloc column replay on
 a synthetic table (`reloc_test.go`), `.eh_frame` walk + header rebuild + `cie_ptr` replay +
 the `Finaliser` round trip (`ehframe_test.go`), RELR pack/parse round trip and slot replay
-(`relr_test.go`), rodata span detection and `Keep` selection
+(`relr_test.go`), rodata span detection, `Keep` selection, span
+segmentation and cursor placement across an inserted and a deleted table
 (`rodata_test.go`), field-fix encode/apply round-trip (`fieldfix_test.go`),
 Breakpad and ELF symbol readers on small fixtures, and a synthetic whole
 module test: a hand-built two-function ELF-shaped byte image (no real
