@@ -428,7 +428,8 @@ func selectRoDataTables(pred, old, target []byte, p roDataPlan, mapper sourceEqu
 	for i, span := range spans {
 		bestGain, bestV := 0, -1
 		var best roDataCandidate
-		for v, c := range spanVariants(span) {
+		vars := spanVariants(span)
+		for v, c := range vars {
 			if g := placementGain(pred, old, target, p, c, proj, lookup); g > bestGain {
 				bestGain, bestV, best = g, v, c
 			}
@@ -445,7 +446,6 @@ func selectRoDataTables(pred, old, target []byte, p roDataPlan, mapper sourceEqu
 			}
 			var idx *resyncIndex
 			for _, v := range tries {
-				vars := spanVariants(span)
 				if v < 0 || v >= len(vars) {
 					continue
 				}
@@ -538,7 +538,11 @@ func wordGain(pred, target []byte, off uint64, val uint32) int {
 // target: the cursor itself, the byte matcher's opinion, a few words either
 // side, and -- for a long self-relative span -- wherever in the new section an
 // entry resolving to the table's first target actually sits. The gain it
-// returns is net of what the corrections cost the plan.
+// returns is net of what the corrections cost the plan; it prices every table
+// against the prediction, so a correction large enough to move one table back
+// over the one before it is priced as if they did not overlap. Nothing but
+// the estimate is wrong when they do -- what the decoder writes is what the
+// same walk writes here.
 func chooseCursors(pred, old, target []byte, p roDataPlan, c roDataCandidate, bounds []int, start uint64, lookup func(uint64) x86.Target, hint placement, idx *resyncIndex) ([]int64, int) {
 	sec := old[p.OldOff : p.OldOff+p.OldSize]
 	lo, hi := int64(p.NewOff), int64(p.NewOff+p.NewSize)
