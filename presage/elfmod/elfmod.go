@@ -107,8 +107,12 @@ func (Module) DispContext(refs [][]byte, plan []byte, length int64) *delta.DispC
 		return nil
 	}
 	windows := ep.Windows
-	var bodies []delta.DispBody
-	var starts []uint64
+	n := 0
+	for i := range windows {
+		n += len(structures[i].Maps)
+	}
+	bodies := make([]delta.DispBody, 0, n)
+	starts := make([]uint64, 0, n)
 	for i, w := range windows {
 		for _, m := range structures[i].Maps {
 			if m.DstSize == 0 || m.Dst > w.New.Size || m.DstSize > w.New.Size-m.Dst {
@@ -122,10 +126,11 @@ func (Module) DispContext(refs [][]byte, plan []byte, length int64) *delta.DispC
 			starts = append(starts, w.New.Addr+m.Dst)
 		}
 	}
-	if len(bodies) == 0 {
-		return nil
+	var d *delta.DispContext
+	if len(bodies) != 0 {
+		d = delta.NewDispContextOwned(bodies, starts)
 	}
-	return delta.NewDispContext(bodies, starts)
+	return d
 }
 
 // planMaps parses the plan's code windows and their structural plans. It is
@@ -312,19 +317,12 @@ func predictImage(old []byte, cp planStreams) ([]byte, predStats, error) {
 			if len(b.b) != (len(structures[i].Maps)+7)/8 {
 				return nil, st, errors.New("choice stream has the wrong size")
 			}
-			structural, _, err := predictDecoded(bytesOf(old, w.Old), structures[i], parts.lk.target)
+			selected, err := applyStructuralChoices(bytesOf(out, w.New), bytesOf(old, w.Old), structures[i], b.b, parts.lk.target)
 			if err != nil {
 				return nil, st, err
 			}
-			text := bytesOf(out, w.New)
-			for j, m := range structures[i].Maps {
-				if b.b[j/8]&(1<<(j%8)) == 0 {
-					continue
-				}
-				copy(text[m.Dst:m.Dst+m.DstSize], structural[m.Dst:m.Dst+m.DstSize])
-				st.SelectedFunctions++
-				st.SelectedBytes += int(m.DstSize)
-			}
+			st.SelectedFunctions += selected.Functions
+			st.SelectedBytes += selected.Bytes
 		}
 		if !cr.done() {
 			return nil, st, errors.New("choice stream does not match the code windows")
@@ -351,6 +349,67 @@ func predictImage(old []byte, cp planStreams) ([]byte, predStats, error) {
 		}
 	}
 	return out, st, nil
+}
+
+type selectedStats struct {
+	Relocation x86.Stats
+	Functions  int
+	Bytes      int
+}
+
+// applyStructuralChoices writes the selected structural function predictions
+// directly into text. Building a whole window-sized structural image first is
+// unnecessary: mappings have disjoint destinations, and an unselected byte is
+// never observed.
+func applyStructuralChoices(text, oldText []byte, p predictionPlan, choices []byte, lookupFn func(uint64) x86.Target) (selectedStats, error) {
+	var out selectedStats
+	if len(choices) != (len(p.Maps)+7)/8 {
+		return out, errors.New("choice stream has the wrong size")
+	}
+	if uint64(len(text)) != p.TargetLen {
+		return out, errors.New("structural choice window has the wrong size")
+	}
+	var (
+		errMu sync.Mutex
+		bad   error
+	)
+	fail := func(err error) {
+		errMu.Lock()
+		if bad == nil {
+			bad = err
+		}
+		errMu.Unlock()
+	}
+	out.Relocation = parallelStats(len(p.Maps), workers(), func(st *x86.Stats, i int) {
+		if choices[i/8]&(1<<(i%8)) == 0 {
+			return
+		}
+		m := p.Maps[i]
+		if m.Dst > uint64(len(text)) || m.DstSize > uint64(len(text))-m.Dst {
+			fail(fmt.Errorf("map %d destination exceeds target text", i))
+			return
+		}
+		dst := text[m.Dst : m.Dst+m.DstSize]
+		if !m.Copy {
+			fill(dst, 0xcc)
+			return
+		}
+		if m.Src > uint64(len(oldText)) || m.SrcSize > uint64(len(oldText))-m.Src {
+			fail(fmt.Errorf("map %d source exceeds old text", i))
+			return
+		}
+		x86.Relocate(oldText[m.Src:m.Src+m.SrcSize], dst, p.OldAddr+m.Src, p.NewAddr+m.Dst, lookupFn, st, nil)
+	})
+	if bad != nil {
+		return selectedStats{}, bad
+	}
+	for i, m := range p.Maps {
+		if choices[i/8]&(1<<(i%8)) != 0 {
+			out.Functions++
+			out.Bytes += int(m.DstSize)
+		}
+	}
+	return out, nil
 }
 
 // layImage is the prediction's base: zero everywhere, 0xcc inside .text

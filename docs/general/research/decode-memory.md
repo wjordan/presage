@@ -1,0 +1,250 @@
+# Decoder memory: profile, reductions, and the next ceiling
+
+Measurement date: 2026-08-31. Code baseline: `2c0bd70`, after the existing
+parallel-apply work (mmap reference, in-place residual, direct file output,
+parallel plan replay and residual streams). Machine: Ryzen 9 7900X, 24 logical
+CPUs, Go 1.27.0, warm page cache.
+
+## 1. Result
+
+The main remaining problem was not the output-sized prediction itself. The x86
+walks first retained every decoded reference as a 40-byte `x86.Reference`, then
+converted the table to the 8-byte target domain or the 16-byte field-site
+table the caller actually needed. On Chrome that temporary representation
+accounted for 2.70 GiB of cumulative allocation.
+
+Fusing the walk with the conversion and collecting into fixed-size chunks is
+the effective first fix. It is wire-compatible and makes the apply faster as
+well as smaller in memory. Building each residual piece's restricted
+displacement context once removes a further 253 MB of cumulative allocation,
+although that second change does not move peak RSS.
+
+| pair | target | baseline RSS | fused/chunked RSS | change | baseline wall | new wall |
+|---|---:|---:|---:|---:|---:|---:|
+| Chrome 151.169 → .173 | 291.2 MB | 3,090 MB | 1,724 MB | **−44.2%** | 3.57 s | 3.25 s |
+| libxul 154.0 → .1 | 185.6 MB | 1,776 MB | 945 MB | **−46.8%** | 3.70 s | 3.52 s |
+
+Values are medians of five fresh processes for Chrome and three for libxul,
+measured by `/usr/bin/time`. Every run applied the cached production patch and
+compared byte-for-byte with the target. Patch bytes are unchanged.
+
+A one-shot allocation benchmark (`BenchmarkApplyCorpus`) gives the same
+explanation from another angle:
+
+| Chrome apply | bytes allocated | allocation count |
+|---|---:|---:|
+| baseline | 6,688,877,344 | 9,705,543 |
+| fused walk + one restricted context | 3,521,824,096 | 3,183,695 |
+| change | **−47.3%** | **−67.2%** |
+
+## 1.1 Second pass: remove lifetime overlap
+
+A second profile started from the fused collector above and sampled the CLI
+at its RSS high-water mark. The main goroutine was no longer in prediction: it
+was waiting for residual streams. Prediction allocations that were dead by
+then still occupied heap pages, while the output, displacement context, CM
+sides and CM banks were live. The effective changes were therefore the ones
+that either removed a whole prediction temporary or avoided earlier churn:
+
+- replay structural choices directly into the final image instead of building
+  a 215.2 MiB window-sized structural prediction and copying selected bodies;
+- store field sites in one 64-bit word instead of two machine-width integers;
+- sort small mapping indices and project x86 bodies lazily instead of cloning
+  40-byte mappings and retaining separate body tables;
+- transfer ownership of the displacement table and make piece restrictions
+  zero-copy views;
+- preflight columnar run geometry so CM sides have exact capacities, reducing
+  `CMColumnarSides` allocation from 66.2 MiB to 12.6 MiB; and
+- XOR CM probabilities with their neutral midpoint, leaving untouched model
+  pages OS-zero while preserving the exact arithmetic-coder state.
+
+All are patch-compatible. Cached patches produced before the changes applied
+byte-for-byte on Chrome, libxul and Prometheus.
+
+| pair | first-pass RSS | second-pass, no limit | CLI default | first-pass wall | CLI wall |
+|---|---:|---:|---:|---:|---:|
+| Chrome 151.169 → .173 | 1,724 MB | 1,245 MB | **934 MB** | 3.25 s | **3.06 s** |
+| libxul 154.0 → .1 | 945 MB | 800 MB | **620 MB** | 3.52 s | **3.42 s** |
+| Prometheus 3.13.1 → .2 | 600 MB | 600 MB | **400 MB** | 0.80 s | **0.79 s** |
+
+The CLI column includes its new automatic soft limit: 2.2× target size, with
+a 256 MiB minimum. An explicit `GOMEMLIMIT` takes precedence. The library does
+not change a process-global runtime setting; without a limit, the code changes
+alone reduce Chrome another 27.8% from the first pass.
+
+The allocation benchmark now reports 2,574,672,864 B/op and 2,801,175
+allocations/op. Against the original decoder that is 61.5% fewer allocated
+bytes and 71.1% fewer allocations; against the first pass it is a further
+26.9% reduction in bytes.
+
+## 2. Where the baseline went
+
+The allocation profile's largest rows (`-memprofilerate=1`, one Chrome apply)
+were:
+
+| allocator | cumulative allocation | reason |
+|---|---:|---|
+| `x86.WalkBodies` reference append | 2,695.8 MiB | full 40-byte references, grown independently per body, across repeated walks |
+| CM counter banks | 344.4 MiB | several independently decoded residual streams |
+| parallel target sort/dedup | 307.9 MiB | raw target array, bucket scatter buffer, compact result |
+| prediction output (`layImage`) | 277.7 MiB | the required output-sized buffer |
+| restricted displacement contexts | 262.7 MiB | the same body subset built twice per piece |
+| temporary structural prediction | 215.2 MiB | selected function bodies before copying into the whole image |
+| field-site gather/final table | 362.5 MiB | worker shards plus a contiguous 16-byte/site table |
+
+The GC trace is important to interpretation. Baseline Chrome reached about
+1.32 GiB of live heap but 3.07 GiB RSS; after the fused walk it briefly reached
+about 1.39 GiB allocated before a collection, only 456 MiB live after that
+collection, and 1.72 GiB RSS. Dead backing arrays remain resident long enough
+to determine the process peak. Reducing allocation churn therefore matters
+more than tuning the final live heap alone.
+
+The fused collector emits only the caller's value and uses 16K-element chunks.
+Fixed chunks avoid append's geometric sequence of dead backing arrays; direct
+target shards also feed the existing parallel sort without a concatenation.
+The field-site path still concatenates once because its wire indices require
+one stable order, but no longer retains a larger reference table alongside it.
+
+## 3. Put a soft ceiling on the transient heap
+
+The code change and a Go runtime memory limit compose well:
+
+| pair / setting | peak RSS | wall | RSS / target |
+|---|---:|---:|---:|
+| Chrome, second-pass code only | 1,245 MB | 3.04 s | 4.3× |
+| Chrome, `GOMEMLIMIT=600MiB` | **934 MB** | 3.03 s | **3.2×** |
+| libxul, second-pass code only | 800 MB | 3.37 s | 4.3× |
+| libxul, `GOMEMLIMIT=400MiB` | **620 MB** | 3.44 s | **3.3×** |
+| Prometheus 3.13.1 → .2, code only | 600 MB | 0.79 s | 6.4× |
+| Prometheus, `GOMEMLIMIT=256MiB` | **400 MB** | 0.80 s | **4.3×** |
+
+After the second-pass changes, the ELF knee is near `2.2 * target size`.
+Chrome at 500 MiB did not reduce RSS below the 600 MiB result and slowed from
+3.03 to 3.62 seconds; 400 MiB took 4.22 seconds. The CLI applies the measured
+formula automatically unless the environment supplies `GOMEMLIMIT`. This is
+admission control, not a hard promise: Go defines the limit as soft, and it
+excludes the reference's `mmap`. The official GC guide specifically motivates
+it with transient heap spikes and warns about thrashing below the live set:
+<https://go.dev/doc/gc-guide#Memory_limit>.
+
+`GOGC=50` and `GOGC=25` also lowered Chrome RSS, but with materially more
+run-to-run variation. A forced phase-boundary GC saved only another 39 MiB and
+would impose a process-wide pause, so it was not retained. `GOMEMLIMIT` is the
+more predictable control and maps directly to a caller's actual memory budget.
+The dedicated CLI can set it safely; library and service callers retain control
+of their process-wide policy. Leave headroom for the mapped reference and
+non-Go memory.
+
+## 4. Probes that did not pay
+
+### Pack the Go table window index
+
+Prometheus's largest allocation is `buildWinIndex`: 286 MiB cumulatively for
+an 8-byte `(hash, position)` entry at every byte position of several stage-1
+tables. A prototype retained only 4-byte positions after construction and
+recomputed the hash suffix during lookup. It preserved the prediction exactly
+and changed RSS from about 600 to 542 MB (−10%), but changed median apply from
+0.80 to 0.90 seconds (+12.5%). Under `GOMEMLIMIT=300MiB`, it saved only about
+5% RSS for the same slowdown. Do not make it the default. It remains a
+reasonable explicit low-memory mode if a 10–13% CPU trade is acceptable.
+
+### Halve the context-model tables
+
+Reducing every nontrivial CM bank by one address bit halves that model's
+counter memory. A fresh Chrome encode produced a 2,259,357-byte patch, only
+2,999 bytes (+0.133%) above the production patch, and apply became faster from
+better cache locality. Peak RSS was unchanged at both the default and 750 MiB
+limit: those pages were not the phase setting the high-water mark. This may be
+a good speed/patch-size change, but it is not a decoder-memory lever.
+
+### Force the GC below the live-set knee
+
+The new knee is 600 MiB managed memory. Below 500 MiB total RSS stays near 932
+MB while wall time rises sharply. More GC cannot remove live metadata, the
+mapped reference, or the destination. Treat that as the current practical
+floor, not as a tuning failure.
+
+### Reduce concurrency or repeat walks
+
+Serialising CM decoders left Chrome RSS unchanged near 1.30 GB and added about
+0.2 seconds. Disabling residual prefetch saved only about 20 MB and regressed
+libxul. A two-pass field-site collector removed worker chunks but repeated the
+x86 decoder's own allocations; peak RSS rose by roughly 50 MB and apply added
+about 0.1 seconds. None was retained.
+
+A dense bitset for in-window reference targets removed most target-sort
+allocation but did not change the later residual high-water mark. It also
+penalises sparse code windows, so it was reverted rather than adding a more
+complex representation with no measured peak benefit.
+
+## 5. What prior art says about the next architecture
+
+The original `bspatch` bound is `old + new + O(1)` memory. That is a useful
+lower bound for an in-memory API, not merely a competitor's implementation
+detail: <https://www.daemonology.net/bsdiff/>.
+
+Zucchini likewise applies into one preallocated destination buffer, and its
+apply sources expose `GetNext()` cursors rather than first materialising every
+equivalence and delta:
+
+- <https://chromium.googlesource.com/chromium/src/+/08f6e3a26c7b4e37924ffc5fae4c57c0cc17dc44/components/zucchini/zucchini.h#68>
+- <https://chromium.googlesource.com/chromium/src/+/37af22b8100dacbcbd9468100e7f2359149e5f6f/chrome/installer/zucchini/zucchini_apply.cc#75>
+
+HDiffPatch makes the more aggressive endpoint explicit: its streaming patch
+forms bound memory by block/cache size, and its single-compressed format needs
+one decompression buffer. It trades encoder memory and sometimes patch size to
+get there: <https://github.com/sisong/HDiffPatch#readme>.
+
+Presage cannot blindly stream prediction bytes in file order: address domains,
+function maps, relocation tables and field repair contain genuine global
+dependencies. The useful split is global *metadata* followed by local byte
+materialisation, not pretending the global dependencies do not exist.
+
+## 6. Ranked next steps
+
+1. **Keep both passes' allocation and lifetime changes.** The fused collector,
+   direct structural replay, compact field sites, lazy bodies, displacement
+   views and exact CM-side sizing take the code-only Chrome peak from 3.09 GB
+   to 1.25 GB with no format change or patch cost, while improving wall time.
+
+2. **Keep apply-memory admission at the process boundary.** The CLI now sets
+   `max(256 MiB, 2.2 × target)` unless `GOMEMLIMIT` is explicit, bringing Chrome
+   to 934 MB. Library/service callers should set their own process policy.
+   Longer term, put a conservative module working-set declaration in the patch
+   header and reject work that cannot fit before allocating it.
+
+3. **Make decode memoisation apply-scoped.** The identity caches retain about
+   108 MiB after a Chrome apply (target domain, derived enumeration, parsed
+   maps and relocation data). That does not set the one-shot CLI peak, but it
+   is the wrong lifetime for a daemon and retains references to explicitly
+   unmapped CLI input. A decoder session should own and release these entries
+   after the residual has consumed its field context.
+
+4. **Add a destination-backed materialiser.** An optional `MaterialiseInto`
+   path can build directly into a writable output mapping or transactional
+   temporary file, apply the correction there, incrementally hash finalized
+   chunks, then atomically publish or copy only after verification. This
+   removes the output-sized Go heap object. With chunk-aligned prediction
+   hashing and `madvise` after finalized spans, clean file-backed pages need
+   not remain resident. Preserve the current `io.Writer` safety contract with
+   a temporary file; do not emit unverified bytes to an arbitrary writer.
+
+5. **Cursorize the remaining large derived tables selectively.** The compact
+   field-site table is now 66 MiB; a tested two-pass iterator made peak worse,
+   so the next attempt should preserve the x86 walk and consume chunks by
+   cursor instead. The reference-target sort still allocates about 309 MiB
+   cumulatively, although it no longer owns the peak. Equivalence runs and
+   patch frames are also naturally cursor-shaped.
+
+6. **For the Go module, shorten blob lifetimes before changing its index.**
+   Build stage-1 maps one at a time, release each window index before the next,
+   and write `.gopclntab` directly into its final output span. The packed-index
+   probe shows that recomputing hashes is a worse first trade than eliminating
+   simultaneously live `pctab`, `gofunc`, concatenations and the final pcln
+   copy.
+
+The practical milestone is met: the code changes plus the CLI runtime budget
+put both large ELF cases near 3.3× target RSS. Destination-backed
+materialisation and scoped metadata are the route from there toward the
+`old + new + metadata` bound; more GC tuning and smaller entropy tables are
+not.

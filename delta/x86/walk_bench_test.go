@@ -84,7 +84,7 @@ func flattenBodies(res [][]Reference, offs []int) []Reference {
 // body walk against the per-instruction-recover baseline, including the
 // panic-resume path, on deterministic bytes so it stays fast.
 func TestWalkVariantsAgree(t *testing.T) {
-	code := make([]byte, 4<<20)
+	code := make([]byte, 1<<20)
 	r := rand.New(rand.NewSource(1))
 	r.Read(code)
 
@@ -101,6 +101,20 @@ func TestWalkVariantsAgree(t *testing.T) {
 		par := flattenBodies(WalkBodies(bodies, 4), offs)
 		if !reflect.DeepEqual(want, par) {
 			t.Fatalf("parallel walk over %d bodies differs: %d refs vs %d", n, len(par), len(want))
+		}
+		shards := CollectBodyReferences(bodies, 4, func(k int, r Reference) (Reference, bool) {
+			g := offs[k]
+			r.Start += g
+			r.Off += g
+			r.Next += g
+			return r, true
+		})
+		var collected []Reference
+		for _, shard := range shards {
+			collected = append(collected, shard...)
+		}
+		if !reflect.DeepEqual(want, collected) {
+			t.Fatalf("collected walk over %d bodies differs: %d refs vs %d", n, len(collected), len(want))
 		}
 	}
 }

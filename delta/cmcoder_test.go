@@ -106,6 +106,19 @@ func TestCMSideLengthChecked(t *testing.T) {
 	}
 }
 
+func TestCMBankZeroEncoding(t *testing.T) {
+	b := newBank(12)
+	b.idx = 17
+	if b.probs[b.idx] != 0 || b.prob() != 1<<15 {
+		t.Fatalf("new bank slot stores %#x, reads %#x", b.probs[b.idx], b.prob())
+	}
+	b.update(1)
+	want := uint16(int32(1<<15) + ((int32(65535)-int32(1<<15))*adaptRate[0])>>16)
+	if b.prob() != want || b.cnt[b.idx] != 1 {
+		t.Fatalf("updated bank reads %#x/%d, want %#x/1", b.prob(), b.cnt[b.idx], want)
+	}
+}
+
 func BenchmarkCMDecode(b *testing.B) {
 	src, side := cmSample(1 << 20)
 	coded, err := CMEncode(src, side)

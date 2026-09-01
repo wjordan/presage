@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"runtime"
 	"slices"
-	"sync"
 
 	"github.com/wjordan/presage/delta/x86"
 	"github.com/wjordan/presage/internal/cz"
@@ -31,10 +30,18 @@ import (
 //   - The field delta works on what the field holds, one field at a time, and
 //     picks up whatever the remap could not group.
 
-type fieldSite struct {
-	off  int // field position within .text
-	next int // position of the instruction's end, which the displacement is from
+// fieldSite packs a field position and its distance to the instruction end
+// into one word. x86 instructions are at most 15 bytes, so the low byte is
+// ample for the distance and the remaining 56 bits cover any practical text
+// section. The old two-int representation cost 16 bytes per site.
+type fieldSite uint64
+
+func makeFieldSite(off, next int) fieldSite {
+	return fieldSite(uint64(off)<<8 | uint64(next-off))
 }
+
+func (s fieldSite) off() int  { return int(uint64(s) >> 8) }
+func (s fieldSite) next() int { return s.off() + int(uint64(s)&0xff) }
 
 // fieldSites lists the four-byte displacement fields of a predicted .text, in
 // the order the retargeter walked them. Instruction lengths do not depend on
@@ -44,7 +51,7 @@ func fieldSites(text []byte, maps []mapping) []fieldSite {
 	keep := func(out []fieldSite, refs []x86.Reference, base int) []fieldSite {
 		for _, ref := range refs {
 			if ref.N == 4 && base+ref.Off+4 <= len(text) {
-				out = append(out, fieldSite{base + ref.Off, base + ref.Next})
+				out = append(out, makeFieldSite(base+ref.Off, base+ref.Next))
 			}
 		}
 		return out
@@ -52,43 +59,24 @@ func fieldSites(text []byte, maps []mapping) []fieldSite {
 	if len(maps) == 0 {
 		return keep(nil, x86.References(text, 0), 0)
 	}
-	// One body per mapping, walked concurrently. WalkBodies returns the
-	// per-body references in map order, so concatenating them reproduces the
-	// exact site list -- and thus the exact plan basis -- a serial walk built.
-	bodies := make([]x86.Body, 0, len(maps))
-	bases := make([]int, 0, len(maps))
-	for _, m := range maps {
+	// Project each mapping into a body only when its worker reaches it, avoiding
+	// a large duplicate body table. The shards stay in map order, so joining
+	// them reproduces the exact site list -- and thus the exact plan basis -- a
+	// serial walk built.
+	bodyAt := func(k int) x86.Body {
+		m := maps[k]
 		if m.Dst > uint64(len(text)) || m.DstSize > uint64(len(text))-m.Dst {
-			continue
+			return x86.Body{}
 		}
-		bodies = append(bodies, x86.Body{Code: text[m.Dst : m.Dst+m.DstSize]})
-		bases = append(bases, int(m.Dst))
+		return x86.Body{Code: text[m.Dst : m.Dst+m.DstSize], PC: m.Dst}
 	}
-	res := x86.WalkBodies(bodies, runtime.GOMAXPROCS(0))
-	// The gather is sharded over the bodies and each shard sized from its own
-	// reference count, so a Chrome window's 12.7 M sites are neither collected
-	// on one core nor grown a slice at a time. Shards are concatenated in body
-	// order, which is what the serial gather produced.
-	nsh := workersFor(len(res))
-	shards := make([][]fieldSite, nsh)
-	var wg sync.WaitGroup
-	for s := 0; s < nsh; s++ {
-		wg.Add(1)
-		go func(s int) {
-			defer wg.Done()
-			lo, hi := s*len(res)/nsh, (s+1)*len(res)/nsh
-			n := 0
-			for k := lo; k < hi; k++ {
-				n += len(res[k])
-			}
-			part := make([]fieldSite, 0, n)
-			for k := lo; k < hi; k++ {
-				part = keep(part, res[k], bases[k])
-			}
-			shards[s] = part
-		}(s)
-	}
-	wg.Wait()
+	shards := x86.CollectReferences(len(maps), runtime.GOMAXPROCS(0), bodyAt, func(_ int, body x86.Body, ref x86.Reference) (fieldSite, bool) {
+		base := int(body.PC)
+		if ref.N != 4 || base+ref.Off+4 > len(text) {
+			return 0, false
+		}
+		return makeFieldSite(base+ref.Off, base+ref.Next), true
+	})
 	n := 0
 	for _, p := range shards {
 		n += len(p)
@@ -101,12 +89,12 @@ func fieldSites(text []byte, maps []mapping) []fieldSite {
 }
 
 func (s fieldSite) addr(text []byte, textAddr uint64) uint64 {
-	disp := int64(int32(binary.LittleEndian.Uint32(text[s.off:])))
-	return uint64(int64(textAddr) + int64(s.next) + disp)
+	disp := int64(int32(binary.LittleEndian.Uint32(text[s.off():])))
+	return uint64(int64(textAddr) + int64(s.next()) + disp)
 }
 
 func (s fieldSite) put(text []byte, textAddr, target uint64) {
-	binary.LittleEndian.PutUint32(text[s.off:], uint32(int32(int64(target)-int64(textAddr)-int64(s.next))))
+	binary.LittleEndian.PutUint32(text[s.off():], uint32(int32(int64(target)-int64(textAddr)-int64(s.next()))))
 }
 
 // The basis the remap layer states a new target on.
@@ -229,7 +217,7 @@ func encodeFieldFix(text, want []byte, textAddr uint64, maps []mapping) (fieldPl
 	// image.
 	wrongAddr := make(map[uint64]bool)
 	for _, s := range sites {
-		if !equal4(text[s.off:], want[s.off:]) {
+		if !equal4(text[s.off():], want[s.off():]) {
 			wrongAddr[s.addr(text, textAddr)] = true
 		}
 	}
@@ -260,12 +248,12 @@ func encodeFieldFix(text, want []byte, textAddr uint64, maps []mapping) (fieldPl
 		correct := 0
 		for _, i := range g.sites {
 			s := sites[i]
-			if equal4(text[s.off:], want[s.off:]) {
+			if equal4(text[s.off():], want[s.off():]) {
 				correct++
 				continue
 			}
-			disp := int64(int32(binary.LittleEndian.Uint32(want[s.off:])))
-			votes[uint64(int64(textAddr)+int64(s.next)+disp)]++
+			disp := int64(int32(binary.LittleEndian.Uint32(want[s.off():])))
+			votes[uint64(int64(textAddr)+int64(s.next())+disp)]++
 		}
 		bestTo, best := uint64(0), 0
 		for to, n := range votes {
@@ -332,10 +320,10 @@ func encodeFieldFix(text, want []byte, textAddr uint64, maps []mapping) (fieldPl
 	}
 	prev := 0
 	for i, s := range sites {
-		if equal4(fixed[s.off:], want[s.off:]) {
+		if equal4(fixed[s.off():], want[s.off():]) {
 			continue
 		}
-		d := int64(int32(binary.LittleEndian.Uint32(want[s.off:]))) - int64(int32(binary.LittleEndian.Uint32(fixed[s.off:])))
+		d := int64(int32(binary.LittleEndian.Uint32(want[s.off():]))) - int64(int32(binary.LittleEndian.Uint32(fixed[s.off():])))
 		p.FieldIndex = appendU(p.FieldIndex, uint64(i-prev))
 		p.FieldDelta = appendS(p.FieldDelta, d)
 		prev = i
@@ -435,8 +423,8 @@ func applyFieldFix(text []byte, textAddr uint64, maps []mapping, b []byte) (fiel
 			return st, errors.New("field delta runs past the field list")
 		}
 		s := sites[at]
-		v := int64(int32(binary.LittleEndian.Uint32(text[s.off:]))) + d
-		binary.LittleEndian.PutUint32(text[s.off:], uint32(int32(v)))
+		v := int64(int32(binary.LittleEndian.Uint32(text[s.off():]))) + d
+		binary.LittleEndian.PutUint32(text[s.off():], uint32(int32(v)))
 		st.Deltas++
 		first = false
 	}

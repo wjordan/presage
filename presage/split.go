@@ -336,7 +336,11 @@ func applySplitResidual(out, stream []byte, disp func() *delta.DispContext, pf *
 	var at uint64
 	for pi, p := range ps {
 		blobs := p.blobs
-		span := out[at : at+p.length]
+		pieceAt := at
+		span := out[pieceAt : pieceAt+p.length]
+		pieceDisp := sync.OnceValue(func() *delta.DispContext {
+			return disp().Restrict(int(pieceAt), int(pieceAt)+int(p.length))
+		})
 		streams := make([][]byte, len(p.raw))
 		var sides []*delta.CMSide
 		get := func(j int) error {
@@ -397,7 +401,7 @@ func applySplitResidual(out, stream []byte, disp func() *delta.DispContext, pf *
 		}
 		if lead == 2 && slices.Contains(p.codec[2:], codecCM) {
 			buckets, err := delta.CMColumnarSides(span, streams[0], streams[1],
-				disp().Restrict(int(at), int(at)+int(p.length)))
+				pieceDisp())
 			if err != nil {
 				return fmt.Errorf("%w: piece: %v", ErrCorrupt, err)
 			}
@@ -413,7 +417,7 @@ func applySplitResidual(out, stream []byte, disp func() *delta.DispContext, pf *
 		case p.kind == pieceColumnar:
 			err = delta.ApplyColumnar(span, streams)
 		case p.kind == pieceColumnarDisp:
-			err = delta.ApplyColumnarDisp(span, streams, disp().Restrict(int(at), int(at)+int(p.length)))
+			err = delta.ApplyColumnarDisp(span, streams, pieceDisp())
 		default:
 			err = fmt.Errorf("%w: piece kind %d with %d streams", ErrCorrupt, p.kind, len(streams))
 		}

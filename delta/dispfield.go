@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"slices"
+	"sort"
 	"sync"
 
 	"github.com/wjordan/presage/delta/x86"
@@ -45,12 +46,27 @@ type DispBody struct {
 type DispContext struct {
 	bodies []DispBody
 	starts []uint64 // sorted, unique
+	// A restricted context views bodies in their original coordinates and
+	// translates them by base. limit is the exclusive original-coordinate
+	// boundary; zero marks an unrestricted context.
+	base, limit int
 }
 
 // NewDispContext returns the context for a set of function bodies. It sorts
 // and de-duplicates both inputs, so a caller may pass them in any order.
 func NewDispContext(bodies []DispBody, starts []uint64) *DispContext {
-	d := &DispContext{bodies: slices.Clone(bodies), starts: slices.Clone(starts)}
+	return newDispContext(slices.Clone(bodies), slices.Clone(starts))
+}
+
+// NewDispContextOwned is NewDispContext for freshly built slices whose
+// ownership the caller transfers to the context. The context sorts and
+// retains both slices; the caller must not use them again.
+func NewDispContextOwned(bodies []DispBody, starts []uint64) *DispContext {
+	return newDispContext(bodies, starts)
+}
+
+func newDispContext(bodies []DispBody, starts []uint64) *DispContext {
+	d := &DispContext{bodies: bodies, starts: starts}
 	slices.SortFunc(d.bodies, func(a, b DispBody) int { return cmp.Compare(a.Off, b.Off) })
 	slices.Sort(d.starts)
 	d.starts = slices.Compact(d.starts)
@@ -64,13 +80,23 @@ func (d *DispContext) Restrict(lo, hi int) *DispContext {
 	if d == nil {
 		return nil
 	}
-	out := &DispContext{starts: d.starts}
-	for _, b := range d.bodies {
-		if b.Off >= lo && b.Off+b.Size <= hi {
-			out.bodies = append(out.bodies, DispBody{b.Off - lo, b.Size, b.PC})
-		}
+	absLo, absHi := d.base+lo, d.base+hi
+	if d.limit != 0 {
+		absHi = min(absHi, d.limit)
 	}
-	return out
+	// Bodies stay in their owner. sites and classify translate offsets while
+	// walking the view and drop the rare body that straddles its upper cut.
+	i := sort.Search(len(d.bodies), func(i int) bool { return d.bodies[i].Off >= absLo })
+	j := sort.Search(len(d.bodies), func(i int) bool { return d.bodies[i].Off >= absHi })
+	return &DispContext{starts: d.starts, bodies: d.bodies[i:j], base: absLo, limit: absHi}
+}
+
+func (d *DispContext) localBody(b DispBody) (DispBody, bool) {
+	if b.Off < d.base || (d.limit != 0 && b.Off+b.Size > d.limit) {
+		return DispBody{}, false
+	}
+	b.Off -= d.base
+	return b, true
 }
 
 // dispRun is one long-bucket run: [start, end) in buffer coordinates, and
@@ -100,6 +126,10 @@ func (d *DispContext) sites(buf []byte, runs []dispRun) []dispSite {
 	shards := shardBodies(len(d.bodies), func(lo, hi int) []dispSite {
 		var out []dispSite
 		for _, b := range d.bodies[lo:hi] {
+			var ok bool
+			if b, ok = d.localBody(b); !ok {
+				continue
+			}
 			if b.Off < 0 || b.Size < 0 || b.Off+b.Size > len(buf) {
 				continue
 			}
@@ -206,6 +236,10 @@ func (d *DispContext) classify(buf []byte, runs []dispRun, stamp func(run, pos i
 	// the same byte of the context. The run cursor k is per body already.
 	shardBodies(len(d.bodies), func(lo, hi int) struct{} {
 		for _, b := range d.bodies[lo:hi] {
+			var ok bool
+			if b, ok = d.localBody(b); !ok {
+				continue
+			}
 			if b.Off < 0 || b.Size < 0 || b.Off+b.Size > len(buf) {
 				continue
 			}

@@ -21,8 +21,21 @@ import "slices"
 // sides, so the classification is the same one at both ends.
 func CMColumnarSides(pred, gaps, lens []byte, d *DispContext) ([]*CMSide, error) {
 	sides := make([]*CMSide, ColumnarBuckets)
+	sizes, nruns, err := columnarSideSizes(len(pred), gaps, lens)
+	if err != nil {
+		return nil, err
+	}
+	for b, n := range sizes {
+		if n != 0 {
+			sides[b] = &CMSide{Pred: make([]byte, 0, n), Sel: make([]byte, 0, n)}
+		}
+	}
 	var runs []dispRun
-	var bucket []int
+	var bucket []byte
+	if d != nil {
+		runs = make([]dispRun, 0, nruns)
+		bucket = make([]byte, 0, nruns)
+	}
 	g, l := &rbuf{b: gaps}, &rbuf{b: lens}
 	at := 0
 	for len(g.b) > 0 {
@@ -40,13 +53,9 @@ func CMColumnarSides(pred, gaps, lens []byte, d *DispContext) ([]*CMSide, error)
 		}
 		b := bucketOf(int(n))
 		s := sides[b]
-		if s == nil {
-			s = &CMSide{}
-			sides[b] = s
-		}
 		if d != nil {
 			runs = append(runs, dispRun{at, at + int(n), len(s.Pred)})
-			bucket = append(bucket, b)
+			bucket = append(bucket, byte(b))
 		}
 		// Whole runs at a time: the prediction bytes are a contiguous slice
 		// and the selector is the same short ramp followed by a constant for
@@ -80,11 +89,42 @@ func CMColumnarSides(pred, gaps, lens []byte, d *DispContext) ([]*CMSide, error)
 		}
 	}
 	d.classify(pred, runs, func(r, pos int, cls, off byte) {
-		s := sides[bucket[r]]
+		s := sides[int(bucket[r])]
 		k := runs[r].at + pos - runs[r].start
 		s.Cls[k], s.Off[k] = cls, off
 	})
 	return sides, nil
+}
+
+// columnarSideSizes validates the run geometry and returns exact capacities
+// for the second pass. Avoiding geometric growth matters here: a large code
+// correction can have more than a million runs and four side bytes per
+// replacement byte.
+func columnarSideSizes(predLen int, gaps, lens []byte) ([ColumnarBuckets]int, int, error) {
+	var sizes [ColumnarBuckets]int
+	g, l := &rbuf{b: gaps}, &rbuf{b: lens}
+	at, nruns := 0, 0
+	for len(g.b) > 0 {
+		gap := g.un(uint64(predLen-at), "columnar gap")
+		n := l.un(uint64(predLen), "columnar run")
+		if g.err != nil {
+			return sizes, 0, g.err
+		}
+		if l.err != nil {
+			return sizes, 0, l.err
+		}
+		at += int(gap)
+		if n == 0 || n > uint64(predLen-at) {
+			return sizes, 0, wrapCorrupt("columnar run of %d at %d", n, at)
+		}
+		sizes[bucketOf(int(n))] += int(n)
+		at += int(n)
+		nruns++
+	}
+	if len(l.b) != 0 {
+		return sizes, 0, wrapCorrupt("trailing columnar lengths")
+	}
+	return sizes, nruns, nil
 }
 
 // cmWorthClassifying skips the walk for a piece no bucket of which the CM

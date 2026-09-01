@@ -165,6 +165,15 @@ func TestRetargetAndChoice(t *testing.T) {
 	if n != 1 || nb != 16 || choices[0] != 1 {
 		t.Errorf("choice %v %d %d", choices, n, nb)
 	}
+	want := bytes.Clone(wrongEq)
+	copy(want[:16], structural[:16])
+	selected, err := applyStructuralChoices(wrongEq, oldText, structure, choices, newAddressLookup(structure).target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.Functions != n || selected.Bytes != nb || !bytes.Equal(wrongEq, want) {
+		t.Fatalf("direct structural choices differ: stats %+v\n%x\n%x", selected, wrongEq, want)
+	}
 }
 
 // elfImage builds a minimal ELF64 x86-64 image from named sections.

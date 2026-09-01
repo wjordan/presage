@@ -109,14 +109,25 @@ func TestDispColumnAbsentWithoutContext(t *testing.T) {
 func TestDispContextRestrict(t *testing.T) {
 	t.Parallel()
 	d := NewDispContext([]DispBody{{Off: 0, Size: 48, PC: 0x1000}, {Off: 64, Size: 16, PC: 0x2000}}, []uint64{0x1000, 0x2000})
-	if got := len(d.Restrict(0, 48).bodies); got != 1 {
+	count := func(d *DispContext) int {
+		n := 0
+		for _, b := range d.bodies {
+			if _, ok := d.localBody(b); ok {
+				n++
+			}
+		}
+		return n
+	}
+	if got := count(d.Restrict(0, 48)); got != 1 {
 		t.Fatalf("%d bodies in [0,48)", got)
 	}
-	if got := len(d.Restrict(0, 40).bodies); got != 0 {
+	if got := count(d.Restrict(0, 40)); got != 0 {
 		t.Fatalf("%d bodies in [0,40), want the straddling body dropped", got)
 	}
-	if got := d.Restrict(64, 80).bodies; len(got) != 1 || got[0].Off != 0 {
-		t.Fatalf("restricted body %+v", got)
+	r := d.Restrict(64, 80)
+	b, ok := r.localBody(r.bodies[0])
+	if !ok || count(r) != 1 || b.Off != 0 {
+		t.Fatalf("restricted body %+v, ok %v", b, ok)
 	}
 }
 

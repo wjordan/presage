@@ -259,6 +259,64 @@ func WalkBodies(bodies []Body, workers int) [][]Reference {
 	return out
 }
 
+// CollectBodyReferences walks contiguous shards of bodies concurrently and
+// collects only the value each reference maps to. It is for callers that do
+// not need the full Reference table: converting a large table after the walk
+// keeps both representations live and can cost several times the code size.
+// Shards and the values inside each shard remain in body order.
+func CollectBodyReferences[T any](bodies []Body, workers int, collect func(body int, ref Reference) (T, bool)) [][]T {
+	return CollectReferences(len(bodies), workers, func(i int) Body { return bodies[i] },
+		func(i int, _ Body, ref Reference) (T, bool) { return collect(i, ref) })
+}
+
+// CollectReferences is CollectBodyReferences with bodies supplied lazily.
+// It avoids materialising a large []Body when the caller already has another
+// table from which each body can be projected cheaply.
+func CollectReferences[T any](n, workers int, bodyAt func(int) Body, collect func(body int, b Body, ref Reference) (T, bool)) [][]T {
+	if n == 0 {
+		return nil
+	}
+	workers = min(max(workers, 1), n)
+	nsh := min(4*workers, n)
+	const chunk = 16 << 10
+	sharded := make([][][]T, nsh)
+	var wg sync.WaitGroup
+	for s := range nsh {
+		wg.Add(1)
+		go func(s int) {
+			defer wg.Done()
+			lo, hi := s*n/nsh, (s+1)*n/nsh
+			var parts [][]T
+			var part []T
+			for k := lo; k < hi; k++ {
+				b := bodyAt(k)
+				WalkReferences(b.Code, b.PC, func(ref Reference) {
+					if v, ok := collect(k, b, ref); ok {
+						if part == nil {
+							part = make([]T, 0, chunk)
+						}
+						part = append(part, v)
+						if len(part) == cap(part) {
+							parts = append(parts, part)
+							part = nil
+						}
+					}
+				})
+			}
+			if len(part) != 0 {
+				parts = append(parts, part)
+			}
+			sharded[s] = parts
+		}(s)
+	}
+	wg.Wait()
+	var out [][]T
+	for _, parts := range sharded {
+		out = append(out, parts...)
+	}
+	return out
+}
+
 // Relocate copies code (which lives at srcPC in the old binary) into out
 // (which lives at dstPC in the new one) and re-targets every PC-relative
 // operand through lookup. out is filled to its full length: short code is

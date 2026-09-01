@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -189,6 +190,16 @@ func apply(args []string) error {
 	if err != nil {
 		return err
 	}
+	if os.Getenv("GOMEMLIMIT") == "" {
+		h, err := presage.ParseHeader(patch)
+		if err != nil {
+			return err
+		}
+		// Applying is the CLI's only substantial job, so give its transient
+		// heap a target-derived soft ceiling. The reference mmap and runtime
+		// metadata sit outside this budget; an explicit GOMEMLIMIT always wins.
+		debug.SetMemoryLimit(defaultApplyMemoryLimit(h.Size))
+	}
 	start := time.Now()
 	// Straight to the file: buffering the result first copied the whole image
 	// a third time and held a second 291 MB of it.
@@ -206,6 +217,15 @@ func apply(args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "presage: applied, %d B in %s\n", w.n, time.Since(start).Round(time.Millisecond))
 	return nil
+}
+
+func defaultApplyMemoryLimit(targetSize int64) int64 {
+	const minLimit = 256 << 20
+	limit := targetSize * 11 / 5
+	if limit < minLimit {
+		return minLimit
+	}
+	return limit
 }
 
 // countWriter reports how many bytes reached the file, for the summary line.

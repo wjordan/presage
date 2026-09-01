@@ -171,12 +171,13 @@ type cmBank struct {
 
 func newBank(bits uint) *cmBank {
 	n := 1 << bits
-	b := &cmBank{probs: make([]uint16, n), cnt: make([]uint8, n), mask: uint32(n - 1)}
-	for i := range b.probs {
-		b.probs[i] = 1 << 15
-	}
-	return b
+	// Probabilities are stored XORed with their neutral 1/2 value. An
+	// untouched slot is therefore represented by the zero value Go and the OS
+	// provide lazily, instead of faulting every page in merely to fill 0x8000.
+	return &cmBank{probs: make([]uint16, n), cnt: make([]uint8, n), mask: uint32(n - 1)}
 }
+
+func (b *cmBank) prob() uint16 { return b.probs[b.idx] ^ (1 << 15) }
 
 func (b *cmBank) selectBit(c0 uint32) {
 	h := b.base*0x9E3779B1 + c0*0x85EBCA6B
@@ -188,12 +189,12 @@ func (b *cmBank) selectBit(c0 uint32) {
 
 func (b *cmBank) update(bit int) {
 	i := b.idx
-	p := int32(b.probs[i])
+	p := int32(b.prob())
 	target := int32(0)
 	if bit == 1 {
 		target = 65535
 	}
-	b.probs[i] = uint16(p + ((target-p)*adaptRate[b.cnt[i]])>>16)
+	b.probs[i] = uint16(p+((target-p)*adaptRate[b.cnt[i]])>>16) ^ (1 << 15)
 	if b.cnt[i] < 63 {
 		b.cnt[i]++
 	}
@@ -502,7 +503,7 @@ func (c *cmCoder) code(src []byte, enc *arEncoder, dec *arDecoder, dst []byte) {
 		for k := uint(0); k < 8; k++ {
 			for j, b := range c.banks {
 				b.selectBit(c0)
-				c.mx.in[j] = stretchTab[b.probs[b.idx]>>4]
+				c.mx.in[j] = stretchTab[b.prob()>>4]
 			}
 			c.mx.in[len(c.banks)] = c.mm.stretchIn(c0, k)
 			c.mx.ctx = sel*8 + int(k)

@@ -82,58 +82,34 @@ func sourceExtents(srcs []uint64, oldText []byte) map[uint64]uint64 {
 // zero so an index always exists. Both sides build it from the old image
 // and the map alone.
 func referenceTargets(oldText []byte, maps []mapping, oldAddr uint64) []uint64 {
-	bySrc := slices.Clone(maps)
-	sortByKey(bySrc, func(m mapping) uint64 { return m.Src },
-		func(a, b mapping) int { return cmpU(a.Src, b.Src) })
-	var bodies []x86.Body
-	var bases []uint64
-	var prevSrc uint64
-	for i, m := range bySrc {
-		if i > 0 && m.Src == prevSrc {
-			continue // identical-code folding: one body, several destinations
-		}
-		prevSrc = m.Src
+	// The plan retains mappings in destination order. Sort small indices into
+	// that table rather than cloning and sorting its 40-byte entries.
+	bySrc := make([]int, len(maps))
+	for i := range bySrc {
+		bySrc[i] = i
+	}
+	sortByKey(bySrc, func(i int) uint64 { return maps[i].Src }, func(a, b int) int {
+		return cmpU(maps[a].Src, maps[b].Src)
+	})
+	bySrc = slices.CompactFunc(bySrc, func(a, b int) bool { return maps[a].Src == maps[b].Src })
+	bodyAt := func(k int) x86.Body {
+		mi := bySrc[k]
+		m := maps[mi]
 		if m.Src > uint64(len(oldText)) || m.SrcSize > uint64(len(oldText))-m.Src {
-			continue
+			return x86.Body{}
 		}
-		bodies = append(bodies, x86.Body{Code: oldText[m.Src : m.Src+m.SrcSize]})
-		bases = append(bases, oldAddr+m.Src)
+		return x86.Body{Code: oldText[m.Src : m.Src+m.SrcSize], PC: oldAddr + m.Src}
 	}
-	res := x86.WalkBodies(bodies, runtime.GOMAXPROCS(0))
-	// Gathered in shards over the bodies -- each body's displacements are read
-	// independently -- and each shard sized from its own reference count, so
-	// the 12.8 M-entry domain of a Chrome window neither grows a slice nor
-	// sorts on one core.
-	nsh := workersFor(len(res))
-	shards := make([][]uint64, nsh+1)
+	parts := x86.CollectReferences(len(bySrc), runtime.GOMAXPROCS(0), bodyAt, func(_ int, body x86.Body, ref x86.Reference) (uint64, bool) {
+		disp, ok := readDisplacement(body.Code, ref)
+		if !ok {
+			return 0, false
+		}
+		return uint64(int64(body.PC+uint64(ref.Next)) + disp), true
+	})
+	shards := make([][]uint64, 1, len(parts)+1)
 	shards[0] = []uint64{0} // the leading zero, so an index always exists
-	var wg sync.WaitGroup
-	for s := 0; s < nsh; s++ {
-		wg.Add(1)
-		go func(s int) {
-			defer wg.Done()
-			lo, hi := s*len(res)/nsh, (s+1)*len(res)/nsh
-			n := 0
-			for k := lo; k < hi; k++ {
-				n += len(res[k])
-			}
-			part := make([]uint64, 0, n)
-			for k := lo; k < hi; k++ {
-				body := bodies[k].Code
-				base := bases[k]
-				for _, ref := range res[k] {
-					disp, ok := readDisplacement(body, ref)
-					if !ok {
-						continue
-					}
-					part = append(part, uint64(int64(base+uint64(ref.Next))+disp))
-				}
-			}
-			shards[s+1] = part
-		}(s)
-	}
-	wg.Wait()
-	return sortDedupShards(shards)
+	return sortDedupShards(append(shards, parts...))
 }
 
 // The target domain is a pure function of the old text and the map, and an

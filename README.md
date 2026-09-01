@@ -83,8 +83,12 @@ coder, the five modules above, and end-to-end verification. The rest of the
 SPEC (the portable wasm module profile, cross-file priors, further domains)
 is design.
 
-The open weakness is decoder memory: it peaks at several times the size of
-the binary, most of it the prediction's working set.
+Decoder memory remains the open weakness, but two profiling passes cut the
+measured Chrome CLI peak from 3.1 GB to 934 MB (3.2× the target) while making
+apply 14% faster. The CLI now derives a soft Go heap limit from the target;
+`GOMEMLIMIT` overrides it. [`decode-memory.md`](docs/general/research/decode-memory.md)
+profiles the working set, the retained changes, and the path toward
+destination-backed materialisation.
 
 ## Use
 
