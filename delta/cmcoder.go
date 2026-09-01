@@ -11,19 +11,31 @@ import "fmt"
 // nor that it is the third byte of a modrm-plus-disp encoding. This coder can.
 //
 // The machinery is the lpaq skeleton cut to the bone: a carryless binary
-// arithmetic coder, a bank of direct-lookup adaptive counters selected by
-// hashed contexts, a match model, and one logistic mixer whose weights are
-// selected by a small context. No SSE chain, no state machine, no two-level
-// hash tables -- the win is in the *contexts*, and a bigger engine would only
-// add a constant to every stream.
+// arithmetic coder, a bank of direct-lookup slots selected by hashed
+// contexts, a match model, one logistic mixer whose weights are selected by a
+// small context, and a short SSE chain on its output. A slot holds a
+// zpaq-family bit history rather than a probability, and what a history is
+// worth is learned once per bank by a state map -- so a context seen twice
+// already predicts as well as every other context with the same history,
+// which is most of what the correction streams are made of. There are no
+// two-level hash tables and no second mixer layer: the win is in the
+// *contexts*, and the rest of a big engine only adds a constant to every
+// stream.
 //
-// It is entirely integer: the mixer's squash and stretch are tables, not
+// It is entirely integer: the mixer's squash and stretch, the state
+// transitions and the SSE transfer are tables and integer recurrences, not
 // math.Exp, so a patch coded on one machine decodes identically on every
 // other. Encode and decode run the same model loop, so a size reported by
 // CMEncode is the size CMDecode reads back.
 //
-// It is slow -- about 1 MB/s each way -- which is why split.go offers it per
-// stream and keeps it only where it beats the general compressor.
+// It is slow -- about 0.6 MB/s each way -- which is why split.go offers it
+// per stream and keeps it only where it beats the general compressor.
+
+// cmAPM enables the SSE chain. It is a build-time constant and not a wire
+// option: the chain is part of the model the decoder must reproduce, so
+// turning it off changes the format. It exists so the engine can be measured
+// with and without it.
+const cmAPM = true
 
 // ---------------------------------------------------------------------------
 // arithmetic coder
@@ -135,8 +147,9 @@ var stretchTab = func() [4096]int32 {
 	return t
 }()
 
-// adaptRate[n] is the 16-bit-scaled step a counter takes on its n-th update:
-// 1/(n+1.5) early, floored at 1/48 so the counter keeps tracking drift.
+// adaptRate[n] is the 16-bit-scaled step the match model's counter takes on
+// its n-th update: 1/(n+1.5) early, floored at 1/48 so it keeps tracking
+// drift.
 var adaptRate = func() [64]int32 {
 	var t [64]int32
 	for n := range t {
@@ -159,25 +172,260 @@ func mix32(h uint32) uint32 {
 }
 
 // ---------------------------------------------------------------------------
-// a context model: one hashed direct-lookup counter bank
+// bit histories
+//
+// A slot holds a zpaq-family nonstationary state rather than a probability:
+// the counts (n0, n1) of the bits seen in that context, held to a staircase
+// bound so that a long run of one bit forgets all but a little of the
+// opposite count, plus the last bit while both counts are small. Exactly 255
+// such states are reachable, so a slot is one byte -- and the initial state
+// is index 0, so an untouched table is the zero value the OS provides lazily
+// rather than pages faulted in to be initialised.
+//
+// A history is not itself a prediction. What one is worth is learned by a
+// state map per bank (256 entries, shared by every slot), so a context seen
+// for the second time already predicts as well as every other context with
+// the same history -- which is most of a correction stream. The counts also
+// reach the mixer directly, as a confidence the map cannot express.
+
+// histBound is the staircase: with n of one bit seen, at most histBound(n) of
+// the other are remembered.
+func histBound(n int) int {
+	switch {
+	case n == 0:
+		return 20
+	case n == 1:
+		return 48
+	case n == 2:
+		return 15
+	case n == 3:
+		return 8
+	case n == 4:
+		return 6
+	case n == 5:
+		return 5
+	case n == 6:
+		return 4
+	case n <= 8:
+		return 3
+	case n <= 15:
+		return 2
+	case n <= 48:
+		return 1
+	}
+	return 0
+}
+
+func histOK(n0, n1 int) bool { return n1 <= histBound(n0) && n0 <= histBound(n1) }
+
+type histTables struct {
+	next  [256][2]uint8 // state, bit -> state
+	n0    [256]uint8
+	n1    [256]uint8
+	initP [256]uint16 // (n1+0.5)/(n0+n1+1), 12-bit
+}
+
+var hist = func() *histTables {
+	h := &histTables{}
+	type key struct{ n0, n1, lb int }
+	id := map[key]int{}
+	var list []key
+	add := func(k key) {
+		if _, ok := id[k]; !ok {
+			id[k] = len(list)
+			list = append(list, k)
+		}
+	}
+	for n0 := 0; n0 <= 48; n0++ {
+		for n1 := 0; n1 <= 48; n1++ {
+			if !histOK(n0, n1) {
+				continue
+			}
+			// The last bit is worth a state only while both counts are
+			// small; beyond that the counts say everything.
+			if n0 > 0 && n1 > 0 && n0+n1 <= 17 {
+				add(key{n0, n1, 0})
+				add(key{n0, n1, 1})
+			} else {
+				add(key{n0, n1, -1})
+			}
+		}
+	}
+	if len(list) > 256 {
+		panic(fmt.Sprintf("bit-history state space is %d", len(list)))
+	}
+	// The initial state must be index 0 so a zeroed table means "unseen".
+	z := id[key{0, 0, -1}]
+	list[0], list[z] = list[z], list[0]
+	id[list[0]], id[list[z]] = 0, z
+	// step observes bit y: the count of y grows, the opposite count is
+	// capped at 7 and then discounted above 5, and the pair is walked back
+	// under the bound.
+	step := func(k key, y int) key {
+		ny, nm := k.n0, k.n1
+		if y == 1 {
+			ny, nm = k.n1, k.n0
+		}
+		ny++
+		if nm > 7 {
+			nm = 7
+		} else if nm > 5 {
+			nm--
+		}
+		for {
+			a, b := ny, nm
+			if y == 1 {
+				a, b = nm, ny
+			}
+			if histOK(a, b) {
+				break
+			}
+			if nm > 0 {
+				nm--
+			} else {
+				ny--
+			}
+		}
+		a, b := ny, nm
+		if y == 1 {
+			a, b = nm, ny
+		}
+		lb := -1
+		if a > 0 && b > 0 && a+b <= 17 {
+			lb = y
+		}
+		return key{a, b, lb}
+	}
+	for i, k := range list {
+		for y := 0; y < 2; y++ {
+			n := step(k, y)
+			j, ok := id[n]
+			if !ok {
+				panic(fmt.Sprintf("bit-history state %v +%d -> %v is unreachable", k, y, n))
+			}
+			h.next[i][y] = uint8(j)
+		}
+		h.n0[i], h.n1[i] = uint8(k.n0), uint8(k.n1)
+		// (n1+0.5)/(n0+n1+1) in 12 bits, by integer arithmetic.
+		h.initP[i] = uint16((2*k.n1 + 1) * 4096 / (2*(k.n0+k.n1) + 2))
+	}
+	// The unreachable tail of the byte is a fixed point at even odds; no
+	// slot ever holds one, but a table lookup must be total.
+	for i := len(list); i < 256; i++ {
+		h.next[i][0], h.next[i][1] = uint8(i), uint8(i)
+		h.initP[i] = 2048
+	}
+	return h
+}()
+
+// stateMap is lpaq's: what each bit history is worth in this bank, as a
+// 22-bit probability in the high bits of a word and an update count in the
+// low 10, adapting at 1/(n+2.5) until the count saturates.
+type stateMap struct {
+	t   [256]uint32
+	cxt int
+}
+
+// smLimit caps the state map's adaptation count; past it the map keeps a
+// fixed rate and follows drift.
+const smLimit = 1023
+
+var smRate = func() [1024]int32 {
+	var t [1024]int32
+	for i := range t {
+		t[i] = int32(512 / (2*i + 5))
+	}
+	return t
+}()
+
+func newStateMap() *stateMap {
+	s := &stateMap{}
+	for i := range s.t {
+		s.t[i] = uint32(hist.initP[i]) << 20
+	}
+	return s
+}
+
+// p returns the 12-bit probability the map holds for state st.
+func (s *stateMap) p(st uint8) int32 {
+	s.cxt = int(st)
+	return int32(s.t[st] >> 20)
+}
+
+func (s *stateMap) update(bit int) {
+	v := s.t[s.cxt]
+	n := v & 1023
+	p := int32(v >> 10)
+	if n < smLimit {
+		s.t[s.cxt]++
+	}
+	d := (((int32(bit) << 22) - p) >> 3) * smRate[n]
+	// Masking the count field off the step keeps the add out of it.
+	s.t[s.cxt] += uint32(d) & 0xFFFFFC00
+}
+
+// ---------------------------------------------------------------------------
+// SSE / APM: an interpolated 33-bucket transfer over the stretched input,
+// one row per context, refining the mixer's output where the mixer is
+// systematically off.
+
+type apm struct {
+	t     []uint16
+	index int
+}
+
+// apmRate is the SSE tables' adaptation shift.
+const apmRate = 7
+
+func newAPM(n int) *apm {
+	a := &apm{t: make([]uint16, n*33)}
+	for i := range a.t {
+		a.t[i] = uint16(squash(int32(i%33-16)*128) * 16)
+	}
+	return a
+}
+
+// p maps a 12-bit probability through row cxt and returns a 12-bit one.
+func (a *apm) p(pr int32, cxt int) int32 {
+	st := stretchTab[pr]
+	w := st & 127
+	a.index = int((st+2048)>>7) + cxt*33
+	return (int32(a.t[a.index])*(128-w) + int32(a.t[a.index+1])*w) >> 11
+}
+
+func (a *apm) update(bit int) {
+	g := (int32(bit) << 16) + (int32(bit) << apmRate) - int32(bit) - int32(bit)
+	a.t[a.index] += uint16((g - int32(a.t[a.index])) >> apmRate)
+	a.t[a.index+1] += uint16((g - int32(a.t[a.index+1])) >> apmRate)
+}
+
+// apmBits sizes the hashed SSE stage to the stream, as bankBits does the
+// counter banks: a 4 KiB column has no use for 64K rows of transfer
+// function. The low 8 bits of a row index are the partial byte, so the
+// smallest table is 256 rows.
+func apmBits(n int) uint {
+	b := uint(8)
+	for 1<<b < n>>4 && b < 16 {
+		b++
+	}
+	return b
+}
+
+// ---------------------------------------------------------------------------
+// a context model: one hashed direct-lookup bank of bit histories
 
 type cmBank struct {
-	probs []uint16
-	cnt   []uint8
-	mask  uint32
-	base  uint32 // hash of the byte-level context, set once per byte
-	idx   uint32 // slot for the bit being coded
+	st   []uint8 // bit-history state per slot
+	sm   *stateMap
+	mask uint32
+	base uint32 // hash of the byte-level context, set once per byte
+	idx  uint32 // slot for the bit being coded
 }
 
 func newBank(bits uint) *cmBank {
 	n := 1 << bits
-	// Probabilities are stored XORed with their neutral 1/2 value. An
-	// untouched slot is therefore represented by the zero value Go and the OS
-	// provide lazily, instead of faulting every page in merely to fill 0x8000.
-	return &cmBank{probs: make([]uint16, n), cnt: make([]uint8, n), mask: uint32(n - 1)}
+	return &cmBank{st: make([]uint8, n), sm: newStateMap(), mask: uint32(n - 1)}
 }
-
-func (b *cmBank) prob() uint16 { return b.probs[b.idx] ^ (1 << 15) }
 
 func (b *cmBank) selectBit(c0 uint32) {
 	h := b.base*0x9E3779B1 + c0*0x85EBCA6B
@@ -187,17 +435,24 @@ func (b *cmBank) selectBit(c0 uint32) {
 	b.idx = h & b.mask
 }
 
+// inputs writes this bank's two mixer inputs at in[at]: what the map makes of
+// the history, and how lopsided the history is -- a confidence the map, which
+// sees only the state, cannot carry.
+func (b *cmBank) inputs(in []int32, at int) {
+	s := b.st[b.idx]
+	in[at] = stretchTab[b.sm.p(s)]
+	d := (int32(hist.n1[s]) - int32(hist.n0[s])) * 64
+	if d > 2047 {
+		d = 2047
+	} else if d < -2047 {
+		d = -2047
+	}
+	in[at+1] = d
+}
+
 func (b *cmBank) update(bit int) {
-	i := b.idx
-	p := int32(b.prob())
-	target := int32(0)
-	if bit == 1 {
-		target = 65535
-	}
-	b.probs[i] = uint16(p+((target-p)*adaptRate[b.cnt[i]])>>16) ^ (1 << 15)
-	if b.cnt[i] < 63 {
-		b.cnt[i]++
-	}
+	b.sm.update(bit)
+	b.st[b.idx] = hist.next[b.st[b.idx]][bit]
 }
 
 // ---------------------------------------------------------------------------
@@ -310,20 +565,15 @@ func newMixer(n, ctxs int) *mixer {
 	return m
 }
 
-func (m *mixer) mix() uint16 {
+// mix returns a 12-bit prediction from the current input vector.
+func (m *mixer) mix() int32 {
 	w := m.w[m.ctx*m.n : m.ctx*m.n+m.n]
 	var dot int32
 	for i, x := range m.in {
 		dot += (w[i] * x) >> 8
 	}
 	m.pr = squash(dot >> 8)
-	p := m.pr << 4
-	if p < 1 {
-		p = 1
-	} else if p > 65535 {
-		p = 65535
-	}
-	return uint16(p)
+	return m.pr
 }
 
 func (m *mixer) update(bit int) {
@@ -396,10 +646,12 @@ type cmCoder struct {
 	// bankHash maps each physical bank to its logical context in hashes. The
 	// compact wire model can omit redundant history-only contexts without
 	// complicating the hot bit loop.
-	bankHash []uint8
-	npred    int // index of the first Pred-conditioned bank, or -1
-	ncls     int // index of the first Cls-conditioned bank, or -1
-	vs       varintState
+	bankHash   []uint8
+	npred      int // index of the first Pred-conditioned bank, or -1
+	ncls       int // index of the first Cls-conditioned bank, or -1
+	a1, a2, a3 *apm
+	a2mask     uint32
+	vs         varintState
 }
 
 // bankBits sizes the tables to the stream, so a 4 KiB stream does not
@@ -466,7 +718,14 @@ func newCMCoderBankShift(n int, side *CMSide, bankShift uint) *cmCoder {
 		c.banks = append(c.banks, newBank(b))
 	}
 	c.mm = newMatchModel(matchBits(n))
-	c.mx = newMixer(len(c.banks)+1, CMSelMax*8)
+	c.mx = newMixer(2*len(c.banks)+1, CMSelMax*8)
+	if cmAPM {
+		ab := apmBits(n)
+		c.a1 = newAPM(256)
+		c.a2 = newAPM(1 << ab)
+		c.a3 = newAPM(1 << 11)
+		c.a2mask = 1<<(ab-8) - 1
+	}
 	return c
 }
 
@@ -525,27 +784,60 @@ func (c *cmCoder) code(src []byte, enc *arEncoder, dec *arDecoder, dst []byte) {
 		for j, b := range c.banks {
 			b.base = c.hashes[c.bankHash[j]]
 		}
+		// Byte-level contexts for the SSE rows: the prediction's byte where
+		// there is one, the previous byte otherwise.
+		var pctx, p1 uint32
+		if i >= 1 {
+			p1 = uint32(data[i-1])
+		}
+		if c.npred >= 0 {
+			pctx = uint32(c.side.Pred[i])
+		} else {
+			pctx = p1
+		}
+		var a2base uint32
+		if cmAPM {
+			a2base = (mix32(0x1234+p1<<8+uint32(sel)) & c.a2mask) << 8
+		}
 		c0 := uint32(1)
 		for k := uint(0); k < 8; k++ {
 			for j, b := range c.banks {
 				b.selectBit(c0)
-				c.mx.in[j] = stretchTab[b.prob()>>4]
+				b.inputs(c.mx.in, 2*j)
 			}
-			c.mx.in[len(c.banks)] = c.mm.stretchIn(c0, k)
+			c.mx.in[2*len(c.banks)] = c.mm.stretchIn(c0, k)
 			c.mx.ctx = sel*8 + int(k)
-			p := c.mx.mix()
+			pr := c.mx.mix()
+			if cmAPM {
+				// Each stage is blended three-to-one with its input, so a row
+				// that has seen nothing cannot move the prediction far.
+				pr = (c.a1.p(pr, int(c0&0xFF))*3 + pr) >> 2
+				pr = (c.a2.p(pr, int(a2base|c0&0xFF))*3 + pr) >> 2
+				pr = (c.a3.p(pr, int(pctx)<<3|int(k))*3 + pr) >> 2
+			}
+			p := pr << 4
+			if p < 1 {
+				p = 1
+			} else if p > 65535 {
+				p = 65535
+			}
 			var bit int
 			if dec != nil {
-				bit = dec.decode(p)
+				bit = dec.decode(uint16(p))
 			} else {
 				bit = int(src[i]>>(7-k)) & 1
-				enc.encode(bit, p)
+				enc.encode(bit, uint16(p))
 			}
 			for _, b := range c.banks {
 				b.update(bit)
 			}
 			c.mm.update(bit)
 			c.mx.update(bit)
+			if cmAPM {
+				c.a1.update(bit)
+				c.a2.update(bit)
+				c.a3.update(bit)
+			}
 			c0 = c0<<1 | uint32(bit)
 		}
 		if dec != nil {
