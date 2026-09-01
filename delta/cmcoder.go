@@ -28,7 +28,7 @@ import "fmt"
 // other. Encode and decode run the same model loop, so a size reported by
 // CMEncode is the size CMDecode reads back.
 //
-// It is slow -- about 0.6 MB/s each way -- which is why split.go offers it
+// It is slow -- about 1.5 MB/s each way -- which is why split.go offers it
 // per stream and keeps it only where it beats the general compressor.
 
 // cmAPM enables the SSE chain. It is a build-time constant and not a wire

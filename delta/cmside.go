@@ -141,8 +141,8 @@ func cmWorthClassifying(sides []*CMSide) bool {
 }
 
 // CMMinStream is the smallest stream the CM coder is worth offering. It runs
-// at about 1 MB/s each way; below a few kilobytes its adaptive models have not
-// paid for themselves and the attempt is only encode time.
+// at about 1.5 MB/s each way; below a few kilobytes its adaptive models have
+// not paid for themselves and the attempt is only encode time.
 const CMMinStream = 4 << 10
 
 // selRamp is the head of every run's selector column: byte k of a run is
