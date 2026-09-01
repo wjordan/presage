@@ -79,8 +79,10 @@ around 40% on the smaller pairs. Earlier drafts of the README quoted
 | libxul 154.0 → 154.0.1 | 2,148,134 | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
 
 Two checks that the rows are scoped consistently: `bsdiff` on the one-line
-pair reproduces `go-module-results.md`'s 150,475 exactly, and the ordering
-bsdiff < xdelta3 < zstd `--patch-from` holds on all four rows.
+pair reproduces `go-module-results.md`'s 150,475 exactly, and presage <
+Zucchini + XZ < xdelta3 holds on every row (bsdiff beats Zucchini on the
+Go rows and loses to it on the C++ rows; zstd `--patch-from` beats xdelta3
+on the Go rows and loses on the C++ rows).
 
 The two prometheus rows are the same release pair from two toolchains. Both
 are claimed by the `go` module; the go1.26.5 pair carries a larger residual
