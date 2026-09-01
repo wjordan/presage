@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/wjordan/presage/delta"
+	"github.com/wjordan/presage/internal/cz"
 )
 
 // Options controls Encode.
@@ -86,6 +87,7 @@ func Encode(refs [][]byte, target []byte, o Options) ([]byte, error) {
 	if len(refs) == 0 {
 		return nil, fmt.Errorf("presage: at least one reference is needed")
 	}
+	cz.PreferExactUnder(int64(len(target)), 128<<20)
 	st := o.Stats
 	if st == nil {
 		st = &Stats{}

@@ -97,15 +97,33 @@ const (
 // "exact") so the proxy can be re-measured against the real compressor
 // without a rebuild. It changes encode-side choices only; no patch this
 // package produces is unreadable under another setting.
-var sizeProxyMode = func() int {
+var sizeProxyMode, proxyEnvForced = func() (int, bool) {
 	switch os.Getenv("PRESAGE_SIZE_PROXY") {
 	case "brotli5":
-		return proxyBrotli5
+		return proxyBrotli5, true
 	case "exact":
-		return proxyExact
+		return proxyExact, true
+	case "zstd":
+		return proxyZstd, true
 	}
-	return proxyZstd
+	return proxyZstd, false
 }()
+
+// PreferExactUnder switches trial pricing to the real compressor when the
+// target is small enough that the proxy's time saving is trivial (the proxy
+// exists for 100 MB+ targets; on a 94 MB pair it saved 0.5 s and cost 327
+// patch bytes). The env override wins. Advisory: any mode yields valid
+// patches, so a concurrent encode reading a stale mode is harmless.
+func PreferExactUnder(targetLen, threshold int64) {
+	if proxyEnvForced {
+		return
+	}
+	if targetLen < threshold {
+		sizeProxyMode = proxyExact
+	} else {
+		sizeProxyMode = proxyZstd
+	}
+}
 
 // counter is the sink for a compressor whose output is only ever measured.
 type counter int

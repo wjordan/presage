@@ -26,7 +26,7 @@ terms, with a byte-level residual alongside it where the plan was wrong. On a
 291 MB Chrome image the plan is 99.377% byte-correct, so nearly all the churn
 is recomputed rather than sent.
 
-## What it costs
+## Benchmarks
 
 Every row is `presage diff`, then `presage patch`, then a byte-exact compare.
 `docs/general/baselines.md` records the exact pairs and flags.
@@ -35,19 +35,21 @@ Every row is `presage diff`, then `presage patch`, then a byte-exact compare.
 |---|---:|---:|---:|---:|---:|
 | one-line change, 30 MB Go binary | **1,129** | 173,060 | 150,475 | 1,390,889 | 538,493 |
 | prometheus 3.13.1 → 3.13.2, Go, 94 MB | **69,933** | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
-| Chrome 151.0.7922.169 → .173, C++, 291 MB | **2,581,091** | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
-| Firefox libxul 154.0 → 154.0.1, C++, 186 MB | **3,010,960** | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
+| Chrome 151.0.7922.169 → .173, C++, 291 MB | **2,256,358** | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
+| Firefox libxul 154.0 → 154.0.1, C++, 186 MB | **2,665,810** | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
 
 The one-line change is the extreme case and the clearest picture of what
 prediction buys: 133× smaller than bsdiff, because almost the whole patch is
 displacement that presage recomputes rather than sends. The ratio falls as the
-pair grows further apart, to 38× on a Go patch release, 7× on the Chrome
-pair and 4× on libxul. That is expected: prediction removes displacement, and
-genuinely new code still has to be sent.
+pair grows further apart, to 38× on a Go patch release, 8× on the Chrome
+pair and 4.6× on libxul. That is expected: prediction removes displacement,
+and genuinely new code still has to be sent. Applying the Chrome patch takes
+3.6 s on a 24-core desktop — faster than Zucchini applies its own 2.3×
+larger patch on the same machine.
 
 On libxul the more honest denominator is what Mozilla actually ships, an
 mbsdiff patch of 10,779,184 whose blocks the MAR container compresses with XZ;
-presage is 3.6× smaller than that.
+presage is 4× smaller than that.
 
 ## How it works
 

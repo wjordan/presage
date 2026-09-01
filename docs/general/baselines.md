@@ -1,7 +1,10 @@
 # The README table: what each number is
 
-Provenance for the headline comparison in `README.md`. Measured 2026-08-29 on
-this machine unless a source doc is named. All sizes in bytes.
+Provenance for the headline comparison in `README.md`. presage column
+measured 2026-08-31 at container v4 (derived function map, displacement
+columns, CM coder over correction and plan streams, parallel decode);
+baseline columns measured 2026-08-29. All on this machine unless a source
+doc is named. All sizes in bytes.
 
 ## The pairs
 
@@ -30,11 +33,15 @@ presage diff -symbols ~/.cache/presage-pairs/libxul-154.0.funcs,~/.cache/presage
     libxul-154.0.so libxul-154.0.1.so -o libxul.psg
 ```
 
-Chrome encodes in 111 s at 6.0 GB RSS and applies in 4.4 s at 3.8 GB; libxul
-164 s and 2.1 s. The harness's own best on these pairs, with the same
-matcher and two `xz -9e` streams, is 2,617,700 / 3,632,264; the Zucchini-stream
-runs the earlier drafts of this table quoted were 2,634,264 / 4,063,404
-(`elf-module.md` §0, `research/matcher-chrome.md`).
+Chrome encodes in 53 s at ~5 GB RSS and applies in 3.6 s at 3.1 GB; libxul
+56 s and 3.5 s (Zucchini applies its Chrome patch in 3.84 s on the same
+machine). Encoder trial pricing uses a zstd proxy above a 128 MiB target
+and the real compressor below it (`PRESAGE_SIZE_PROXY` overrides); the
+prometheus row is exact-priced by that default. The harness's own best on
+these pairs, with the same matcher and two `xz -9e` streams, is
+2,617,700 / 3,632,264; the Zucchini-stream runs the earlier drafts of this
+table quoted were 2,634,264 / 4,063,404 (`elf-module.md` §0,
+`research/matcher-chrome.md`).
 
 **Zucchini.** Patch format 2.0, compressed `xz -9e -T0`, since Zucchini
 expects an external terminal compressor. The Chrome figure is the RELA-aware
@@ -57,8 +64,8 @@ around 40% on the smaller pairs. Earlier drafts of the README quoted
 |---|---:|---:|---:|---:|---:|
 | one-line change, 30 MB | 1,129 | 173,060 | 150,475 | 1,390,889 | 538,493 |
 | prometheus 3.13.1 → 3.13.2 | 69,933 | 3,031,380 | 2,691,644 | 11,068,506 | 8,479,550 |
-| Chrome 151.0.7922.169 → .173 | 2,581,091 | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
-| libxul 154.0 → 154.0.1 | 3,010,960 | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
+| Chrome 151.0.7922.169 → .173 | 2,256,358 | 5,263,732 | 18,599,806 | 40,102,887 | 45,538,524 |
+| libxul 154.0 → 154.0.1 | 2,665,810 | 9,544,652 | 12,348,560 | 24,510,737 | 26,326,367 |
 
 Two checks that the rows are scoped consistently: `bsdiff` on the one-line
 pair reproduces `go-module-results.md`'s 150,475 exactly, and the ordering
@@ -69,7 +76,7 @@ bsdiff < xdelta3 < zstd `--patch-from` holds on all four rows.
 For `libxul` the bsdiff column is a locally-run tool, not what Mozilla ships.
 The shipped patch is an mbsdiff at 10,779,184, whose blocks the MAR container
 compresses with XZ rather than bzip2, so it beats local bsdiff; presage is
-3.6× smaller again. See `research/firefox-partial-mar.md`.
+4× smaller again. See `research/firefox-partial-mar.md`.
 
 On the one-line row the shipped patch is 1,129 B, of which 134 B is the
 container header and 100 B is random (the two build-ID notes; a `-buildid=`
