@@ -247,7 +247,7 @@ where the version knowledge lives.
 
 *Built for go1.26 and go1.27; the resolved design and what implementing it
 changed are `go-module-design.md` §2.9 (D23). The upstream-shipped 1.26
-prometheus pair is 161,508 B in 4.8 s where §5 measured 2,137,152 B in
+prometheus pair is 80,425 B in 4.4 s where §5 measured 2,137,152 B in
 27.9 s, and the go1.27 pair is unchanged to the byte. What follows is the
 proposal as it was written; §2.9 supersedes it.*
 

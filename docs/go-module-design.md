@@ -870,9 +870,11 @@ the unknown-release probe is specified above and not built.
 *Status: built and met.* The self-prediction gate is byte-exact on both
 releases. The go1.27 prometheus pair is 74,636 B, unchanged to the byte, so
 nothing was traded for this. The pair upstream actually ships — the same two
-releases built with go1.26.5 — is 161,508 B in 4.8 s against 2,137,152 B in
-28.4 s through the generic ELF path: 13.2× the bytes and 6.0× the time, for
-a descriptor of nine numbers and a flag.
+releases built with go1.26.5 — is 80,425 B in 4.4 s against 2,137,152 B in
+28.4 s through the generic ELF path: 26.6× the bytes and 6.4× the time, for
+a descriptor of nine numbers and a flag. (An earlier 161,508 B copied the
+`.typelink`/`.itablink` tables as bytes; they are now re-targeted through the
+content maps like every other pointer table.)
 
 ## 3. Testing strategy
 

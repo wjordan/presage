@@ -189,6 +189,10 @@ func predictSections(pred []byte, old, new *gobin.Bin, l *layout, mp *mapper, st
 				if ns.Name == ".go.module" {
 					predictModuledata(old, new, dst)
 				}
+			case ns.Name == ".typelink":
+				predictTypelink(old, new, mp, os.Data, dst)
+			case ns.Name == ".itablink":
+				predictItablink(mp, os.Data, dst)
 			default:
 				copy(dst, os.Data)
 			}
@@ -436,4 +440,31 @@ func allZero(b []byte) bool {
 		}
 	}
 	return true
+}
+
+// predictTypelink re-targets the releases before 1.27's typelink table,
+// 32-bit offsets from moduledata.types to each typelink-flagged descriptor,
+// through the content maps. The linker sorts the table by type string, so
+// the old order holds wherever the descriptors do.
+func predictTypelink(old, new *gobin.Bin, mp *mapper, src, dst []byte) {
+	for i := 0; i+4 <= len(src) && i+4 <= len(dst); i += 4 {
+		off := uint64(binary.LittleEndian.Uint32(src[i:]))
+		nv, cls := mp.mapAddr(old.Mod.Types+off, nil)
+		if cls == rcOutside || cls == rcTextUnmatch {
+			nv = new.Mod.Types + off
+		}
+		binary.LittleEndian.PutUint32(dst[i:], uint32(nv-new.Mod.Types))
+	}
+}
+
+// predictItablink re-targets the itab pointer table the same way.
+func predictItablink(mp *mapper, src, dst []byte) {
+	for i := 0; i+8 <= len(src) && i+8 <= len(dst); i += 8 {
+		v := binary.LittleEndian.Uint64(src[i:])
+		nv, cls := mp.mapAddr(v, nil)
+		if cls == rcOutside || cls == rcTextUnmatch {
+			nv = v
+		}
+		binary.LittleEndian.PutUint64(dst[i:], nv)
+	}
 }
