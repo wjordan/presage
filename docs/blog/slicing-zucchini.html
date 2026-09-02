@@ -46,6 +46,7 @@ main{padding-bottom:3rem}
 .site-nav,.site-foot{font-size:.875rem}
 
 .lede{color:var(--ink2)}
+.date{color:var(--muted);font-size:.875rem;margin:-.5rem 0 1rem}
 .src{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--rule);font-size:.875rem;color:var(--muted)}
 .notes p,.rung{font-size:.875rem;color:var(--muted)}
 .rung{display:flex;align-items:flex-start;gap:.5rem;margin:0 0 1rem}
@@ -129,6 +130,7 @@ button.tog[aria-pressed="true"]{background:var(--plan);border-color:var(--plan);
 <div class="site-nav"><p><a href="https://willjordan.us/">Will Jordan</a> &middot; <a href="https://willjordan.us/writing/">Writing</a> &middot; <a href="https://willjordan.us/projects/">Projects</a></div>
 <main>
 <h1>Slicing Chrome's Zucchini patches in half</h1>
+<p class="date"><time datetime="2026-08-30">August 30, 2026</time></p>
 <p class="lede">Chrome's Linux executable is 291 MB. Between two adjacent stable releases, <a href="https://chromium.googlesource.com/chromium/src/+/main/components/zucchini/README.md">Zucchini</a>, the differ inside Chrome's own updater, produces a 5.9 MB patch. This post introduces a tool that produces a 2.3 MB one for the same pair, byte-for-byte exact: the patch is a structural plan the decoder <em>predicts</em> the new binary from, plus a correction for the bytes it got wrong.</p>
 
 <figure class="card">
