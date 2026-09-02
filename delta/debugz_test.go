@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/wjordan/presage/internal/flate126"
 )
 
 // buildELF assembles a minimal ELF64 with the given section bodies laid out
@@ -150,5 +152,60 @@ func TestUnknownHeaderFlagIsUnsupported(t *testing.T) {
 	var ut *ErrUnsupportedTransform
 	if err := Apply(old, patch, &bytes.Buffer{}); !errors.As(err, &ut) || ut.Flags != 0x80 {
 		t.Fatalf("got %v, want ErrUnsupportedTransform with flags 0x80", err)
+	}
+}
+
+// TestPackDebugChoosesTheEncoderThatWroteTheReference builds a fixture
+// whose section was compressed by Go 1.26's encoder and checks that the
+// pair still expands and packs back exactly, which needs the frozen copy.
+func TestPackDebugChoosesTheEncoderThatWroteTheReference(t *testing.T) {
+	// 200 KB with matches at varying distances, on which the two
+	// generations of encoder disagree.
+	payload := make([]byte, 200<<10)
+	x := uint32(12345)
+	for i := range payload {
+		x = x*1664525 + 1013904223
+		if i%7 < 3 {
+			payload[i] = byte(x >> 24)
+		} else {
+			payload[i] = payload[i/3] ^ byte(i)
+		}
+	}
+	var host, old bytes.Buffer
+	w, _ := zlib.NewWriterLevel(&host, zlib.BestSpeed)
+	w.Write(payload)
+	w.Close()
+	f := flate126.NewZlibWriter(&old)
+	f.Write(payload)
+	f.Close()
+	if bytes.Equal(host.Bytes(), old.Bytes()) {
+		t.Skip("host zlib matches the Go 1.26 encoder on this input; the test cannot tell them apart")
+	}
+	section := func(z []byte) []byte {
+		h := make([]byte, 24, 24+len(z))
+		binary.LittleEndian.PutUint32(h, 1)
+		binary.LittleEndian.PutUint64(h[8:], uint64(len(payload)))
+		binary.LittleEndian.PutUint64(h[16:], 8)
+		return append(h, z...)
+	}
+	mk := func(z []byte, tail string) []byte {
+		return buildELF([][]byte{[]byte("text"), section(z), []byte(tail)}, []uint64{6, shfCompressed, 0}, []uint64{16, 1, 1}, false)
+	}
+	oldFile, newFile := mk(old.Bytes(), "strtab\x00"), mk(old.Bytes(), "strtab2\x00")
+	pOld, pNew, ok := expandPair(oldFile, newFile)
+	if !ok {
+		t.Fatal("expandPair declined a pair compressed by the Go 1.26 encoder")
+	}
+	back, err := PackDebug(pNew, oldFile)
+	if err != nil || !bytes.Equal(back, newFile) {
+		t.Fatalf("PackDebug did not reproduce the new file (err %v)", err)
+	}
+	if _, err := ExpandDebug(pOld); err != nil {
+		t.Fatal(err)
+	}
+	// A reference written by the host encoder still packs with the host encoder.
+	hostFile := mk(host.Bytes(), "strtab\x00")
+	if _, _, ok := expandPair(hostFile, mk(host.Bytes(), "strtab3\x00")); !ok {
+		t.Fatal("expandPair declined a pair compressed by the host encoder")
 	}
 }

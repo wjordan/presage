@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"sort"
+
+	"github.com/wjordan/presage/internal/flate126"
 )
 
 // Transparent decompression of SHF_COMPRESSED sections (docs/general/SPEC.md
@@ -16,8 +18,10 @@ import (
 // throughout after any change, so the codec works on the plaintext: the
 // encoder expands both files, codes the plaintext pair and sets FlagDebugZ;
 // the decoder expands the old file, decodes, and recompresses the sections
-// the old file compressed. Go's zlib at BestSpeed is what the linker used,
-// so the recompression is exact and the transform ships nothing; the
+// the old file compressed. The linker used Go's zlib at BestSpeed, whose
+// output changed in Go 1.27, so both sides hold the encoders of every Go
+// release seen and pick the one that reproduces the old file's own streams;
+// the recompression is then exact and the transform ships nothing. The
 // encoder checks that on the new file before it commits to the flag.
 
 // FlagDebugZ in Header.Flags marks a patch coded on the expanded files.
@@ -160,29 +164,98 @@ func ExpandDebug(b []byte) ([]byte, error) {
 		if s.flags&shfCompressed == 0 {
 			return nil, s, nil
 		}
-		body := b[s.off : s.off+s.sz]
-		if len(body) < 24 || binary.LittleEndian.Uint32(body) != 1 {
-			return nil, s, errors.New("unsupported compression header")
-		}
-		size, align := binary.LittleEndian.Uint64(body[8:]), binary.LittleEndian.Uint64(body[16:])
-		if size > uint64(len(b))*64 {
-			return nil, s, errors.New("implausible uncompressed size")
-		}
-		r, err := zlib.NewReader(bytes.NewReader(body[24:]))
+		payload, align, err := inflateSection(b, s)
 		if err != nil {
 			return nil, s, err
-		}
-		payload, err := io.ReadAll(io.LimitReader(r, int64(size)+1))
-		if err != nil {
-			return nil, s, err
-		}
-		if uint64(len(payload)) != size {
-			return nil, s, fmt.Errorf("payload %d bytes, header says %d", len(payload), size)
 		}
 		s.flags &^= shfCompressed
 		s.align = align
 		return payload, s, nil
 	})
+}
+
+// inflateSection returns the payload and original alignment of one
+// SHF_COMPRESSED section of b.
+func inflateSection(b []byte, s elfShdr) (payload []byte, align uint64, err error) {
+	body := b[s.off : s.off+s.sz]
+	if len(body) < 24 || binary.LittleEndian.Uint32(body) != 1 {
+		return nil, 0, errors.New("unsupported compression header")
+	}
+	size := binary.LittleEndian.Uint64(body[8:])
+	align = binary.LittleEndian.Uint64(body[16:])
+	if size > uint64(len(b))*64 {
+		return nil, 0, errors.New("implausible uncompressed size")
+	}
+	r, err := zlib.NewReader(bytes.NewReader(body[24:]))
+	if err != nil {
+		return nil, 0, err
+	}
+	if payload, err = io.ReadAll(io.LimitReader(r, int64(size)+1)); err != nil {
+		return nil, 0, err
+	}
+	if uint64(len(payload)) != size {
+		return nil, 0, fmt.Errorf("payload %d bytes, header says %d", len(payload), size)
+	}
+	return payload, align, nil
+}
+
+// A packer is a zlib encoder at the settings a Go linker used.
+type packer func(w io.Writer) io.WriteCloser
+
+// packers holds one encoder per generation of Go's compress/flate output,
+// in the order they are tried. The host toolchain's comes first; the
+// frozen copies follow, oldest last.
+var packers = []packer{
+	func(w io.Writer) io.WriteCloser { z, _ := zlib.NewWriterLevel(w, zlib.BestSpeed); return z },
+	flate126.NewZlibWriter,
+}
+
+// choosePacker picks the packer that reproduces the reference's own
+// compressed sections, which both sides can do from the old file alone.
+// Sections are tried smallest first and a packer drops out at its first
+// mismatch, so the choice usually costs one small section. It falls back
+// to the first packer when no section decides.
+func choosePacker(rf *elfSections) packer {
+	var secs []elfShdr
+	for _, s := range rf.sh {
+		if s.flags&shfCompressed != 0 && s.sz > 24 {
+			secs = append(secs, s)
+		}
+	}
+	sort.Slice(secs, func(i, j int) bool { return secs[i].sz < secs[j].sz })
+	live := make([]int, len(packers))
+	for i := range live {
+		live[i] = i
+	}
+	for _, s := range secs {
+		if len(live) <= 1 {
+			break
+		}
+		payload, _, err := inflateSection(rf.b, s)
+		if err != nil {
+			break
+		}
+		want := rf.b[s.off+24 : s.off+s.sz]
+		var next []int
+		for _, i := range live {
+			if bytes.Equal(deflate(packers[i], payload), want) {
+				next = append(next, i)
+			}
+		}
+		if len(next) == 0 {
+			break
+		}
+		live = next
+	}
+	return packers[live[0]]
+}
+
+func deflate(p packer, payload []byte) []byte {
+	var out bytes.Buffer
+	w := p(&out)
+	w.Write(payload)
+	w.Close()
+	return out.Bytes()
 }
 
 // PackDebug is the inverse of ExpandDebug: it compresses, in the expanded
@@ -203,25 +276,14 @@ func PackDebug(plain, ref []byte) ([]byte, error) {
 	if !rf.hasCompressed() {
 		return plain, nil
 	}
+	pack := choosePacker(rf)
 	return f.relayout(func(i int) ([]byte, elfShdr, error) {
 		s := f.sh[i]
 		if rf.sh[i].flags&shfCompressed == 0 {
 			return nil, s, nil
 		}
 		payload := plain[s.off : s.off+s.sz]
-		var body bytes.Buffer
-		body.Write(make([]byte, 24))
-		w, err := zlib.NewWriterLevel(&body, zlib.BestSpeed)
-		if err == nil {
-			_, err = w.Write(payload)
-		}
-		if err == nil {
-			err = w.Close()
-		}
-		if err != nil {
-			return nil, s, err
-		}
-		h := body.Bytes()
+		h := append(make([]byte, 24), deflate(pack, payload)...)
 		binary.LittleEndian.PutUint32(h, 1)
 		binary.LittleEndian.PutUint64(h[8:], uint64(len(payload)))
 		binary.LittleEndian.PutUint64(h[16:], s.align)

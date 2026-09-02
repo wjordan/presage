@@ -246,7 +246,8 @@ Status: (a) built in the codec (`delta/debugz.go`, container flag
 `debugz`; `bench/dwarfz` is its CLI) and measured end to end on shipped
 files; (b) built in the codec too (`presage/dwarf`, composed into both the
 Go and ELF linker modules; the harness is also an adapter over it):
-prometheus 3.13.1 → 3.13.2 with DWARF 332,414 on the shipped files.
+prometheus 3.13.1 → 3.13.2 with DWARF, the release binaries as upstream
+ships them (go1.26.5-linked), 468,032.
 Research: `dwarf-research.md`; measurements: `go-module-results.md` "DWARF
 builds". The problem it answers: a default `go build` keeps DWARF — 13 MB
 of zlib-compressed sections on the 43 MB synthetic, 75 MB plaintext in
@@ -260,11 +261,14 @@ changed anywhere is a different stream throughout.
 concern: any `SHF_COMPRESSED` section (and `.zdebug_*`) becomes a child
 region holding the decompressed bytes, whose parent plan is
 `recompress(codec, child)` (§5.3). Every existing layer then works on the
-plaintext. `codec` names a pinned, versioned encoder from a registry —
-`go-flate-1@go1.27` today; Go 1.27 replaced flate's fast encoders and a
-1.25-linked binary recompresses under no 1.27 level, so the id carries the
-toolchain version read from the binary's build info, and the encoder stores
-the id that round-tripped, never an assumption. cgo builds are compressed by
+plaintext. `codec` names a pinned, versioned encoder from a registry:
+`go-flate-1@go1.27`, the host toolchain's, and `go-flate-1@go1.26`, a
+frozen copy of Go 1.26's BestSpeed writer (`internal/flate126`), because
+Go 1.27 replaced flate's fast encoders and a 1.26-linked binary
+recompresses under no 1.27 level. The container carries no id: both sides
+pick the encoder that reproduces the old file's own streams, smallest
+section first (`choosePacker`), and the encoder confirms the pick
+round-trips the new file before it commits to the flag. cgo builds are compressed by
 GNU ld (`zlib-6`), which Go's flate matches at no level; those take the
 fallback ladder — preflate-style reconstruction, then a Puffin-style
 Huffman-only re-encode (deterministic, pure Go, ~320 B per 32 KB block),
