@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Patching Go Binaries with Presage</title>
-<meta name="description" content="Adjacent Prometheus releases differ by 2.2-2.7 MB under the best general-purpose differs. A Go-aware codec gets it to 70 KB, byte-for-byte exact.">
+<title>Predicting the Go linker</title>
+<meta name="description" content="The Go linker amplifies a one-line edit into megabytes of changed bytes. Nearly all of them are predictable from the old binary, so a patch carries only what the prediction misses: 1.1 KB for a one-line change, 80 KB for a Prometheus release.">
 <link rel="canonical" href="https://willjordan.us/writing/patching-go-binaries/">
 <link rel="alternate" type="application/atom+xml" href="https://willjordan.us/feed.xml" title="Will Jordan">
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="Will Jordan">
-<meta property="og:title" content="Patching Go Binaries with Presage">
-<meta property="og:description" content="Adjacent Prometheus releases differ by 2.2-2.7 MB under the best general-purpose differs. A Go-aware codec gets it to 70 KB, byte-for-byte exact.">
+<meta property="og:title" content="Predicting the Go linker">
+<meta property="og:description" content="The Go linker amplifies a one-line edit into megabytes of changed bytes. Nearly all of them are predictable from the old binary, so a patch carries only what the prediction misses: 1.1 KB for a one-line change, 80 KB for a Prometheus release.">
 <meta property="og:url" content="https://willjordan.us/writing/patching-go-binaries/">
-<meta property="article:published_time" content="2026-08-30">
+<meta property="article:published_time" content="2026-09-02">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Patching Go Binaries with Presage">
-<meta name="twitter:description" content="Adjacent Prometheus releases differ by 2.2-2.7 MB under the best general-purpose differs. A Go-aware codec gets it to 70 KB, byte-for-byte exact.">
+<meta name="twitter:title" content="Predicting the Go linker">
+<meta name="twitter:description" content="The Go linker amplifies a one-line edit into megabytes of changed bytes. Nearly all of them are predictable from the old binary, so a patch carries only what the prediction misses: 1.1 KB for a one-line change, 80 KB for a Prometheus release.">
 <style>
 :root { color-scheme: light dark; }
 body { font: 1rem/1.5 sans-serif; max-width: 70ch; margin: 0 auto; padding: 0 1rem 3rem; }
@@ -59,24 +59,19 @@ main{padding-bottom:3rem}
 
 .lede{color:var(--ink2)}
 .src{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--rule);font-size:.875rem;color:var(--muted)}
-.notes p,.rung{font-size:.875rem;color:var(--muted)}
-.rung{display:flex;align-items:flex-start;gap:.5rem;margin:0 0 1rem}
-.rung svg{width:72px;height:16px;flex:none;margin-top:2px}
-.rung b{color:var(--ink);font-weight:600}
-.rung b.neg{color:var(--bad)}
 p .plan,figcaption .plan{color:var(--plan);font-weight:600}
 p .fix,figcaption .fix{color:var(--fix);font-weight:600}
-code{background:var(--code-bg);padding:1px 4px}
+code{background:var(--code-bg);padding:1px 4px;white-space:nowrap}
+pre{background:var(--code-bg);padding:.75rem 1rem;overflow-x:auto;font-size:.8125rem;line-height:1.45}
+pre code{background:none;padding:0}
 
 /* figures */
 figure{margin:1.5rem 0}
 .card{border:1px solid var(--rule);padding:1rem}
-.wide{width:min(880px,calc(100vw - 2rem));margin-left:50%;transform:translateX(-50%)}
 figcaption.head{margin:0 0 .75rem}
 svg{display:block;width:100%;height:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .strip{display:block;width:100%;height:auto}
-.scroll,.tbl{overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain}
-.scroll>svg{min-width:var(--mw,700px)}
+.tbl{overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain}
 
 /* tables */
 table{border-collapse:collapse;width:100%;font-size:.875rem;font-variant-numeric:tabular-nums}
@@ -84,140 +79,202 @@ th,td{padding:.35rem .5rem;border-bottom:1px solid var(--rule);text-align:left;v
 th{font-weight:600;color:var(--muted);font-size:.8125rem}
 td.n,th.n{text-align:right;white-space:nowrap}
 tr.total td{border-top:1px solid var(--rule);font-weight:700}
-td:last-child{width:45%}
+.hero-table td:last-child{width:45%}
 .hero-table td:first-child{width:40%}
 .bar{height:10px;background:var(--plan);display:inline-block;vertical-align:middle;min-width:2px}
 .bar.fix{background:var(--fix)}
+.bar.go{background:var(--go)}
+.bars td:last-child{width:30%;white-space:nowrap}
+.bars .bar{margin-right:2px}
+.rec td,.rec th{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.8125rem}
+.rec td.chg{color:var(--fix);font-weight:600}
+.rec td.same{color:var(--muted)}
+.rec th.grp{text-align:center;border-bottom:0;padding-bottom:0}
+.ledger td:first-child{white-space:nowrap}
 
-/* comparison figure */
-.join{font-size:.8125rem;display:grid;grid-template-columns:1fr 1fr;gap:1rem;align-items:start;overflow-x:auto}
-.join table td,.join table th{padding:.25rem .5rem}
-.join thead th{white-space:nowrap;vertical-align:bottom}
-.join td.ok{background:var(--ok-soft);color:var(--ok)}
-.join td.bad{background:var(--bad-soft);color:var(--bad)}
-.join td.new{color:var(--muted);font-style:italic}
-.join .sum{grid-column:1/-1;color:var(--ink2);margin-top:.4rem}
-.togs{display:flex;gap:.5rem;margin-bottom:.75rem}
-button.tog{font:inherit;font-size:.8125rem;padding:.25rem .625rem;border:1px solid var(--rule);background:var(--paper);color:var(--ink2);cursor:pointer}
-button.tog[aria-pressed="true"]{background:var(--plan);border-color:var(--plan);color:var(--paper)}
-.ctl{display:grid;grid-template-columns:150px 1fr 130px;gap:.75rem;align-items:center;font-size:.8125rem;color:var(--muted);margin-top:.75rem;padding-top:.75rem;border-top:1px solid var(--rule)}
-.ctl input[type=range]{width:100%;accent-color:var(--plan)}
-.ctl .v{color:var(--ink);text-align:right}
-
+.wide{width:min(880px,calc(100vw - 2rem));margin-left:50%;transform:translateX(-50%)}
+.scroll{overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain}
+.scroll>svg{min-width:var(--mw,700px)}
 .tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--paper);font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;padding:.4rem .6rem;opacity:0;transition:opacity .08s;z-index:9;max-width:min(340px,calc(100vw - 24px));white-space:normal;overflow-wrap:break-word}
 .tip.pin{left:50%;top:auto;bottom:14px;transform:translateX(-50%);max-width:calc(100vw - 24px);width:max-content}
 @media (prefers-reduced-motion:reduce){.tip{transition:none}}
-
 @media (max-width:640px){
-  .ctl{grid-template-columns:1fr}
-  /* the two tables must stay side by side; reading one against the other is the figure */
-  .join{grid-template-columns:2fr 3fr;gap:.5rem}
-  .join table{font-size:.6875rem}
-  .join table td,.join table th{padding:.2rem .25rem}
-  .join thead th{white-space:normal;font-size:.625rem;line-height:1.25}
   .wide{width:calc(100vw - 1.25rem)}
   .card{padding:.625rem}
-  .hero-table td:first-child,td:last-child{width:auto}
+  .hero-table td:first-child,.hero-table td:last-child,.bars td:last-child{width:auto}
+  .rec td,.rec th{font-size:.6875rem;padding:.2rem .3rem}
 }
 </style>
 </head>
 <body>
 <div class="site-nav"><p><a href="https://willjordan.us/">Will Jordan</a> &middot; <a href="https://willjordan.us/writing/">Writing</a> &middot; <a href="https://willjordan.us/projects/">Projects</a></div>
 <main>
-<h1>Patching Go binaries with presage</h1>
-<p class="lede">Prometheus is a 94 MB Go executable. Between two adjacent patch releases, the best general-purpose differs produce patches of 2.2–2.7 MB. Presage's Go codec produces one of 70 KB — byte-for-byte exact — by having the decoder regenerate the tables the Go linker regenerated.</p>
+<h1>Predicting the Go linker</h1>
+<p class="lede">The Go linker amplifies a change. Edit one line and it regenerates half the binary, because most of a Go executable is tables derived from the function list, and the binary keeps that list because the runtime needs it. So nearly all of what changes is predictable from the old binary and a description of the edit, and a patch only has to carry what the prediction misses. A one-line change in a 30 MB program patches in 1.1 KB, against 150 KB for bsdiff. A Prometheus patch release patches in 80 KB, against 2.7 MB.</p>
 
-<figure class="card"><div class="tbl"><table>
+<figure class="card"><div class="tbl"><table class="hero-table">
 <thead><tr><th>Method</th><th class="n">Bytes</th><th></th></tr></thead>
 <tbody>
-<tr><td>Full download</td><td class="n">18,441,744</td><td><span class="bar" style="width:100%"></span></td></tr>
-<tr><td><a href="https://github.com/jmacd/xdelta">xdelta3</a></td><td class="n">12,514,559</td><td><span class="bar" style="width:67.9%"></span></td></tr>
-<tr><td><a href="https://www.daemonology.net/bsdiff/">bsdiff</a></td><td class="n">2,691,644</td><td><span class="bar" style="width:14.6%"></span></td></tr>
-<tr><td>Zucchini</td><td class="n">2,183,184</td><td><span class="bar" style="width:11.8%"></span></td></tr>
-<tr class="total"><td>presage</td><td class="n">70,195</td><td><span class="bar" style="width:0.38%"></span></td></tr>
+<tr><td>Full download (xz -9)</td><td class="n">7,917,688</td><td><span class="bar" style="width:100%"></span></td></tr>
+<tr><td><a href="https://github.com/jmacd/xdelta">xdelta3</a></td><td class="n">1,390,889</td><td><span class="bar" style="width:17.6%"></span></td></tr>
+<tr><td>Zucchini</td><td class="n">173,060</td><td><span class="bar" style="width:2.2%"></span></td></tr>
+<tr><td><a href="https://www.daemonology.net/bsdiff/">bsdiff</a></td><td class="n">150,475</td><td><span class="bar" style="width:1.9%"></span></td></tr>
+<tr class="total"><td>presage</td><td class="n">1,100</td><td><span class="bar" style="width:0.3%"></span></td></tr>
 </tbody></table></div>
-<figcaption>Prometheus <a href="https://github.com/prometheus/prometheus/releases/tag/v3.13.1">3.13.1</a> → <a href="https://github.com/prometheus/prometheus/releases/tag/v3.13.2">3.13.2</a>, Linux x86-64, stripped, after compression.</figcaption></figure>
+<figcaption>One line added to a handler in a 30 MB Go HTTP service, Linux x86-64, stripped, after compression.</figcaption></figure>
 
-<h2>Presage</h2>
-<p>Presage is a binary patcher built on one idea: most of the bytes that change between two builds of a program change <em>because something else moved</em>, and a decoder that knows the file format can work those bytes out for itself. A presage patch is a small <strong>plan</strong> — what moved where — from which the decoder builds a complete prediction of the new file out of the old one, plus a <strong>correction</strong> listing every byte the prediction got wrong. The prediction is deterministic, so the encoder runs the decoder's code, sees exactly what it will produce, and ships only the difference. Format knowledge lives in codecs: each one claims the files it understands and predicts them, and a file no codec claims falls back to an ordinary delta. <a href="https://willjordan.us/writing/slicing-zucchini-patches/">Slicing Chrome's Zucchini patches in half</a> shows the approach on a 291 MB C++ binary, where a codec for x86-64 code and ELF tables halves the patch Chrome's own updater ships. This note is about the codec for Go.</p>
+<p><a href="https://github.com/wjordan/presage">Presage</a> is a patcher built on that idea: the patch is a plan the decoder predicts the new binary from, plus a correction for the bytes it got wrong. Applied to Chrome, it <a href="https://willjordan.us/writing/slicing-zucchini-patches/">halved the patch</a> Chrome's own updater ships for a 291 MB C++ binary. Go suits the idea better than C++, because the linker derives so much more of the file, and derives it by rules simple enough to follow exactly.</p>
 
-<h2>What is in a Go binary</h2>
-<p>A Go program is a statically linked executable with everything it needs inside it: the code, the runtime, and the metadata the runtime uses to run it. That metadata is large. Prometheus 3.13.2 is 94 MB, and less than half of it is machine code.</p>
+<h2>What the linker derives</h2>
+<p>A Go program is <a href="https://pkg.go.dev/cmd/link">statically linked</a> and carries the runtime and everything the runtime needs. Less than half of it is code:</p>
 
-<figure><div id="sections"></div>
+<figure class="wide card"><div id="sections" class="scroll" style="--mw:700px"></div>
 </figure>
 
-<p><code>.gopclntab</code> alone is 35 MB: for every function, a record saying where it starts, which file and line each instruction came from, how deep its stack frame is at each point, and which words on the stack are pointers. <code>.go.type</code> is 12 MB of descriptors the runtime consults for reflection, interfaces and garbage collection. These tables are what make a Go binary hard to patch. They are not written by hand and not preserved between builds: the linker regenerates them from scratch, sorted by address, packed tightly, with offsets pointing at one another. Add one line to one function and that function grows by a few dozen bytes, every function after it moves, and every table entry that names an address moves with it. Every branch that crosses the edit gets a new displacement, and the tables change everywhere. A byte-level differ finds the moved code well enough; it has no way to know that a 35 MB table is a deterministic function of the function list, so it ships the differences.</p>
+<p><code>.gopclntab</code> is the <a href="https://docs.google.com/document/d/1lyPIbmsYbXnpNj57a261hgOYVpNRcgydurVQIyZOz_o/pub">runtime's symbol table</a>. It holds every function's name and address, and for every instruction the file and line it came from, how deep the stack is, and which words of the stack hold pointers, packed into tables that functions with identical entries share. Stack traces, panics and the garbage collector all read it, which is why stripping a Go binary leaves it alone: <a href="https://pkg.go.dev/debug/gosym"><code>debug/gosym</code></a> can list every function in a stripped binary. <code>.rodata</code> holds the type descriptors behind reflection, interfaces and the collector's bitmaps, and each descriptor names its element types, methods and name string by offsets from a base address.</p>
 
-<figure class="card"><div id="posstrip"></div>
-</figure>
+<p>None of it survives a build. The linker lays out the code package by package, with <code>main</code> last, then regenerates every table from the result: sorted by address, packed, and cross-referenced by offset. Grow one function and every function after it moves, every table entry naming an address moves with it, and every offset into a table that grew shifts. A byte-level differ finds the moved code, since finding moved regions is what it does. It cannot know that a 35 MB table is a function of the function list, so it ships the differences.</p>
 
-<h2>The Go codec</h2>
-<p>The Go codec reads the old binary's function table, matches functions between the two builds by name, and works out where everything now lives from a short description of the new function list: which functions were added, removed or resized, and how the data sections shifted. From that and the old binary the decoder regenerates <code>.gopclntab</code>, the type descriptors and the other Go data sections in full; copies each function to its new address with its PC-relative operands re-targeted; and recomputes the ELF headers from the section table it now knows. A function that was edited is laid down in pieces: the parts that survived the edit at their new offsets, relocated at their true positions, and the pieces may come from anywhere in the old binary; the code a small change adds is rarely new to the file, because the compiler emits the same sequences for the same constructs. The encoder tries each candidate piece by relocating it and keeps it only when the result beats the plain copy.</p>
+<h2>What one line does</h2>
+<p>Add <code>w.Header().Set("X-Foo", "bar")</code> to one HTTP handler of a 30 MB program. The handler grows by 192 bytes, since functions are aligned to 32. It lives in <code>main</code>, the last package in the layout, so only the functions after it move; an edit in a low-level library would move nearly everything. Even so, 14% of the file's bytes change. The compiled edit is under 200 of them.</p>
 
-<figure class="card"><div class="tbl"><table>
-<thead><tr><th>Prediction</th><th class="n">Patch bytes</th><th></th></tr></thead>
-<tbody>
-<tr><td>generic delta, no codec</td><td class="n">2,469,845</td><td><span class="bar" style="width:100%"></span></td></tr>
-<tr class="total"><td>Go codec</td><td class="n">70,195</td><td><span class="bar" style="width:2.8%"></span></td></tr>
-</tbody></table></div>
-</figure>
+<p>Nearly all of the rest is offsets moved by constants. Each function's tables sit together in one shared blob, and a function's record holds the offset where each of its tables starts. The edited function's tables grew by 34 bytes in total:</p>
 
-<p>On this pair the codec's prediction is wrong in 54,520 of 93.8 million bytes. The rest of the patch is the plan and the container. Encoding takes 5 s and applying 1 s; both sides verify the result against the release hash before it is used, so a wrong prediction costs bytes, never correctness. On a 30 MB program rebuilt after adding one <code>if</code> statement — the change that moves 13 % of the file's bytes and nothing else — the patch is 1,202 bytes; bsdiff's is 150,475.</p>
+<figure class="wide card"><div id="pcblob" class="scroll" style="--mw:700px"></div>
+<figcaption>The edited function's tables in the shared blob, old above and new below, to scale in bytes. Three of them, <code>pcsp</code>, <code>pcfile</code> and <code>pcln</code>, are the ones the function record points at by offset.</figcaption></figure>
 
-<h2>What a default build changes</h2>
-<p>Everything above is for stripped binaries, which is how Go programs are usually shipped. A plain <code>go build</code> also keeps DWARF debug information. For Prometheus that is another 38 MB on disk, or 87 MB once decompressed, compressed section by section with zlib by the linker. That is a problem for every byte-oriented patcher: a compressed stream whose input changed anywhere is a different stream from beginning to end, so on the default build the same patch release costs 28–29 MB whichever tool ships it.</p>
+<p>Its own record changes in one field, the line table's offset, by the 7 bytes the file table in front of it grew. The record of every function after it changes in four fields: the entry offset by 192, and the three table offsets by 34. Records before the edit are byte-identical.</p>
 
-<figure class="card"><div class="tbl"><table>
+<p>Two numbers, the 192 and the 34, determine every changed field in every record after the edit, and the same holds for the function index, the stack maps and the type descriptors that name moved code. The linker computed all of it from the new function list. A decoder holding the old binary and the two numbers can predict all of it.</p>
+
+<h2>Predicting it</h2>
+<p>That is what the Go module does. Its plan is the new function list as a diff against the old one, which functions were added, removed or resized, plus how the data sections shifted. For this pair that is one resized function, and the plan compresses to almost nothing. For Chrome, the equivalent function map had to be built from unstripped binaries on the encoder side and took up a tenth of the patch. A Go binary carries its own.</p>
+
+<p>From the plan and the old binary, the decoder predicts the new file in full. It copies each function to its new address, decodes it as x86-64, and re-targets every PC-relative operand through the function map, so calls, jumps and loads point where they should. It regenerates <code>.gopclntab</code>: the function index, every entry offset, and every offset into the shared tables. It walks the type descriptors from the runtime's module data and rewrites every offset in them. It recomputes the ELF headers from the section table it now knows, and the FIPS integrity sum, an HMAC over the crypto module that the runtime checks at startup, from the finished image. An edited function is predicted in pieces that may come from anywhere in the old code, since the compiler emits the same sequences for the same constructs; the encoder tries each candidate and keeps the ones that beat a plain copy.</p>
+
+<p>The encoder runs the same prediction, compares it with the real new binary, and ships the difference as a correction. Here that is 330 bytes, nearly all of them the compiled edit and the two build-ID notes, which hash the build's inputs and cannot be derived from its output. With the plan and the container's <a href="https://github.com/BLAKE3-team/BLAKE3">BLAKE3</a> hashes, the patch is 1,100 bytes. A wrong prediction costs bytes, never correctness: the decoder checks the result against the release hash before anything uses it.</p>
+
+<h2>A release</h2>
+<p>Prometheus 3.13.1 to 3.13.2 edits two source files and bumps a few dependencies. Fewer than a hundred of the binary's 114 thousand functions are added or resized. The linker amplifies that into a file that differs from its predecessor in 84% of its bytes.</p>
+
+<figure class="card"><div class="tbl"><table class="hero-table">
 <thead><tr><th>Method</th><th class="n">Bytes</th><th></th></tr></thead>
 <tbody>
-<tr><td>Full download</td><td class="n">45,022,300</td><td><span class="bar" style="width:100%"></span></td></tr>
-<tr><td>xdelta3</td><td class="n">39,228,609</td><td><span class="bar" style="width:87.1%"></span></td></tr>
-<tr><td>bsdiff</td><td class="n">29,004,245</td><td><span class="bar" style="width:64.4%"></span></td></tr>
-<tr><td>Zucchini</td><td class="n">28,117,620</td><td><span class="bar" style="width:62.5%"></span></td></tr>
-<tr class="total"><td>presage</td><td class="n">332,414</td><td><span class="bar" style="width:0.7%"></span></td></tr>
+<tr><td>Full download (xz -9)</td><td class="n">21,671,396</td><td><span class="bar" style="width:100%"></span></td></tr>
+<tr><td>xdelta3</td><td class="n">11,238,692</td><td><span class="bar" style="width:51.9%"></span></td></tr>
+<tr><td>Zucchini</td><td class="n">3,012,208</td><td><span class="bar" style="width:13.9%"></span></td></tr>
+<tr><td>bsdiff</td><td class="n">2,714,204</td><td><span class="bar" style="width:12.5%"></span></td></tr>
+<tr class="total"><td>presage</td><td class="n">80,425</td><td><span class="bar" style="width:0.4%"></span></td></tr>
 </tbody></table></div>
-<figcaption>Prometheus 3.13.1 → 3.13.2, Linux x86-64, debug build, after compression.</figcaption></figure>
+<figcaption>Prometheus <a href="https://github.com/prometheus/prometheus/releases/tag/v3.13.1">3.13.1</a> → <a href="https://github.com/prometheus/prometheus/releases/tag/v3.13.2">3.13.2</a>, the Linux x86-64 release binaries, stripped, after compression.</figcaption></figure>
 
-<p>Presage handles it in two layers. Decompression is exact: Go's own <code>compress/zlib</code> reproduces the linker's output byte for byte at the level the linker uses. So the decoder works on the decompressed bytes and recompresses at the end, and the transform itself ships nothing. That alone brings the patch to 8.5 MB, which is what the decompressed debug sections cost as a byte-level delta. The section that resists a byte-level delta, <code>.debug_info</code>, resists it for the same structural reason code and tables do: it holds hundreds of thousands of four-byte references between its own entries, and every one that points past an edited compilation unit shifted by the amount that unit grew. The DWARF layer handles that the same way: the decoder walks the <em>old</em> <code>.debug_info</code> with the old abbreviation table, finds every reference field, projects its position and its value into the new image, and writes the projected value. Positions project through the runs of unchanged bytes around them, or through a table of paired records where a section is fixed-size rows that byte matching aligns by chance; addresses project through the function map the Go codec already has. The same walk covers the address, frame and line tables and the symbol table.</p>
+<p>Region by region across the new file, this is how much each differ sends:</p>
 
-<figure class="card"><div class="tbl"><table>
-<thead><tr><th>Prediction</th><th class="n">Patch bytes</th><th></th></tr></thead>
+<figure class="wide card"><div id="posstrip" class="scroll" style="--mw:760px"></div>
+<figcaption>Shade is the share of each megabyte sent as literal bytes or corrections, on a log scale. The right-hand columns are the raw stream sizes and the compressed patch.</figcaption></figure>
+
+<p>Chunk dedup, the <a href="https://rsync.samba.org/tech_report/">rsync</a> family, sends most of the file, because a block survives only if it is byte-identical, and slid code has a changed displacement every few dozen bytes. xdelta3 and bsdiff find the slide and then pay for the displacements, one with copy instructions and the other with a <a href="https://www.daemonology.net/papers/thesis.pdf">difference stream</a>. <a href="https://chromium.googlesource.com/chromium/src/+/main/components/zucchini/README.md">Zucchini</a> would translate the references it recognises inside its copies, but it does not recognise a Go binary as something it can disassemble, and patches it raw. The prediction is wrong about a sixth of a percent of the file, and what it misses is the change itself: the new functions, the descriptors and index entries that came with them, and the bodies the compiler resized. Encoding takes four seconds and applying one.</p>
+
+<p>The further apart two builds are, the more of the new file is new rather than derived, and the less of it the prediction covers. The next minor release, 3.13.2 to 3.14.0, adds six thousand functions and resizes hundreds more; its patch is 4.8 MB against bsdiff's 9.8 MB, half rather than a thirtieth.</p>
+
+<h2>Debug information</h2>
+<p>Upstream ships Prometheus unstripped: 38 MB of symbol tables and DWARF on top of the stripped binary, the DWARF compressed section by section. On that file the same patch release costs bsdiff 28 MB. Compression is a second amplifier. Debug information is full of code addresses, so moving the functions changes it throughout, and a compressed stream whose input changed near its start differs from there to its end.</p>
+
+<figure class="card"><div class="tbl"><table class="hero-table">
+<thead><tr><th>Method</th><th class="n">Bytes</th><th></th></tr></thead>
 <tbody>
-<tr><td>Go codec + exact decompression</td><td class="n">8,480,958</td><td><span class="bar" style="width:100%"></span></td></tr>
-<tr class="total"><td>+ DWARF reference fields</td><td class="n">332,414</td><td><span class="bar" style="width:3.9%"></span></td></tr>
+<tr><td>Full download (xz -9)</td><td class="n">46,947,524</td><td><span class="bar" style="width:100%"></span></td></tr>
+<tr><td>xdelta3</td><td class="n">36,570,577</td><td><span class="bar" style="width:77.9%"></span></td></tr>
+<tr><td>Zucchini</td><td class="n">28,115,036</td><td><span class="bar" style="width:59.9%"></span></td></tr>
+<tr><td>bsdiff</td><td class="n">28,108,743</td><td><span class="bar" style="width:59.9%"></span></td></tr>
+<tr class="total"><td>presage</td><td class="n">468,032</td><td><span class="bar" style="width:1%"></span></td></tr>
 </tbody></table></div>
-</figure>
+<figcaption>Prometheus 3.13.1 → 3.13.2, the release binaries as shipped, with debug information: 136 MB, after compression.</figcaption></figure>
 
-<p>Two things the measurement taught. The matcher that finds the runs of unchanged bytes is worthless on its own: as a whole-file predictor it produces patches 2.5× larger than a plain delta, because a plain delta is the same fuzzy matching with a literal stream, and it earns its place only under a layer that fixes what the runs stop at. And the layer has to be priced: on builds whose debug sections barely changed, the record tables cost more than the correction of a positional copy, so the encoder predicts both ways and ships the smaller. On the 30 MB program with debug information, the one-line change costs 2,065 bytes against 1,202 stripped.</p>
+<p><a href="https://dwarfstd.org/dwarf5std.html">DWARF</a> is derived the same way the tables are. Its addresses are the function list's addresses, and its cross-references are offsets that move by the size of whatever grew in front of them. So the same prediction applies, one layer up. Presage unwraps the compression, predicts the DWARF from the function map the code layer already built, and compresses the result again with the compressor the linker used. Each layer predicts the structure it understands and hands the rest down, and what reaches the patch is the edit. The patch is 468 KB, against 28 MB for bsdiff. The one-line change with debug information patches in 1.9 KB.</p>
 
-<hr>
-<div class="notes">
-<p>Sizes are after compression: the full download, the rsync delta (<code>rdiff -b 4096</code>) and Zucchini with <code>xz -9</code>, xdelta3 3.2.0 with its built-in lzma at default settings, bsdiff with bzip2, presage in its own container (brotli-11 per frame). Zucchini's element detection fails on these binaries and it falls back to raw patching (3,044,776 on the stripped pair); the numbers shown force its x86-64 ELF disassembler over the whole file with <code>-impose</code>. The Prometheus binaries are the official release downloads; the default-build pair is the same two releases rebuilt without <code>-s -w</code>. Every presage patch was applied and compared to the release byte for byte.</p>
-</div>
+<h2>Which linker</h2>
+<p>The patches are small because the prediction is exact, and it is exact because it models one linker: where this release of Go puts each table, how it aligns functions, which compressor it runs over the debug sections. The price is that the model has to follow the linker. Go 1.27 moved the type descriptors into a section of their own and replaced the debug compressor, and a model of 1.26 lays a 1.27 binary down wrong from the first descriptor. Presage was designed as modules for this reason. The Go module reads the <a href="https://pkg.go.dev/debug/buildinfo">Go version the binary carries</a>, models that release, and checks that the file looks the way that linker wrote it; when it cannot, it declines and the generic ELF module that patched Chrome takes over. A release is supported once presage predicts a corpus of its binaries from themselves byte for byte. Today that is Go 1.26 and 1.27.</p>
+
+<p>Every patch above was applied and compared with the target byte for byte. In each case what the patch carries is the edit and the code the compiler made from it. The linker's share, the larger half of the file, is predicted rather than sent.</p>
+
+<p class="src">presage is on GitHub at <a href="https://github.com/wjordan/presage">wjordan/presage</a>.</p>
 </main>
+<div class="tip" id="tip"></div>
 <script>
 (function(){
-const STRIP={"total":93769955,"slice":1048576,"secs":[[".text",4096,42116561],[".rodata",42123264,3678233],[".gopclntab",45801504,35205370],[".go.type",81010368,11770480]],"rows":[["rsync (4 KB)","bytes in blocks with no identical block in the old file",[0.99609,0.99609,0.98438,0.97656,1,0.99219,1,1,1,1,1,1,1,1,1,0.98828,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0.99219,1,0.99609,1,1,1,1,0.97266,0.22683,0.03878,0.78518,0.56238,0.01177,0.05618,0,0,0,0.00396,0.00851,0,0.37138,0.03498,0.02622,0.17223,0.05852,0.01171,0.078,0.14622,0.49309,1,1,1,1,1,1,1,1,1,0.92451,0.9583,0.97656,0.54479,0,0,0.9665,0.96136,1,1,1,0.5982,0.05079,0.45648,0.85938,0.92969,0.87682,0.89272,0.56644,0.76101],69066752,13718848,"librsync delta, xz",2096,"copy commands",0,""],["xdelta3","bytes it sends literally; everything else is copy instructions",[0.05466,0.04295,0.04212,0.04816,0.04498,0.04939,0.06931,0.07411,0.07374,0.0621,0.07793,0.07727,0.07233,0.07889,0.08263,0.07296,0.06499,0.08263,0.07096,0.08247,0.07838,0.07892,0.07758,0.07475,0.0785,0.08436,0.05858,0.07051,0.07713,0.07817,0.08798,0.08218,0.0695,0.07235,0.0611,0.06888,0.05897,0.05122,0.04284,0.07229,0.00589,5e-05,0.02859,0.00521,0.0,8e-05,0,0,0,2e-05,0.0,0,0.02259,5e-05,0.00176,0.01652,4e-05,0,6e-05,0.00093,0.41253,0.50387,0.22002,0.21432,0.20003,0.11296,0.09109,0.15652,0.1497,0.19005,0.0847,0.04167,0.03352,0.01453,0,0,0.04435,0.14828,0.18436,0.20282,0.07883,0.01633,2e-05,0.04865,0.06923,0.07922,0.06911,0.07817,0.07229,0.02407],6666782,12514559,"default settings",10221281,"copy instructions and addresses",0,""],["bsdiff","bytes it cannot align, plus mismatches inside aligned regions",[0.03606,0.03031,0.0324,0.03402,0.03506,0.03592,0.05132,0.0577,0.05975,0.04843,0.06527,0.07624,0.07159,0.09079,0.09168,0.07541,0.06836,0.09404,0.08949,0.10798,0.10087,0.09961,0.09913,0.09293,0.0969,0.09198,0.06317,0.07291,0.07723,0.07936,0.09678,0.08823,0.06699,0.07372,0.0563,0.06487,0.05005,0.03639,0.03184,0.0594,0.00453,9e-05,0.09662,0.00942,0,0.00024,0,0,0,1e-05,0,0,0.08733,6e-05,0.00093,0.00904,2e-05,0,2e-05,0.0007,0.28978,0.49492,0.18862,0.25041,0.27987,0.25131,0.25993,0.28215,0.25651,0.27319,0.17358,0.05135,0.06877,0.04227,0,0,0.08181,0.28178,0.32537,0.48771,0.13784,0.03116,2e-05,0.06314,0.13459,0.15939,0.15595,0.1698,0.11802,0.08362],8707739,2691644,"bzip2",202440,"control stream",0,""],["Zucchini","bytes it cannot copy, plus its single-byte corrections; reference corrections are counted separately",[0.00692,0.0044,0.00525,0.00603,0.00695,0.00574,0.00527,0.00609,0.00737,0.00507,0.01254,0.00719,0.00782,0.00942,0.00586,0.00609,0.00708,0.01159,0.00563,0.00849,0.00726,0.00669,0.00711,0.00702,0.00703,0.01463,0.00879,0.00663,0.00795,0.01129,0.0091,0.0074,0.00684,0.00687,0.00644,0.00663,0.00588,0.00616,0.0058,0.00992,0.0004,0.00014,0.09731,0.00943,1e-05,0.0006,0,0,0,2e-05,2e-05,0,0.08905,7e-05,0.00093,0.00928,4e-05,0.00025,2e-05,0.00076,0.23018,0.3674,0.18861,0.25537,0.32463,0.27186,0.28337,0.31282,0.28093,0.29384,0.17662,0.05147,0.06917,0.04227,0,0,0.08194,0.36671,0.46378,0.53784,0.13784,0.03374,4e-05,0.06513,0.13989,0.17431,0.17311,0.20615,0.12508,0.08427],6495459,2183184,"xz",149064,"equivalences and extra targets",1438689,"1.42 M reference corrections"],["presage","bytes the prediction gets wrong",[0.00079,5e-05,2e-05,7e-05,5e-05,0.0008,0.00027,0.00012,2e-05,0.00019,0.02353,0.00048,5e-05,2e-05,2e-05,4e-05,0.0,4e-05,0.0,0,5e-05,5e-05,2e-05,1e-05,1e-05,4e-05,4e-05,0.00013,3e-05,0.0,6e-05,1e-05,0.00126,1e-05,6e-05,0.00012,0.0001,7e-05,0.0001,0.00166,0.00053,0.0007,0.00199,0.00021,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4e-05,0.00023,0.0021,7e-05,4e-05,2e-05,0.00014,0.00018,0.00037,0.00021,0,0,0,0,0,0,0.00075,0.00148,0.00259,9e-05,0.00056,0.0001,0.00075,0.00129,0.00146,0.00099,0.0004,0.00359,0.00167],54520,70195,"brotli-11",280959,"plan",0,""]]};
+const STRIP={"total":97577304,"slice":1048576,"secs":[[".text",4096,42429777],[".rodata",42434560,19354777],[".gopclntab",61789344,34621634]],"rows":[["rsync (4 KB)","bytes in blocks with no identical block in the old file",[0.99609,1,0.98438,1,1,0.99219,1,1,1,1,1,1,1,1,1,0.99219,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0.99219,1,0.99609,1,1,1,1,1,0.71497,0.08999,0.82395,0.78125,0.77811,0.80078,0.90939,0.9375,0.91797,0.9375,0.90234,0.99219,0.16636,0.05043,0,0,0,0.71289,0.89453,0.00597,0.04868,0,0,0,0,0.00788,0.00437,0,0.36669,0.02409,0.00828,0.16182,0.03516,0.02342,0.13291,0.07424,0.59477,1,1,1,1,1,1,1,1,1,1,0.88672,0.97656,0.70852,0.29539,0.94141,0.47656,1],70457688,13669828,"librsync delta, xz",1879,"copy commands",0,""],["xdelta3","bytes it sends literally; everything else is copy instructions",[0.03899,0.03313,0.03587,0.04038,0.03514,0.04638,0.05592,0.05938,0.06211,0.04935,0.06756,0.06293,0.06174,0.07382,0.06932,0.0622,0.05602,0.07174,0.05764,0.07184,0.06683,0.06754,0.06866,0.06525,0.06973,0.06992,0.04602,0.0554,0.06815,0.06807,0.07334,0.06895,0.06103,0.06568,0.0565,0.06012,0.05737,0.04467,0.03789,0.06827,0.02096,6e-05,0.03766,0.03092,0.03239,0.04422,0.05594,0.06827,0.07892,0.10812,0.09587,0.13257,0.01676,0.00337,0,0,0,0.04974,0.00865,0,6e-05,0,0,0,0,1e-05,0,0,0.01895,3e-05,0.00087,0.01418,1e-05,0,0.00071,0.00012,0.51797,0.426,0.19574,0.18839,0.1861,0.10752,0.08892,0.13822,0.14567,0.18753,0.09733,0.03345,0.03089,0.0171,0.01345,0.09596,0.09738,0.02702],6018234,11238692,"-9, 256 MB window",9395864,"copy instructions and addresses",0,""],["bsdiff","bytes it cannot align, plus mismatches inside aligned regions",[0.03523,0.02871,0.03156,0.03485,0.0315,0.03994,0.05296,0.05336,0.05693,0.04298,0.06896,0.06591,0.06451,0.08444,0.07853,0.06876,0.06249,0.08746,0.07943,0.09993,0.09292,0.09031,0.09167,0.08533,0.09036,0.08167,0.05357,0.06223,0.07105,0.08016,0.08646,0.07593,0.06388,0.07952,0.06261,0.06376,0.05687,0.04058,0.03838,0.06688,0.02476,0.00011,0.12341,0.0713,0.08574,0.11117,0.1207,0.13921,0.14929,0.21488,0.18551,0.27476,0.02685,0.00341,0,0,0,0.13295,0.03691,0,0.00027,0,0,0,0,1e-05,0,0,0.09446,4e-05,0.0006,0.00873,2e-05,0,0.0006,0.0001,0.40935,0.42844,0.19606,0.245,0.28671,0.26068,0.263,0.2841,0.26064,0.27369,0.23034,0.05699,0.06928,0.05608,0.02356,0.18763,0.14162,0.0671],8478153,2714204,"bzip2",207336,"control stream",0,""],["Zucchini","bytes it cannot copy, plus its single-byte corrections",[0.03527,0.02871,0.03156,0.03485,0.0315,0.04001,0.05302,0.05336,0.05693,0.04301,0.07096,0.06687,0.06486,0.0851,0.07866,0.0691,0.06254,0.08746,0.07948,0.09993,0.09292,0.09031,0.09167,0.08535,0.09036,0.08197,0.05357,0.06421,0.07116,0.08017,0.08657,0.07593,0.06657,0.08058,0.06395,0.06443,0.05735,0.04067,0.0384,0.06682,0.0248,0.00021,0.10601,0.0713,0.08571,0.12327,0.13352,0.15948,0.18086,0.29178,0.23849,0.39382,0.03878,0.00347,0,0,0,0.13367,0.03693,1e-05,0.00063,0,0,0,0,5e-05,0,0,0.09638,4e-05,0.00051,0.00902,4e-05,1e-05,0.00066,0.00011,0.31955,0.31469,0.19611,0.25285,0.32649,0.27372,0.28038,0.31531,0.28295,0.30124,0.23454,0.05701,0.06956,0.05608,0.02353,0.19598,0.14383,0.0671],8801060,3012208,"raw mode, xz",107827,"equivalences and extra targets",0,""],["presage","bytes the prediction gets wrong",[0.00019,1e-05,2e-05,4e-05,0.00013,0.00204,2e-05,6e-05,2e-05,0.00036,0.01978,2e-05,1e-05,0,2e-05,6e-05,2e-05,2e-05,2e-05,4e-05,7e-05,0.0001,1e-05,1e-05,1e-05,3e-05,4e-05,2e-05,2e-05,0.0,4e-05,1e-05,0.00113,0.00016,0.00022,8e-05,3e-05,0.00011,1e-05,0.00264,0.00211,0.00025,0.00407,0.00053,0.00103,0.0006,0.00162,0.00169,0.0017,0.00143,0.0019,0.00375,0.00057,0.00398,0,0,0,0.00507,0.00034,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3e-05,0.0001,0.00193,5e-05,7e-05,0.00012,9e-05,0.00012,0.00032,0.00023,0,0,0,0,0.01406,0.06904,0.00085],151482,80425,"presage container",52928,"plan",0,""]]};
 const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const NS='http://www.w3.org/2000/svg';
 function el(t,a,p){const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);p.appendChild(e);return e}
-function tip(e,txt){const t=el('title',{},e);t.textContent=txt;return e}
+const tipEl=document.getElementById('tip');
+const coarse=matchMedia('(hover:none), (pointer:coarse)').matches;
+let tipText=null;
+const setText=t=>{if(t!==tipText){tipEl.textContent=t;tipText=t}};
+function hideTip(){tipEl.style.opacity=0}
+function showTip(text,x,y){
+  setText(text);tipEl.classList.remove('pin');tipEl.style.opacity=1;
+  const r=tipEl.getBoundingClientRect(),m=8;
+  let L=x+14,T=y-r.height-14;
+  if(L+r.width>innerWidth-m)L=x-14-r.width;
+  if(L<m)L=m;
+  if(L+r.width>innerWidth-m)L=Math.max(m,innerWidth-m-r.width);
+  if(T<m)T=y+20;
+  if(T+r.height>innerHeight-m)T=Math.max(m,innerHeight-m-r.height);
+  tipEl.style.left=L+'px';tipEl.style.top=T+'px';
+}
+function pinTip(text){setText(text);tipEl.style.left='';tipEl.style.top='';tipEl.classList.add('pin');tipEl.style.opacity=1}
+function hover(e,text){
+  if(coarse){e.addEventListener('click',ev=>{ev.stopPropagation();pinTip(text)})}
+  else{e.addEventListener('mousemove',ev=>showTip(text,ev.clientX,ev.clientY));e.addEventListener('mouseleave',hideTip)}
+}
+if(coarse){document.addEventListener('click',hideTip);addEventListener('scroll',hideTip,{passive:true,capture:true})}
+function tip(e,txt){hover(e,txt);return e}
 const fmt=n=>n.toLocaleString('en-US');
 const mb=n=>n<1e5?(n/1e6).toFixed(3):n<1e6?(n/1e6).toFixed(2):(n/1e6).toFixed(1);
 function drawSections(){
   const host=document.getElementById('sections');host.innerHTML='';
   const W=840,H=100,ink2=css('--ink2'),muted=css('--muted'),plan=css('--plan'),fix=css('--fix'),go=css('--go'),paper=css('--paper');
-  const parts=[['.text','machine code',42116561,ink2],['.rodata','constants and strings',3678233,fix],['.gopclntab','function table, pc/line tables, stack maps',35205370,go],['.go.type','type descriptors',11770480,plan],['other','.noptrdata, .data and the small sections',998910,muted]];
+  const parts=[['.text','machine code',42429777,ink2],['.rodata','constants, strings and type descriptors',19354777,fix],['.gopclntab','function table, pc/line tables, stack maps',34621634,go],['other','.typelink, .noptrdata, .data and the small sections',1171116,muted]];
   const tot=parts.reduce((a,p)=>a+p[2],0);
   const s=el('svg',{viewBox:`0 0 ${W} ${H}`,class:'strip',role:'img','aria-label':'Prometheus 3.13.2 by section'},host);
   let x=0;
   parts.forEach(([nm,desc,n,col])=>{const w=n/tot*W;
-    tip(el('rect',{x,y:14,width:Math.max(w-1.5,0.5),height:50,fill:col},s),`${nm} — ${desc}: ${fmt(n)} B (${(100*n/tot).toFixed(1)}%)`);
+    tip(el('rect',{x,y:14,width:Math.max(w-1.5,0.5),height:50,fill:col},s),`${nm} ${(100*n/tot).toFixed(1)}% · ${desc}`);
     if(w>70){const t=el('text',{x:x+8,y:36,'font-size':13,'font-weight':500,fill:paper},s);t.textContent=nm;const u=el('text',{x:x+8,y:54,'font-size':11,fill:paper,opacity:.85},s);u.textContent=(n/1e6).toFixed(1)+' MB'}
     x+=w});
   const a=el('text',{x:0,y:84,'font-size':11,fill:muted},s);a.textContent='0';
   const b=el('text',{x:W,y:84,'font-size':11,fill:muted,'text-anchor':'end'},s);b.textContent=(tot/1e6).toFixed(1)+' MB';
+}
+function drawPcblob(){
+  const host=document.getElementById('pcblob');host.innerHTML='';
+  const names=['pcsp','pcfile','pcln','stack map','inline tree','arg liveness'];
+  const oldL=[20,31,35,12,25,22],newL=[20,38,42,17,33,29];
+  const W=840,L=46,px=3.6,bh=34,yo=44,yn=150,H=222,tail=84;
+  const ink=css('--ink'),ink2=css('--ink2'),muted=css('--muted'),fix=css('--fix'),paper=css('--paper');
+  const s=el('svg',{viewBox:`0 0 ${W} ${H}`,class:'strip',role:'img','aria-label':'The edited function\'s pc-value tables before and after the edit'},host);
+  const t=(x,y,txt,a)=>{const e=el('text',Object.assign({x,y,'font-size':11,fill:muted},a||{}),s);e.textContent=txt;return e};
+  const row=(y,lens,label,changed)=>{
+    t(0,y+bh/2+4,label,{fill:ink,'font-size':12,'font-weight':600});
+    let x=L,starts=[];
+    lens.forEach((n,i)=>{const w=n*px;starts.push(x);
+      const grew=changed&&n!==oldL[i];
+      tip(el('rect',{x,y,width:w-1,height:bh,fill:grew?fix:ink2,opacity:grew?1:.55},s),`${names[i]} ${n}${grew?` (+${n-oldL[i]})`:''}`);
+      t(x+w/2-0.5,y+bh/2+4,String(n),{fill:paper,'text-anchor':'middle','font-size':11,'font-weight':grew?700:400});
+      x+=w});
+    starts.push(x);
+    tip(el('rect',{x,y,width:tail,height:bh,fill:muted,opacity:.35},s),'next function');
+    t(x+tail/2,y+bh/2+4,'next fn …',{'text-anchor':'middle',fill:ink});
+    return starts;
+  };
+  const so=row(yo,oldL,'old',false), sn=row(yn,newL,'new',true);
+  // table names above the old row, two tiers to keep neighbours apart
+  names.forEach((nm,i)=>{const cx=so[i]+(so[i+1]-so[i])/2,tier=(i>=3&&i%2)?1:0;t(cx,yo-8-tier*13,nm,{'text-anchor':'middle',fill:ink})});
+  // shift lines from each old start to its new start
+  so.forEach((x,i)=>{const nx=sn[i],d=Math.round((nx-x)/px);
+    el('line',{x1:x,y1:yo+bh,x2:nx,y2:yn,stroke:d?fix:muted,'stroke-width':1,'stroke-dasharray':d?'':'2 3'},s);
+    if(d)t(nx+3,yn-6,'+'+d,{fill:fix,'font-weight':700})});
+  t(L,H-10,'0');t(L+oldL.reduce((a,b)=>a+b)*px,H-10,'145 → 179 bytes',{'text-anchor':'end'});
 }
 function drawStrip(){
   const host=document.getElementById('posstrip');host.innerHTML='';
@@ -236,14 +293,14 @@ function drawStrip(){
     const y=top+ri*(rowH+gap),isP=r[0]==='presage',bold=isP?700:400,col=isP?go:fix;
     t(0,y+rowH/2-2,r[0],{'font-size':12,fill:ink,'font-weight':bold});
     t(0,y+rowH/2+10,mb(r[3])+' MB ('+(100*r[3]/total).toFixed(r[3]/total<0.01?2:1)+'%)',{'font-size':10});
-    r[2].forEach((f,i)=>{tip(el('rect',{x:labelW+i*bw,y,width:Math.min(bw,stripW-i*bw)+0.3,height:rowH,fill:col,opacity:shade(f)},s),`${r[0]} · ${i}–${i+1} MiB: ${(f*100).toFixed(2)}% of bytes — ${r[1]}`)});
+    r[2].forEach((f,i)=>{tip(el('rect',{x:labelW+i*bw,y,width:Math.min(bw,stripW-i*bw)+0.3,height:rowH,fill:col,opacity:shade(f)},s),`${(f*100).toFixed(1)}%`)});
     let ax=labelW+stripW+4;
-    if(r[8]>0){const w=Math.max(2,r[8]*px);tip(el('rect',{x:ax,y,width:w,height:rowH,fill:fix},s),`${r[0]}: ${r[9]}, ${mb(r[8])} MB`);ax+=w+1}
-    if(r[6]>0){const w=Math.max(2,r[6]*px);tip(el('rect',{x:ax,y,width:w,height:rowH,fill:plan},s),`${r[0]}: ${r[7]}, ${mb(r[6])} MB`)}
+    if(r[8]>0){const w=Math.max(2,r[8]*px);tip(el('rect',{x:ax,y,width:w,height:rowH,fill:fix},s),`${mb(r[8])} MB corrections`);ax+=w+1}
+    if(r[6]>0){const w=Math.max(2,r[6]*px);tip(el('rect',{x:ax,y,width:w,height:rowH,fill:plan},s),`${mb(r[6])} MB plan`)}
     const raw=r[3]+r[6]+r[8];
-    tip(t(W-130,y+rowH/2+4,mb(raw)+' MB',{'font-size':13,fill:ink2,'text-anchor':'end','font-weight':bold}),`${mb(r[3])} literal${r[8]?` + ${mb(r[8])} corrections`:''}${r[6]?` + ${mb(r[6])} plan`:''} = ${mb(raw)} MB`);
+    tip(t(W-130,y+rowH/2+4,mb(raw)+' MB',{'font-size':13,fill:ink2,'text-anchor':'end','font-weight':bold}),`${mb(r[3])} literal`);
     t(W-124,y+rowH/2+4,'→',{'font-size':13});
-    tip(t(W,y+rowH/2+4,mb(r[4])+' MB',{'font-size':13,fill:ink,'text-anchor':'end','font-weight':bold}),`${fmt(r[4])} B, ${r[5]}`);
+    tip(t(W,y+rowH/2+4,mb(r[4])+' MB',{'font-size':13,fill:ink,'text-anchor':'end','font-weight':bold}),`${fmt(r[4])} B`);
   });
   const by=top+rows.length*(rowH+gap)+2;
   STRIP.secs.forEach(([nm,off,len])=>{const x=labelW+off/total*stripW,w=len/total*stripW;
@@ -252,7 +309,7 @@ function drawStrip(){
     el('line',{x1:x+w,x2:x+w,y1:by+2,y2:by+10,stroke:ink,'stroke-width':1.5},s);
     t(x+w/2,by+(nm==='.rodata'?36:24),nm,{fill:ink,'text-anchor':'middle'})});
 }
-function drawAll(){drawSections();drawStrip()}
+function drawAll(){drawSections();drawPcblob();drawStrip()}
 drawAll();
 const mq=matchMedia('(prefers-color-scheme: dark)');mq.addEventListener&&mq.addEventListener('change',drawAll);
 new MutationObserver(drawAll).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
